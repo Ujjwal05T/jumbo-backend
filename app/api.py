@@ -5,6 +5,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Dict, Any, Optional
 import logging
 import uuid
+import json
+from uuid import UUID
 
 from . import crud, schemas, models, database, auth
 
@@ -180,7 +182,59 @@ def read_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db),
 @router.post("/orders/", response_model=schemas.Order)
 def create_order(order: schemas.OrderCreate, db: Session = Depends(get_db),
                 current_user: models.User = Depends(auth.get_current_active_user)):
+    """
+    Create a new order directly from form input
+    """
     return crud.create_order(db=db, order=order, created_by=current_user.id)
+
+@router.post("/orders/from-message", response_model=schemas.Order)
+def create_order_from_message(
+    message_id: UUID,
+    order_data: Optional[schemas.OrderCreate] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """
+    Create a new order from a parsed message
+    """
+    # Get the parsed message
+    message = db.query(models.ParsedMessage).filter(models.ParsedMessage.id == message_id).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    # If order_data is provided, use it; otherwise, try to use the parsed JSON
+    if not order_data and message.parsed_json:
+        try:
+            # Parse the JSON data from the message
+            parsed_data = json.loads(message.parsed_json)
+            
+            # Convert to OrderCreate schema
+            order_data = schemas.OrderCreate(
+                customer_name=parsed_data.get("customer_name", "Unknown"),
+                width_inches=parsed_data.get("width_inches", 0),
+                gsm=parsed_data.get("gsm", 0),
+                bf=parsed_data.get("bf", 0),
+                shade=parsed_data.get("shade", ""),
+                quantity_rolls=parsed_data.get("quantity_rolls", 0),
+                quantity_tons=parsed_data.get("quantity_tons"),
+                source_message_id=message_id
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Failed to parse order data from message: {str(e)}"
+            )
+    elif not order_data:
+        raise HTTPException(
+            status_code=400,
+            detail="No order data provided and message has no parsed JSON"
+        )
+    else:
+        # Make sure the source_message_id is set
+        order_data.source_message_id = message_id
+    
+    # Create the order
+    return crud.create_order(db=db, order=order_data, created_by=current_user.id)
 
 @router.get("/orders/", response_model=List[schemas.Order])
 def read_orders(
@@ -294,7 +348,7 @@ def read_order_details(
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
     """
-    Get detailed order information including related WhatsApp message and cut rolls.
+    Get detailed order information including related parsed message and cut rolls.
     """
     db_order = crud.get_order_with_details(db, order_id=order_id)
     if db_order is None:
@@ -323,11 +377,21 @@ def delete_order(
     
     return {"success": True, "message": "Order deleted or cancelled successfully"}
 
-# WhatsApp message endpoints
-@router.post("/whatsapp/", response_model=schemas.WhatsAppMessage)
-def create_whatsapp_message(message: schemas.WhatsAppMessageCreate, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(auth.get_current_active_user)):
-    return crud.create_whatsapp_message(db=db, message=message, created_by=current_user.id)
+# Message parsing endpoints
+@router.post("/messages/", response_model=schemas.ParsedMessage)
+def create_parsed_message(message: schemas.ParsedMessageCreate, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(auth.get_current_active_user)):
+    return crud.create_parsed_message(db=db, message=message, created_by=current_user.id)
+
+@router.post("/messages/parse", response_model=schemas.ParsedMessage)
+def parse_message(message: schemas.ParsedMessageCreate, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(auth.get_current_active_user)):
+    # Create the message first
+    db_message = crud.create_parsed_message(db=db, message=message, created_by=current_user.id)
+    
+    # TODO: Implement GPT parsing logic here
+    # For now, just return the created message
+    return db_message
 
 # Jumbo roll endpoints
 @router.post("/jumbo-rolls/", response_model=schemas.JumboRoll)

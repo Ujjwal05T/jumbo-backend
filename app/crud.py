@@ -36,11 +36,10 @@ def update_user_last_login(db: Session, user_id: UUID):
         db.refresh(db_user)
     return db_user
 
-# WhatsApp message CRUD operations
-def create_whatsapp_message(db: Session, message: schemas.WhatsAppMessageCreate, created_by: Optional[UUID] = None):
-    db_message = models.WhatsAppMessage(
+# Parsed message CRUD operations
+def create_parsed_message(db: Session, message: schemas.ParsedMessageCreate, created_by: Optional[UUID] = None):
+    db_message = models.ParsedMessage(
         raw_message=message.raw_message,
-        sender=message.sender,
         created_by=created_by
     )
     db.add(db_message)
@@ -48,8 +47,8 @@ def create_whatsapp_message(db: Session, message: schemas.WhatsAppMessageCreate,
     db.refresh(db_message)
     return db_message
 
-def update_whatsapp_message_parsing(db: Session, message_id: UUID, update: schemas.WhatsAppMessageUpdate):
-    db_message = db.query(models.WhatsAppMessage).filter(models.WhatsAppMessage.id == message_id).first()
+def update_parsed_message(db: Session, message_id: UUID, update: schemas.ParsedMessageUpdate):
+    db_message = db.query(models.ParsedMessage).filter(models.ParsedMessage.id == message_id).first()
     if db_message:
         if update.parsed_json is not None:
             db_message.parsed_json = update.parsed_json
@@ -61,8 +60,8 @@ def update_whatsapp_message_parsing(db: Session, message_id: UUID, update: schem
         db.refresh(db_message)
     return db_message
 
-def get_whatsapp_messages(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.WhatsAppMessage).offset(skip).limit(limit).all()
+def get_parsed_messages(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.ParsedMessage).offset(skip).limit(limit).all()
 
 # Order CRUD operations
 def get_order(db: Session, order_id: UUID):
@@ -297,7 +296,7 @@ def update_cutting_plan(db: Session, plan_id: UUID, update: schemas.CuttingPlanU
 
 def get_order_with_details(db: Session, order_id: UUID):
     """
-    Get an order with related WhatsApp message and cut rolls.
+    Get an order with related parsed message and cut rolls.
     """
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     
@@ -306,7 +305,7 @@ def get_order_with_details(db: Session, order_id: UUID):
     
     # Load relationships
     if order.source_message_id:
-        db.query(models.WhatsAppMessage).filter(models.WhatsAppMessage.id == order.source_message_id).first()
+        db.query(models.ParsedMessage).filter(models.ParsedMessage.id == order.source_message_id).first()
     
     db.query(models.CutRoll).filter(models.CutRoll.order_id == order.id).all()
     

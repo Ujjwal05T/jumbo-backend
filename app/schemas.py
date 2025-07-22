@@ -37,20 +37,19 @@ class UserSession(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
 
-# WhatsApp message schemas
-class WhatsAppMessageBase(BaseModel):
+# Parsed message schemas
+class ParsedMessageBase(BaseModel):
     raw_message: str = Field(..., min_length=1)
-    sender: Optional[str] = Field(None, max_length=100)
 
-class WhatsAppMessageCreate(WhatsAppMessageBase):
+class ParsedMessageCreate(ParsedMessageBase):
     pass
 
-class WhatsAppMessageUpdate(BaseModel):
+class ParsedMessageUpdate(BaseModel):
     parsed_json: Optional[str] = None
     parsing_confidence: Optional[Decimal] = Field(None, ge=0, le=100)
     parsing_status: Optional[str] = Field(None, pattern="^(pending|success|failed)$")
 
-class WhatsAppMessage(WhatsAppMessageBase):
+class ParsedMessage(ParsedMessageBase):
     id: UUID
     received_at: datetime
     parsed_json: Optional[str] = None
@@ -180,7 +179,7 @@ class CuttingPlan(CuttingPlanBase):
 
 # Response schemas for complex queries
 class OrderWithDetails(Order):
-    source_message: Optional[WhatsAppMessage] = None
+    source_message: Optional[ParsedMessage] = None
     cut_rolls: List[CutRoll] = []
 
 class CutRollWithInventory(CutRoll):
@@ -211,7 +210,7 @@ class InventoryFilter(BaseModel):
 
 # Response schemas for complex queries
 class OrderWithDetails(Order):
-    source_message: Optional[WhatsAppMessage] = None
+    source_message: Optional[ParsedMessage] = None
     cut_rolls: List["CutRoll"] = []
     
     model_config = ConfigDict(from_attributes=True)

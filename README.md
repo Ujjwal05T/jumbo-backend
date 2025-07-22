@@ -26,7 +26,7 @@ backend/
 │   │   ├── cutting.py      # Cutting optimization service
 │   │   ├── inventory.py    # Inventory service
 │   │   ├── qrcode.py       # QR code service
-│   │   └── whatsapp.py     # WhatsApp parser service
+│   │   └── message_parser.py # Message parser service
 │   ├── utils/              # Utility functions
 │   └── main.py             # FastAPI application creation
 ├── alembic/                # Database migrations

@@ -20,7 +20,7 @@ class User(Base):
     # Relationships
     sessions = relationship("UserSession", back_populates="user")
     created_orders = relationship("Order", back_populates="created_by_user")
-    created_messages = relationship("WhatsAppMessage", back_populates="created_by_user")
+    created_messages = relationship("ParsedMessage", back_populates="created_by_user")
     created_jumbo_rolls = relationship("JumboRoll", back_populates="created_by_user")
     created_cut_rolls = relationship("CutRoll", back_populates="created_by_user")
     created_cutting_plans = relationship("CuttingPlan", back_populates="created_by_user")
@@ -39,16 +39,14 @@ class UserSession(Base):
     # Relationships
     user = relationship("User", back_populates="sessions")
 
-# WhatsApp message model
-class WhatsAppMessage(Base):
-    __tablename__ = "whatsapp_messages"
+# Parsed message model
+class ParsedMessage(Base):
+    __tablename__ = "parsed_messages"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    raw_message = Column(Text, nullable=False)  # Store full WhatsApp message
-    sender = Column(String(100))
+    raw_message = Column(Text, nullable=False)  # Store full message text
     received_at = Column(DateTime, default=datetime.utcnow)
     parsed_json = Column(Text)  # Store parsed JSON data
-    parsing_confidence = Column(DECIMAL(5, 2))  # Confidence score from GPT parsing
     parsing_status = Column(String(20), nullable=False, default="pending")  # pending, success, failed
     created_by = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
     
@@ -69,13 +67,13 @@ class Order(Base):
     quantity_rolls = Column(Integer, nullable=False)  # Number of rolls
     quantity_tons = Column(DECIMAL(8, 2))  # Weight in tons (optional)
     status = Column(String(20), default="pending", nullable=False)  # pending, processing, completed, cancelled
-    source_message_id = Column(UNIQUEIDENTIFIER, ForeignKey("whatsapp_messages.id"))
+    source_message_id = Column(UNIQUEIDENTIFIER, ForeignKey("parsed_messages.id"))
     created_by = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    source_message = relationship("WhatsAppMessage", back_populates="orders")
+    source_message = relationship("ParsedMessage", back_populates="orders")
     created_by_user = relationship("User", back_populates="created_orders")
     cut_rolls = relationship("CutRoll", back_populates="order")
     inventory_allocations = relationship("InventoryItem", back_populates="allocated_order")
@@ -161,6 +159,6 @@ Index('idx_cut_rolls_status', CutRoll.status)
 Index('idx_jumbo_rolls_specs', JumboRoll.gsm, JumboRoll.bf, JumboRoll.shade)
 Index('idx_jumbo_rolls_status', JumboRoll.status)
 Index('idx_inventory_allocation', InventoryItem.allocated_to_order)
-Index('idx_whatsapp_parsing_status', WhatsAppMessage.parsing_status)
+Index('idx_parsed_message_parsing_status', ParsedMessage.parsing_status)
 Index('idx_user_sessions_token', UserSession.session_token)
 Index('idx_user_sessions_active', UserSession.is_active, UserSession.expires_at)
