@@ -1,216 +1,177 @@
-from pydantic import BaseModel, Field, ConfigDict
-from datetime import datetime
 from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from datetime import datetime
+from enum import Enum
 from uuid import UUID
-from decimal import Decimal
+from pydantic import EmailStr
 
-# User schemas
-class UserBase(BaseModel):
-    username: str = Field(..., min_length=3, max_length=50)
-    role: str = Field(default="operator", pattern="^(operator|manager|admin)$")
-
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=6)
-
-class UserUpdate(BaseModel):
-    password: Optional[str] = Field(None, min_length=6)
-    role: Optional[str] = Field(None, pattern="^(operator|manager|admin)$")
-
-class User(UserBase):
-    id: UUID
-    created_at: datetime
-    last_login: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
-
-# User session schemas
-class UserSessionCreate(BaseModel):
-    user_id: UUID
-    expires_at: datetime
-
-class UserSession(BaseModel):
-    id: UUID
-    user_id: UUID
-    session_token: str
-    created_at: datetime
-    expires_at: datetime
-    is_active: bool
-    
-    model_config = ConfigDict(from_attributes=True)
-
-# Parsed message schemas
-class ParsedMessageBase(BaseModel):
-    raw_message: str = Field(..., min_length=1)
-
-class ParsedMessageCreate(ParsedMessageBase):
-    pass
-
-class ParsedMessageUpdate(BaseModel):
-    parsed_json: Optional[str] = None
-    parsing_confidence: Optional[Decimal] = Field(None, ge=0, le=100)
-    parsing_status: Optional[str] = Field(None, pattern="^(pending|success|failed)$")
-
-class ParsedMessage(ParsedMessageBase):
-    id: UUID
-    received_at: datetime
-    parsed_json: Optional[str] = None
-    parsing_confidence: Optional[Decimal] = None
-    parsing_status: str
-    created_by: Optional[UUID] = None
-    
-    model_config = ConfigDict(from_attributes=True)
-
-# Order schemas
+# Shared properties
 class OrderBase(BaseModel):
-    customer_name: str = Field(..., min_length=1, max_length=255)
-    width_inches: int = Field(..., gt=0, le=200)
-    gsm: int = Field(..., gt=0, le=1000)
-    bf: Decimal = Field(..., ge=0, le=100)
-    shade: str = Field(..., min_length=1, max_length=50)
-    quantity_rolls: int = Field(..., gt=0)
-    quantity_tons: Optional[Decimal] = Field(None, ge=0)
-
-class OrderCreate(OrderBase):
+    customer_name: str
+    width_inches: int
+    gsm: int
+    bf: float
+    shade: str
+    quantity_rolls: int
+    quantity_tons: Optional[float] = None
+    status: Optional[str] = "pending"
     source_message_id: Optional[UUID] = None
 
+class OrderCreate(OrderBase):
+    pass
+
 class OrderUpdate(BaseModel):
-    status: Optional[str] = Field(None, pattern="^(pending|processing|completed|cancelled)$")
-    quantity_rolls: Optional[int] = Field(None, gt=0)
-    quantity_tons: Optional[Decimal] = Field(None, ge=0)
+    status: Optional[str] = None
+    quantity_rolls: Optional[int] = None
+    quantity_tons: Optional[float] = None
 
 class Order(OrderBase):
     id: UUID
-    status: str
-    source_message_id: Optional[UUID] = None
-    created_by: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
-    
-    model_config = ConfigDict(from_attributes=True)
 
-# Jumbo roll schemas
+    class Config:
+        from_attributes = True
+
+# Jumbo Roll schemas
 class JumboRollBase(BaseModel):
-    width_inches: int = Field(default=119, gt=0, le=200)
-    weight_kg: int = Field(default=4500, gt=0)
-    gsm: int = Field(..., gt=0, le=1000)
-    bf: Decimal = Field(..., ge=0, le=100)
-    shade: str = Field(..., min_length=1, max_length=50)
-    production_date: datetime
+    roll_number: str
+    width_inches: int
+    gsm: int
+    bf: float
+    shade: str
+    weight_kg: float
+    is_used: bool = False
 
 class JumboRollCreate(JumboRollBase):
     pass
 
 class JumboRollUpdate(BaseModel):
-    status: Optional[str] = Field(None, pattern="^(available|cutting|used)$")
+    is_used: Optional[bool] = None
 
 class JumboRoll(JumboRollBase):
     id: UUID
-    status: str
-    created_by: Optional[UUID] = None
-    
-    model_config = ConfigDict(from_attributes=True)
+    created_at: datetime
 
-# Cut roll schemas
+    class Config:
+        from_attributes = True
+
+# Cut Roll schemas
 class CutRollBase(BaseModel):
-    width_inches: int = Field(..., gt=0, le=200)
-    gsm: int = Field(..., gt=0, le=1000)
-    bf: Decimal = Field(..., ge=0, le=100)
-    shade: str = Field(..., min_length=1, max_length=50)
-    weight_kg: Optional[Decimal] = Field(None, ge=0)
-
-class CutRollCreate(CutRollBase):
-    jumbo_roll_id: UUID
+    roll_number: str
+    width_inches: int
+    gsm: int
+    bf: float
+    shade: str
+    weight_kg: float
+    qr_code_path: Optional[str] = None
     order_id: Optional[UUID] = None
 
+class CutRollCreate(CutRollBase):
+    pass
+
 class CutRollUpdate(BaseModel):
-    weight_kg: Optional[Decimal] = Field(None, ge=0)
-    status: Optional[str] = Field(None, pattern="^(cut|weighed|allocated|used)$")
+    weight_kg: Optional[float] = None
+    status: Optional[str] = None
+    order_id: Optional[UUID] = None
 
 class CutRoll(CutRollBase):
     id: UUID
-    jumbo_roll_id: UUID
-    qr_code: str
-    cut_date: datetime
-    status: str
-    order_id: Optional[UUID] = None
-    created_by: Optional[UUID] = None
-    
-    model_config = ConfigDict(from_attributes=True)
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Parsed Message schemas
+class ParsedMessageBase(BaseModel):
+    raw_message: str
+    parsed_json: Optional[Dict[str, Any]] = None
+    parsing_confidence: Optional[float] = None
+
+class ParsedMessageCreate(ParsedMessageBase):
+    pass
+
+class ParsedMessageUpdate(BaseModel):
+    parsed_json: Optional[Dict[str, Any]] = None
+    parsing_confidence: Optional[float] = None
+    parsing_status: Optional[str] = None
+
+class ParsedMessage(ParsedMessageBase):
+    id: UUID
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # Inventory schemas
 class InventoryItemBase(BaseModel):
-    location: Optional[str] = Field(None, max_length=100)
+    roll_id: UUID
+    location: Optional[str] = None
+    allocated_to_order: Optional[UUID] = None
 
 class InventoryItemCreate(InventoryItemBase):
-    roll_id: UUID
+    pass
 
 class InventoryItemUpdate(BaseModel):
-    location: Optional[str] = Field(None, max_length=100)
+    location: Optional[str] = None
     allocated_to_order: Optional[UUID] = None
 
 class InventoryItem(InventoryItemBase):
     id: UUID
-    roll_id: UUID
-    allocated_to_order: Optional[UUID] = None
+    created_at: datetime
     last_updated: datetime
-    
-    model_config = ConfigDict(from_attributes=True)
 
-# Cutting plan schemas
+    class Config:
+        from_attributes = True
+
+# Cutting Plan schemas
 class CuttingPlanBase(BaseModel):
-    plan_data: str  # JSON string containing cutting plan details
-    expected_waste_percentage: Optional[Decimal] = Field(None, ge=0, le=100)
+    jumbo_roll_id: UUID
+    plan_data: Dict[str, Any]
+    expected_waste_percentage: float
+    status: str = "planned"
 
 class CuttingPlanCreate(CuttingPlanBase):
-    jumbo_roll_id: UUID
+    pass
 
 class CuttingPlanUpdate(BaseModel):
-    status: Optional[str] = Field(None, pattern="^(planned|approved|executing|completed)$")
-    plan_data: Optional[str] = None
-    expected_waste_percentage: Optional[Decimal] = Field(None, ge=0, le=100)
+    status: Optional[str] = None
+    plan_data: Optional[Dict[str, Any]] = None
+    expected_waste_percentage: Optional[float] = None
 
 class CuttingPlan(CuttingPlanBase):
     id: UUID
-    jumbo_roll_id: UUID
-    status: str
-    created_by: Optional[UUID] = None
     created_at: datetime
-    
-    model_config = ConfigDict(from_attributes=True)
 
-# Response schemas for complex queries
-class OrderWithDetails(Order):
-    source_message: Optional[ParsedMessage] = None
-    cut_rolls: List[CutRoll] = []
+    class Config:
+        from_attributes = True
 
-class CutRollWithInventory(CutRoll):
-    inventory_item: Optional[InventoryItem] = None
+# User schemas
+class UserBase(BaseModel):
+    username: str
 
-class InventoryItemWithRoll(InventoryItem):
-    roll: CutRoll
+class UserCreate(UserBase):
+    password: str
 
-# Filter schemas for search endpoints
-class OrderFilter(BaseModel):
-    customer_name: Optional[str] = None
-    status: Optional[str] = None
-    width_inches: Optional[int] = None
-    gsm: Optional[int] = None
-    bf: Optional[Decimal] = None
-    shade: Optional[str] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
+class UserLogin(UserBase):
+    password: str
 
-class InventoryFilter(BaseModel):
-    width_inches: Optional[int] = None
-    gsm: Optional[int] = None
-    bf: Optional[Decimal] = None
-    shade: Optional[str] = None
-    status: Optional[str] = None
-    allocated: Optional[bool] = None
-    location: Optional[str] = None
+class User(UserBase):
+    id: UUID
+    created_at: datetime
 
-# Response schemas for complex queries
-class OrderWithDetails(Order):
-    source_message: Optional[ParsedMessage] = None
-    cut_rolls: List["CutRoll"] = []
-    
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
+
+# Simple response schemas
+class AuthResponse(BaseModel):
+    status: str
+    username: str
+
+# Token schemas (for future JWT implementation if needed)
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
