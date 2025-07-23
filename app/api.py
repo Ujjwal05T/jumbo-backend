@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # Create tables on startup only if database engine is available
 router = APIRouter()
 
+from .cutting_optimizer import router as cutting_optimizer_router
+router.include_router(cutting_optimizer_router, prefix="/cutting-optimization", tags=["cutting-optimization"])
+
 # Try to create tables, but don't fail if database is not available
 if database.engine is not None:
     try:
@@ -128,6 +131,68 @@ def delete_order(order_id: uuid.UUID, db: Session = Depends(get_db)):
     if not crud.delete_order(db=db, order_id=order_id):
         raise HTTPException(status_code=404, detail="Order not found")
     return Response(status_code=204)
+
+@router.put("/orders/{order_id}/deliver", response_model=schemas.Order)
+async def mark_order_delivered(
+    order_id: UUID,
+    delivery_update: schemas.OrderDeliveryUpdate,
+    db: Session = Depends(get_db),
+):
+    """
+    Mark an order as delivered and update inventory
+    
+    Valid status transitions:
+    - processing -> ready_for_delivery
+    - ready_for_delivery -> in_transit
+    - in_transit -> delivered
+    - Any status -> cancelled (with appropriate validations)
+    """
+    return crud.update_order_delivery(
+        db=db,
+        order_id=order_id,
+        delivery_update=delivery_update,
+        user_id=None  # No user authentication for now
+    )
+
+@router.get("/orders/{order_id}/inventory-logs", response_model=List[schemas.InventoryLog])
+async def get_order_inventory_logs(
+    order_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """Get inventory logs for a specific order"""
+    return crud.get_inventory_logs(
+        db=db,
+        order_id=order_id,
+        skip=skip,
+        limit=limit
+    )
+
+@router.get("/inventory/logs", response_model=List[schemas.InventoryLog])
+async def get_all_inventory_logs(
+    roll_id: Optional[UUID] = None,
+    order_id: Optional[UUID] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """
+    Get inventory logs with optional filtering
+    
+    Parameters:
+    - roll_id: Filter logs by roll ID
+    - order_id: Filter logs by order ID
+    - skip: Number of records to skip (for pagination)
+    - limit: Maximum number of records to return (for pagination)
+    """
+    return crud.get_inventory_logs(
+        db=db,
+        roll_id=roll_id,
+        order_id=order_id,
+        skip=skip,
+        limit=limit
+    )
 
 # Message parsing endpoints
 @router.post("/messages/", response_model=schemas.ParsedMessage)
