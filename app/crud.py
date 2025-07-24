@@ -718,3 +718,513 @@ def create_order_legacy(db: Session, order: schemas.OrderCreate) -> models.Order
         quantity_rolls=order.quantity_rolls,
         created_by_id=client.created_by_id
     ))
+# ============================================================================
+# BULK OPERATIONS - Helper methods for linking orders/inventory to plans
+# ============================================================================
+
+def bulk_link_orders_to_plan(
+    db: Session, 
+    plan_id: uuid.UUID, 
+    order_links: List[Dict[str, Any]]
+) -> List[models.PlanOrderLink]:
+    """
+    Bulk link multiple orders to a plan with specified quantities.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan to link orders to
+        order_links: List of dicts with 'order_id' and 'quantity_allocated'
+        
+    Returns:
+        List of created PlanOrderLink objects
+        
+    Example:
+        order_links = [
+            {'order_id': uuid1, 'quantity_allocated': 5},
+            {'order_id': uuid2, 'quantity_allocated': 3}
+        ]
+    """
+    # Verify plan exists
+    plan = get_plan(db, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    created_links = []
+    
+    for link_data in order_links:
+        order_id = link_data.get('order_id')
+        quantity_allocated = link_data.get('quantity_allocated', 1)
+        
+        # Verify order exists
+        order = get_order(db, order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        
+        # Check if link already exists
+        existing_link = db.query(models.PlanOrderLink).filter(
+            models.PlanOrderLink.plan_id == plan_id,
+            models.PlanOrderLink.order_id == order_id
+        ).first()
+        
+        if existing_link:
+            # Update existing link
+            existing_link.quantity_allocated = quantity_allocated
+            created_links.append(existing_link)
+        else:
+            # Create new link
+            order_link = models.PlanOrderLink(
+                plan_id=plan_id,
+                order_id=order_id,
+                quantity_allocated=quantity_allocated
+            )
+            db.add(order_link)
+            created_links.append(order_link)
+    
+    db.commit()
+    
+    # Refresh all objects to get updated data
+    for link in created_links:
+        db.refresh(link)
+    
+    return created_links
+
+def bulk_link_inventory_to_plan(
+    db: Session, 
+    plan_id: uuid.UUID, 
+    inventory_links: List[Dict[str, Any]]
+) -> List[models.PlanInventoryLink]:
+    """
+    Bulk link multiple inventory items to a plan with specified quantities used.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan to link inventory to
+        inventory_links: List of dicts with 'inventory_id' and 'quantity_used'
+        
+    Returns:
+        List of created PlanInventoryLink objects
+        
+    Example:
+        inventory_links = [
+            {'inventory_id': uuid1, 'quantity_used': 100.5},
+            {'inventory_id': uuid2, 'quantity_used': 250.0}
+        ]
+    """
+    # Verify plan exists
+    plan = get_plan(db, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    created_links = []
+    
+    for link_data in inventory_links:
+        inventory_id = link_data.get('inventory_id')
+        quantity_used = link_data.get('quantity_used', 0.0)
+        
+        # Verify inventory item exists
+        inventory_item = get_inventory_item(db, inventory_id)
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail=f"Inventory item {inventory_id} not found")
+        
+        # Check if link already exists
+        existing_link = db.query(models.PlanInventoryLink).filter(
+            models.PlanInventoryLink.plan_id == plan_id,
+            models.PlanInventoryLink.inventory_id == inventory_id
+        ).first()
+        
+        if existing_link:
+            # Update existing link
+            existing_link.quantity_used = quantity_used
+            created_links.append(existing_link)
+        else:
+            # Create new link
+            inventory_link = models.PlanInventoryLink(
+                plan_id=plan_id,
+                inventory_id=inventory_id,
+                quantity_used=quantity_used
+            )
+            db.add(inventory_link)
+            created_links.append(inventory_link)
+    
+    db.commit()
+    
+    # Refresh all objects to get updated data
+    for link in created_links:
+        db.refresh(link)
+    
+    return created_links
+
+def bulk_unlink_orders_from_plan(
+    db: Session, 
+    plan_id: uuid.UUID, 
+    order_ids: List[uuid.UUID]
+) -> int:
+    """
+    Bulk remove order links from a plan.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan to remove order links from
+        order_ids: List of order IDs to unlink
+        
+    Returns:
+        Number of links removed
+    """
+    # Verify plan exists
+    plan = get_plan(db, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    # Remove links
+    deleted_count = db.query(models.PlanOrderLink).filter(
+        models.PlanOrderLink.plan_id == plan_id,
+        models.PlanOrderLink.order_id.in_(order_ids)
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    return deleted_count
+
+def bulk_unlink_inventory_from_plan(
+    db: Session, 
+    plan_id: uuid.UUID, 
+    inventory_ids: List[uuid.UUID]
+) -> int:
+    """
+    Bulk remove inventory links from a plan.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan to remove inventory links from
+        inventory_ids: List of inventory IDs to unlink
+        
+    Returns:
+        Number of links removed
+    """
+    # Verify plan exists
+    plan = get_plan(db, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    # Remove links
+    deleted_count = db.query(models.PlanInventoryLink).filter(
+        models.PlanInventoryLink.plan_id == plan_id,
+        models.PlanInventoryLink.inventory_id.in_(inventory_ids)
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    return deleted_count
+
+def get_plan_with_all_links(db: Session, plan_id: uuid.UUID) -> Optional[models.PlanMaster]:
+    """
+    Get a plan with all its order and inventory links loaded.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan to retrieve
+        
+    Returns:
+        PlanMaster object with all relationships loaded, or None if not found
+    """
+    return db.query(models.PlanMaster).options(
+        joinedload(models.PlanMaster.plan_orders).joinedload(models.PlanOrderLink.order),
+        joinedload(models.PlanMaster.plan_inventory).joinedload(models.PlanInventoryLink.inventory),
+        joinedload(models.PlanMaster.created_by)
+    ).filter(models.PlanMaster.id == plan_id).first()
+
+def get_plan_order_links(
+    db: Session, 
+    plan_id: uuid.UUID
+) -> List[models.PlanOrderLink]:
+    """
+    Get all order links for a specific plan with order details.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan
+        
+    Returns:
+        List of PlanOrderLink objects with order details loaded
+    """
+    return db.query(models.PlanOrderLink).options(
+        joinedload(models.PlanOrderLink.order).joinedload(models.OrderMaster.client),
+        joinedload(models.PlanOrderLink.order).joinedload(models.OrderMaster.paper)
+    ).filter(models.PlanOrderLink.plan_id == plan_id).all()
+
+def get_plan_inventory_links(
+    db: Session, 
+    plan_id: uuid.UUID
+) -> List[models.PlanInventoryLink]:
+    """
+    Get all inventory links for a specific plan with inventory details.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan
+        
+    Returns:
+        List of PlanInventoryLink objects with inventory details loaded
+    """
+    return db.query(models.PlanInventoryLink).options(
+        joinedload(models.PlanInventoryLink.inventory).joinedload(models.InventoryMaster.paper)
+    ).filter(models.PlanInventoryLink.plan_id == plan_id).all()
+
+def bulk_update_order_fulfillment(
+    db: Session, 
+    order_updates: List[Dict[str, Any]]
+) -> List[models.OrderMaster]:
+    """
+    Bulk update order fulfillment quantities.
+    
+    Args:
+        db: Database session
+        order_updates: List of dicts with 'order_id' and 'quantity_fulfilled'
+        
+    Returns:
+        List of updated OrderMaster objects
+        
+    Example:
+        order_updates = [
+            {'order_id': uuid1, 'quantity_fulfilled': 5},
+            {'order_id': uuid2, 'quantity_fulfilled': 3}
+        ]
+    """
+    updated_orders = []
+    
+    for update_data in order_updates:
+        order_id = update_data.get('order_id')
+        quantity_fulfilled = update_data.get('quantity_fulfilled', 0)
+        
+        # Get order
+        order = get_order(db, order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        
+        # Update fulfillment quantity
+        order.quantity_fulfilled = quantity_fulfilled
+        
+        # Update status based on fulfillment
+        if quantity_fulfilled >= order.quantity:
+            order.status = "completed"
+        elif quantity_fulfilled > 0:
+            order.status = "partially_fulfilled"
+        else:
+            order.status = "pending"
+        
+        order.updated_at = datetime.utcnow()
+        updated_orders.append(order)
+    
+    db.commit()
+    
+    # Refresh all objects
+    for order in updated_orders:
+        db.refresh(order)
+    
+    return updated_orders
+
+def bulk_update_inventory_status(
+    db: Session, 
+    inventory_updates: List[Dict[str, Any]]
+) -> List[models.InventoryMaster]:
+    """
+    Bulk update inventory item statuses.
+    
+    Args:
+        db: Database session
+        inventory_updates: List of dicts with 'inventory_id' and 'status'
+        
+    Returns:
+        List of updated InventoryMaster objects
+        
+    Example:
+        inventory_updates = [
+            {'inventory_id': uuid1, 'status': 'used'},
+            {'inventory_id': uuid2, 'status': 'reserved'}
+        ]
+    """
+    valid_statuses = ["available", "allocated", "cutting", "used", "damaged"]
+    updated_items = []
+    
+    for update_data in inventory_updates:
+        inventory_id = update_data.get('inventory_id')
+        status = update_data.get('status')
+        
+        # Validate status
+        if status not in valid_statuses:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid status '{status}'. Must be one of: {valid_statuses}"
+            )
+        
+        # Get inventory item
+        inventory_item = get_inventory_item(db, inventory_id)
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail=f"Inventory item {inventory_id} not found")
+        
+        # Update status
+        inventory_item.status = status
+        inventory_item.updated_at = datetime.utcnow()
+        updated_items.append(inventory_item)
+    
+    db.commit()
+    
+    # Refresh all objects
+    for item in updated_items:
+        db.refresh(item)
+    
+    return updated_items
+
+def get_orders_by_plan(db: Session, plan_id: uuid.UUID) -> List[models.OrderMaster]:
+    """
+    Get all orders linked to a specific plan.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan
+        
+    Returns:
+        List of OrderMaster objects linked to the plan
+    """
+    return db.query(models.OrderMaster).join(
+        models.PlanOrderLink
+    ).filter(
+        models.PlanOrderLink.plan_id == plan_id
+    ).options(
+        joinedload(models.OrderMaster.client),
+        joinedload(models.OrderMaster.paper),
+        joinedload(models.OrderMaster.created_by)
+    ).all()
+
+def get_inventory_by_plan(db: Session, plan_id: uuid.UUID) -> List[models.InventoryMaster]:
+    """
+    Get all inventory items linked to a specific plan.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan
+        
+    Returns:
+        List of InventoryMaster objects linked to the plan
+    """
+    return db.query(models.InventoryMaster).join(
+        models.PlanInventoryLink
+    ).filter(
+        models.PlanInventoryLink.plan_id == plan_id
+    ).options(
+        joinedload(models.InventoryMaster.paper),
+        joinedload(models.InventoryMaster.created_by)
+    ).all()
+
+def create_plan_with_links(
+    db: Session, 
+    plan_data: schemas.PlanMasterCreate,
+    order_links: Optional[List[Dict[str, Any]]] = None,
+    inventory_links: Optional[List[Dict[str, Any]]] = None
+) -> models.PlanMaster:
+    """
+    Create a plan and link orders/inventory in a single transaction.
+    
+    Args:
+        db: Database session
+        plan_data: Plan creation data
+        order_links: Optional list of order links to create
+        inventory_links: Optional list of inventory links to create
+        
+    Returns:
+        Created PlanMaster object with all links
+    """
+    try:
+        # Create the plan first
+        plan = create_plan(db, plan_data)
+        
+        # Link orders if provided
+        if order_links:
+            bulk_link_orders_to_plan(db, plan.id, order_links)
+        
+        # Link inventory if provided
+        if inventory_links:
+            bulk_link_inventory_to_plan(db, plan.id, inventory_links)
+        
+        # Return plan with all links loaded
+        return get_plan_with_all_links(db, plan.id)
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating plan with links: {str(e)}")
+
+def get_plan_summary(db: Session, plan_id: uuid.UUID) -> Dict[str, Any]:
+    """
+    Get a comprehensive summary of a plan including all linked data.
+    
+    Args:
+        db: Database session
+        plan_id: ID of the plan
+        
+    Returns:
+        Dictionary with plan summary information
+    """
+    plan = get_plan_with_all_links(db, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    
+    # Get linked orders and inventory
+    orders = get_orders_by_plan(db, plan_id)
+    inventory_items = get_inventory_by_plan(db, plan_id)
+    
+    # Calculate summary statistics
+    total_orders = len(orders)
+    total_quantity = sum(order.quantity for order in orders)
+    total_fulfilled = sum(order.quantity_fulfilled or 0 for order in orders)
+    total_inventory_items = len(inventory_items)
+    
+    return {
+        "plan": {
+            "id": str(plan.id),
+            "name": plan.name,
+            "status": plan.status,
+            "expected_waste_percentage": float(plan.expected_waste_percentage),
+            "actual_waste_percentage": float(plan.actual_waste_percentage) if plan.actual_waste_percentage else None,
+            "created_at": plan.created_at,
+            "created_by": plan.created_by.name if plan.created_by else None
+        },
+        "orders": {
+            "total_count": total_orders,
+            "total_quantity": total_quantity,
+            "total_fulfilled": total_fulfilled,
+            "fulfillment_percentage": (total_fulfilled / total_quantity * 100) if total_quantity > 0 else 0,
+            "orders": [
+                {
+                    "id": str(order.id),
+                    "width": order.width,
+                    "quantity": order.quantity,
+                    "quantity_fulfilled": order.quantity_fulfilled or 0,
+                    "status": order.status,
+                    "client_name": order.client.name if order.client else None,
+                    "paper_specs": {
+                        "gsm": order.paper.gsm,
+                        "bf": order.paper.bf,
+                        "shade": order.paper.shade
+                    } if order.paper else None
+                }
+                for order in orders
+            ]
+        },
+        "inventory": {
+            "total_items": total_inventory_items,
+            "items": [
+                {
+                    "id": str(item.id),
+                    "roll_type": item.roll_type,
+                    "width": item.width,
+                    "length": item.length,
+                    "weight": item.weight,
+                    "status": item.status,
+                    "paper_specs": {
+                        "gsm": item.paper.gsm,
+                        "bf": item.paper.bf,
+                        "shade": item.paper.shade
+                    } if item.paper else None
+                }
+                for item in inventory_items
+            ]
+        }
+    }

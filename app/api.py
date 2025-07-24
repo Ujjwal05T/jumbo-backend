@@ -716,3 +716,486 @@ def test_optimizer_frontend(
     except Exception as e:
         logger.error(f"Error testing cutting optimizer with frontend data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# WORKFLOW MANAGEMENT ROUTES
+# ============================================================================
+
+@router.post("/workflow/generate-plan", response_model=schemas.PlanMaster, tags=["Workflow Management"])
+def generate_cutting_plan_from_workflow(
+    order_ids: List[str],
+    created_by_id: str,
+    plan_name: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Generate a cutting plan from multiple orders using workflow manager"""
+    try:
+        from .services.workflow_manager import WorkflowManager
+        import uuid
+        
+        # Convert string IDs to UUIDs
+        uuid_order_ids = []
+        for order_id in order_ids:
+            try:
+                uuid_order_ids.append(uuid.UUID(order_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
+        
+        try:
+            created_by_uuid = uuid.UUID(created_by_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format for created_by_id: {created_by_id}")
+        
+        # Initialize workflow manager
+        workflow_manager = WorkflowManager(db=db, user_id=created_by_uuid)
+        
+        # Create cutting plan
+        plan = workflow_manager.create_cutting_plan_from_orders(
+            order_ids=uuid_order_ids,
+            plan_name=plan_name
+        )
+        
+        return plan
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating cutting plan from workflow: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/workflow/process-orders", tags=["Workflow Management"])
+def process_multiple_orders(
+    order_ids: List[str],
+    user_id: str,
+    db: Session = Depends(get_db)
+):
+    """Process multiple orders together for optimal cutting plans"""
+    try:
+        from .services.workflow_manager import WorkflowManager
+        import uuid
+        
+        # Convert string IDs to UUIDs
+        uuid_order_ids = []
+        for order_id in order_ids:
+            try:
+                uuid_order_ids.append(uuid.UUID(order_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
+        
+        try:
+            user_uuid = uuid.UUID(user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format for user_id: {user_id}")
+        
+        # Initialize workflow manager
+        workflow_manager = WorkflowManager(db=db, user_id=user_uuid)
+        
+        # Process orders
+        result = workflow_manager.process_multiple_orders(uuid_order_ids)
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing multiple orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/workflow/status", tags=["Workflow Management"])
+def get_workflow_status(db: Session = Depends(get_db)):
+    """Get overall workflow status and metrics"""
+    try:
+        from .services.workflow_manager import WorkflowManager
+        
+        # Initialize workflow manager
+        workflow_manager = WorkflowManager(db=db)
+        
+        # Get workflow status
+        status = workflow_manager.get_workflow_status()
+        
+        return status
+        
+    except Exception as e:
+        logger.error(f"Error getting workflow status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/workflow/orders-with-relationships", tags=["Workflow Management"])
+def get_orders_with_relationships(
+    order_ids: List[str],
+    db: Session = Depends(get_db)
+):
+    """Get orders with all related data (User, Client, Paper) via foreign keys"""
+    try:
+        from .services.workflow_manager import WorkflowManager
+        import uuid
+        
+        # Convert string IDs to UUIDs
+        uuid_order_ids = []
+        for order_id in order_ids:
+            try:
+                uuid_order_ids.append(uuid.UUID(order_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
+        
+        # Initialize workflow manager
+        workflow_manager = WorkflowManager(db=db)
+        
+        # Get orders with relationships
+        orders = workflow_manager.get_orders_with_relationships(uuid_order_ids)
+        
+        # Convert to response format
+        result = []
+        for order in orders:
+            order_data = {
+                "id": str(order.id),
+                "width": order.width,
+                "quantity": order.quantity,
+                "quantity_fulfilled": order.quantity_fulfilled or 0,
+                "min_length": order.min_length,
+                "status": order.status,
+                "created_at": order.created_at,
+                "client": {
+                    "id": str(order.client.id),
+                    "name": order.client.name,
+                    "contact": order.client.contact
+                } if order.client else None,
+                "paper": {
+                    "id": str(order.paper.id),
+                    "gsm": order.paper.gsm,
+                    "bf": order.paper.bf,
+                    "shade": order.paper.shade,
+                    "type": order.paper.type
+                } if order.paper else None,
+                "created_by": {
+                    "id": str(order.created_by.id),
+                    "name": order.created_by.name,
+                    "username": order.created_by.username,
+                    "role": order.created_by.role
+                } if order.created_by else None
+            }
+            result.append(order_data)
+        
+        return {
+            "orders": result,
+            "total_count": len(result)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting orders with relationships: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# PLAN STATUS UPDATE ROUTES
+# ============================================================================
+
+@router.put("/plans/{plan_id}/status", response_model=schemas.PlanMaster, tags=["Plan Management"])
+def update_plan_status(
+    plan_id: str,
+    status: str,
+    actual_waste_percentage: Optional[float] = None,
+    db: Session = Depends(get_db)
+):
+    """Update plan status and actual waste percentage"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        # Validate status
+        valid_statuses = ["planned", "in_progress", "completed", "cancelled"]
+        if status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        
+        # Create update data
+        update_data = schemas.PlanMasterUpdate(
+            status=status,
+            actual_waste_percentage=actual_waste_percentage
+        )
+        
+        # Update plan
+        plan = crud.update_plan(db, plan_uuid, update_data)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        return plan
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating plan status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/plans/{plan_id}/execute", response_model=schemas.PlanMaster, tags=["Plan Management"])
+def execute_cutting_plan(
+    plan_id: str,
+    db: Session = Depends(get_db)
+):
+    """Execute a cutting plan by updating status to in_progress"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        # Update plan status to in_progress
+        update_data = schemas.PlanMasterUpdate(status="in_progress")
+        plan = crud.update_plan(db, plan_uuid, update_data)
+        
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        return plan
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing cutting plan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/plans/{plan_id}/complete", response_model=schemas.PlanMaster, tags=["Plan Management"])
+def complete_cutting_plan(
+    plan_id: str,
+    actual_waste_percentage: Optional[float] = None,
+    db: Session = Depends(get_db)
+):
+    """Complete a cutting plan by updating status to completed"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        # Update plan status to completed
+        update_data = schemas.PlanMasterUpdate(
+            status="completed",
+            actual_waste_percentage=actual_waste_percentage
+        )
+        plan = crud.update_plan(db, plan_uuid, update_data)
+        
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        return plan
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error completing cutting plan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# INVENTORY LINKING ROUTES
+# ============================================================================
+
+@router.post("/plans/{plan_id}/link-inventory", tags=["Plan Management"])
+def link_inventory_to_plan(
+    plan_id: str,
+    inventory_links: List[Dict[str, Any]],
+    db: Session = Depends(get_db)
+):
+    """Link inventory items to a cutting plan"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        # Verify plan exists
+        plan = crud.get_plan(db, plan_uuid)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Create inventory links
+        created_links = []
+        for link_data in inventory_links:
+            try:
+                inventory_id = uuid.UUID(link_data.get("inventory_id"))
+                quantity_used = float(link_data.get("quantity_used", 0))
+                
+                # Verify inventory item exists
+                inventory_item = crud.get_inventory_item(db, inventory_id)
+                if not inventory_item:
+                    raise HTTPException(status_code=404, detail=f"Inventory item {inventory_id} not found")
+                
+                # Create plan inventory link
+                inventory_link = models.PlanInventoryLink(
+                    plan_id=plan_uuid,
+                    inventory_id=inventory_id,
+                    quantity_used=quantity_used
+                )
+                db.add(inventory_link)
+                created_links.append({
+                    "inventory_id": str(inventory_id),
+                    "quantity_used": quantity_used,
+                    "inventory_item": {
+                        "id": str(inventory_item.id),
+                        "roll_type": inventory_item.roll_type,
+                        "width": inventory_item.width,
+                        "length": inventory_item.length,
+                        "weight": inventory_item.weight
+                    }
+                })
+                
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=f"Invalid data in inventory link: {ve}")
+        
+        db.commit()
+        
+        return {
+            "message": f"Successfully linked {len(created_links)} inventory items to plan",
+            "plan_id": plan_id,
+            "inventory_links": created_links
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error linking inventory to plan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/plans/{plan_id}/inventory", tags=["Plan Management"])
+def get_plan_inventory_links(
+    plan_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get all inventory items linked to a cutting plan"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        # Get plan with inventory links
+        plan = db.query(models.PlanMaster).filter(
+            models.PlanMaster.id == plan_uuid
+        ).first()
+        
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Get inventory links with related inventory data
+        inventory_links = db.query(models.PlanInventoryLink).join(
+            models.InventoryMaster
+        ).filter(
+            models.PlanInventoryLink.plan_id == plan_uuid
+        ).all()
+        
+        result = []
+        for link in inventory_links:
+            result.append({
+                "link_id": str(link.id),
+                "quantity_used": float(link.quantity_used),
+                "inventory_item": {
+                    "id": str(link.inventory.id),
+                    "roll_type": link.inventory.roll_type,
+                    "width": link.inventory.width,
+                    "length": link.inventory.length,
+                    "weight": link.inventory.weight,
+                    "status": link.inventory.status,
+                    "paper": {
+                        "gsm": link.inventory.paper.gsm,
+                        "bf": link.inventory.paper.bf,
+                        "shade": link.inventory.paper.shade
+                    } if link.inventory.paper else None
+                }
+            })
+        
+        return {
+            "plan_id": plan_id,
+            "inventory_links": result,
+            "total_links": len(result)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting plan inventory links: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/plans/{plan_id}/inventory/{link_id}", tags=["Plan Management"])
+def remove_inventory_link(
+    plan_id: str,
+    link_id: str,
+    db: Session = Depends(get_db)
+):
+    """Remove an inventory link from a cutting plan"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+            link_uuid = uuid.UUID(link_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid UUID format")
+        
+        # Find and delete the link
+        inventory_link = db.query(models.PlanInventoryLink).filter(
+            models.PlanInventoryLink.id == link_uuid,
+            models.PlanInventoryLink.plan_id == plan_uuid
+        ).first()
+        
+        if not inventory_link:
+            raise HTTPException(status_code=404, detail="Inventory link not found")
+        
+        db.delete(inventory_link)
+        db.commit()
+        
+        return {
+            "message": "Inventory link removed successfully",
+            "plan_id": plan_id,
+            "link_id": link_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing inventory link: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/inventory/{inventory_id}/status", response_model=schemas.InventoryMaster, tags=["Inventory Management"])
+def update_inventory_status(
+    inventory_id: str,
+    status: str,
+    db: Session = Depends(get_db)
+):
+    """Update inventory item status"""
+    try:
+        import uuid
+        
+        try:
+            inventory_uuid = uuid.UUID(inventory_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {inventory_id}")
+        
+        # Validate status
+        valid_statuses = ["available", "reserved", "used", "damaged"]
+        if status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        
+        # Update inventory status
+        update_data = schemas.InventoryMasterUpdate(status=status)
+        inventory_item = crud.update_inventory_item(db, inventory_uuid, update_data)
+        
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail="Inventory item not found")
+        
+        return inventory_item
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating inventory status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
