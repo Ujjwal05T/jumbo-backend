@@ -285,3 +285,27 @@ PUT    /api/production-orders/{id}/complete # Complete production
 7. **Data Migration** - Migrate existing data to master-based structure
 
 This master-based architecture provides a solid foundation for scalable, traceable, and consistent paper roll management operations.
+---
+
+##
+ 📁 **Project Structure - Master-Based Architecture**
+
+```
+JumboReelApp/
+├── backend/                           # FastAPI Backend
+│   ├── app/                          # Main application package
+│   │   ├── __init__.py
+│   │   ├── main.py                   # FastAPI app entry point
+│   │   ├── database.py               # Database connection & session
+│   │   ├── models.py                 # SQLAlchemy models (Master-based)
+│   │   ├── schemas.py                # Pydantic schemas (Master-based)
+│   │   ├── crud.py                   # Database operations
+│   │   ├── auth.py                   # Simple user registration (no auth)
+│   │   ├── init_db.py                # Database initialization
+│   │   │
+│   │   ├── api/                      # API endpoints
+│   │   │   ├── __init__.py
+│   │   │   ├── endpoints/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── clients.py        # Client Master endpoints
+│   │   │   │   ├── users.py          # User Master endpo

@@ -21,7 +21,8 @@ def init_admin_user(db: Session):
         return admin
     
     logger.info(f"Creating admin user '{admin_username}'")
-    admin_user = schemas.UserCreate(
+    admin_user = schemas.UserMasterCreate(
+        name="Administrator",
         username=admin_username,
         password="admin123",  # Simple password for internal use
         role="admin"

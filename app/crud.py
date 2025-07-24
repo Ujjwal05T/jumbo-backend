@@ -1,29 +1,138 @@
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_
+from sqlalchemy import or_, and_, func
 from . import models, schemas
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
 from fastapi import HTTPException
+import hashlib
 
-# User CRUD operations
-def get_user(db: Session, user_id: uuid.UUID):
-    return db.query(models.User).filter(models.User.id == user_id).first()
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
-def get_user_by_username(db: Session, username: str):
-    return db.query(models.User).filter(models.User.username == username).first()
+def hash_password(password: str) -> str:
+    """Simple password hashing (for registration only, no authentication)"""
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def create_user(db: Session, user: schemas.UserCreate):
-    # Check if user already exists
-    db_user = get_user_by_username(db, username=user.username)
-    if db_user:
-        return None  # User already exists
+def generate_qr_code(roll_id: uuid.UUID) -> str:
+    """Generate QR code for inventory items"""
+    return f"ROLL_{str(roll_id).replace('-', '').upper()[:12]}"
+
+# ============================================================================
+# CLIENT MASTER CRUD
+# ============================================================================
+
+def create_client(db: Session, client: schemas.ClientMasterCreate) -> models.ClientMaster:
+    """Create a new client in Client Master"""
+    # Check if client with same company name already exists
+    existing_client = db.query(models.ClientMaster).filter(
+        models.ClientMaster.company_name == client.company_name,
+        models.ClientMaster.status == "active"
+    ).first()
     
-    # Create new user with plain text password
-    db_user = models.User(
+    if existing_client:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Client with company name '{client.company_name}' already exists"
+        )
+    
+    db_client = models.ClientMaster(
+        company_name=client.company_name,
+        email=client.email,
+        address=client.address,
+        contact_person=client.contact_person,
+        phone=client.phone,
+        created_by_id=client.created_by_id,
+        status=client.status
+    )
+    
+    db.add(db_client)
+    db.commit()
+    db.refresh(db_client)
+    return db_client
+
+def get_client(db: Session, client_id: uuid.UUID) -> Optional[models.ClientMaster]:
+    """Get client by ID"""
+    return db.query(models.ClientMaster).filter(models.ClientMaster.id == client_id).first()
+
+def get_client_by_name(db: Session, company_name: str) -> Optional[models.ClientMaster]:
+    """Get client by company name"""
+    return db.query(models.ClientMaster).filter(
+        models.ClientMaster.company_name == company_name,
+        models.ClientMaster.status == "active"
+    ).first()
+
+def get_clients(db: Session, skip: int = 0, limit: int = 100, status: str = "active") -> List[models.ClientMaster]:
+    """Get all clients with pagination"""
+    query = db.query(models.ClientMaster)
+    
+    if status:
+        query = query.filter(models.ClientMaster.status == status)
+    
+    return query.order_by(models.ClientMaster.company_name).offset(skip).limit(limit).all()
+
+def update_client(db: Session, client_id: uuid.UUID, client_update: schemas.ClientMasterUpdate) -> Optional[models.ClientMaster]:
+    """Update client information"""
+    db_client = get_client(db, client_id)
+    if not db_client:
+        return None
+    
+    update_data = client_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_client, field, value)
+    
+    db.commit()
+    db.refresh(db_client)
+    return db_client
+
+def delete_client(db: Session, client_id: uuid.UUID) -> bool:
+    """Soft delete client (set status to inactive)"""
+    db_client = get_client(db, client_id)
+    if not db_client:
+        return False
+    
+    # Check if client has active orders
+    active_orders = db.query(models.OrderMaster).filter(
+        models.OrderMaster.client_id == client_id,
+        models.OrderMaster.status.in_(["pending", "processing", "partially_fulfilled"])
+    ).count()
+    
+    if active_orders > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete client with {active_orders} active orders"
+        )
+    
+    db_client.status = "inactive"
+    db.commit()
+    return True
+
+# ============================================================================
+# USER MASTER CRUD
+# ============================================================================
+
+def create_user(db: Session, user: schemas.UserMasterCreate) -> models.UserMaster:
+    """Create a new user in User Master"""
+    # Check if username already exists
+    existing_user = db.query(models.UserMaster).filter(
+        models.UserMaster.username == user.username
+    ).first()
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Username '{user.username}' already exists"
+        )
+    
+    db_user = models.UserMaster(
+        name=user.name,
         username=user.username,
-        password=user.password,  # Storing plain text password
-        created_at=datetime.utcnow()
+        password_hash=hash_password(user.password),
+        role=user.role,
+        contact=user.contact,
+        department=user.department,
+        status=user.status
     )
     
     db.add(db_user)
@@ -31,74 +140,212 @@ def create_user(db: Session, user: schemas.UserCreate):
     db.refresh(db_user)
     return db_user
 
-def authenticate_user(db: Session, username: str, password: str):
-    user = get_user_by_username(db, username=username)
-    if not user or user.password != password:  # Simple plain text comparison
+def get_user(db: Session, user_id: uuid.UUID) -> Optional[models.UserMaster]:
+    """Get user by ID"""
+    return db.query(models.UserMaster).filter(models.UserMaster.id == user_id).first()
+
+def get_user_by_username(db: Session, username: str) -> Optional[models.UserMaster]:
+    """Get user by username"""
+    return db.query(models.UserMaster).filter(
+        models.UserMaster.username == username,
+        models.UserMaster.status == "active"
+    ).first()
+
+def get_users(db: Session, skip: int = 0, limit: int = 100, role: str = None) -> List[models.UserMaster]:
+    """Get all users with pagination and optional role filter"""
+    query = db.query(models.UserMaster).filter(models.UserMaster.status == "active")
+    
+    if role:
+        query = query.filter(models.UserMaster.role == role)
+    
+    return query.order_by(models.UserMaster.name).offset(skip).limit(limit).all()
+
+def update_user(db: Session, user_id: uuid.UUID, user_update: schemas.UserMasterUpdate) -> Optional[models.UserMaster]:
+    """Update user information"""
+    db_user = get_user(db, user_id)
+    if not db_user:
         return None
+    
+    update_data = user_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_user, field, value)
+    
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+def authenticate_user(db: Session, username: str, password: str) -> Optional[models.UserMaster]:
+    """Simple user authentication for registration system"""
+    user = get_user_by_username(db, username)
+    if not user or user.password_hash != hash_password(password):
+        return None
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
     return user
 
-# Parsed message CRUD operations
-def create_parsed_message(db: Session, message: schemas.ParsedMessageCreate):
-    db_message = models.ParsedMessage(**message.dict())
-    db.add(db_message)
-    db.commit()
-    db.refresh(db_message)
-    return db_message
+# ============================================================================
+# PAPER MASTER CRUD
+# ============================================================================
 
-def get_parsed_message(db: Session, message_id: uuid.UUID):
-    return db.query(models.ParsedMessage).filter(models.ParsedMessage.id == message_id).first()
-
-def update_parsed_message(db: Session, message_id: uuid.UUID, update: schemas.ParsedMessageUpdate):
-    db_message = db.query(models.ParsedMessage).filter(models.ParsedMessage.id == message_id).first()
-    if db_message:
-        update_data = update.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(db_message, field, value)
-        db.commit()
-        db.refresh(db_message)
-    return db_message
-
-def get_parsed_messages(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.ParsedMessage).order_by(models.ParsedMessage.id).offset(skip).limit(limit).all()
-
-# Order CRUD operations
-def create_order(db: Session, order: schemas.OrderCreate):
-    # Validate order specifications
-    if not all([order.width_inches, order.gsm, order.bf, order.shade, order.quantity_rolls]):
+def create_paper(db: Session, paper: schemas.PaperMasterCreate) -> models.PaperMaster:
+    """Create a new paper specification in Paper Master"""
+    # Check if paper with same specifications already exists
+    existing_paper = db.query(models.PaperMaster).filter(
+        models.PaperMaster.gsm == paper.gsm,
+        models.PaperMaster.bf == paper.bf,
+        models.PaperMaster.shade == paper.shade,
+        models.PaperMaster.type == paper.type,
+        models.PaperMaster.status == "active"
+    ).first()
+    
+    if existing_paper:
         raise HTTPException(
             status_code=400,
-            detail="Missing required order specifications"
+            detail=f"Paper specification already exists: {paper.name}"
         )
     
-    # Create the order - fulfillment will be handled separately by the workflow system
-    # This allows for more flexible fulfillment strategies including:
-    # - Partial fulfillment from inventory
-    # - Cutting optimization across multiple orders
-    # - Production planning for missing specifications
+    db_paper = models.PaperMaster(
+        name=paper.name,
+        gsm=paper.gsm,
+        bf=paper.bf,
+        shade=paper.shade,
+        thickness=paper.thickness,
+        type=paper.type,
+        created_by_id=paper.created_by_id,
+        status=paper.status
+    )
     
-    db_order = models.Order(
-        customer_name=order.customer_name,
+    db.add(db_paper)
+    db.commit()
+    db.refresh(db_paper)
+    return db_paper
+
+def get_paper(db: Session, paper_id: uuid.UUID) -> Optional[models.PaperMaster]:
+    """Get paper by ID"""
+    return db.query(models.PaperMaster).filter(models.PaperMaster.id == paper_id).first()
+
+def get_paper_by_specs(db: Session, gsm: int, bf: float, shade: str, type: str = None) -> Optional[models.PaperMaster]:
+    """Get paper by specifications"""
+    query = db.query(models.PaperMaster).filter(
+        models.PaperMaster.gsm == gsm,
+        models.PaperMaster.bf == bf,
+        models.PaperMaster.shade == shade,
+        models.PaperMaster.status == "active"
+    )
+    
+    if type:
+        query = query.filter(models.PaperMaster.type == type)
+    
+    return query.first()
+
+def get_papers(db: Session, skip: int = 0, limit: int = 100, status: str = "active") -> List[models.PaperMaster]:
+    """Get all papers with pagination"""
+    query = db.query(models.PaperMaster)
+    
+    if status:
+        query = query.filter(models.PaperMaster.status == status)
+    
+    return query.order_by(models.PaperMaster.name).offset(skip).limit(limit).all()
+
+def update_paper(db: Session, paper_id: uuid.UUID, paper_update: schemas.PaperMasterUpdate) -> Optional[models.PaperMaster]:
+    """Update paper specification"""
+    db_paper = get_paper(db, paper_id)
+    if not db_paper:
+        return None
+    
+    update_data = paper_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_paper, field, value)
+    
+    db.commit()
+    db.refresh(db_paper)
+    return db_paper
+
+def delete_paper(db: Session, paper_id: uuid.UUID) -> bool:
+    """Soft delete paper (set status to inactive)"""
+    db_paper = get_paper(db, paper_id)
+    if not db_paper:
+        return False
+    
+    # Check if paper is used in active orders or inventory
+    active_orders = db.query(models.OrderMaster).filter(
+        models.OrderMaster.paper_id == paper_id,
+        models.OrderMaster.status.in_(["pending", "processing", "partially_fulfilled"])
+    ).count()
+    
+    active_inventory = db.query(models.InventoryMaster).filter(
+        models.InventoryMaster.paper_id == paper_id,
+        models.InventoryMaster.status == "available"
+    ).count()
+    
+    if active_orders > 0 or active_inventory > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete paper specification with {active_orders} active orders and {active_inventory} inventory items"
+        )
+    
+    db_paper.status = "inactive"
+    db.commit()
+    return True
+
+# ============================================================================
+# ORDER MASTER CRUD
+# ============================================================================
+
+def create_order(db: Session, order: schemas.OrderMasterCreate) -> models.OrderMaster:
+    """Create a new order in Order Master"""
+    # Validate client exists
+    client = get_client(db, order.client_id)
+    if not client or client.status != "active":
+        raise HTTPException(status_code=400, detail="Invalid or inactive client")
+    
+    # Validate paper exists
+    paper = get_paper(db, order.paper_id)
+    if not paper or paper.status != "active":
+        raise HTTPException(status_code=400, detail="Invalid or inactive paper specification")
+    
+    db_order = models.OrderMaster(
+        client_id=order.client_id,
+        paper_id=order.paper_id,
         width_inches=order.width_inches,
-        gsm=order.gsm,
-        bf=order.bf,
-        shade=order.shade,
         quantity_rolls=order.quantity_rolls,
-        status=models.OrderStatus.PENDING,
-        source_message_id=getattr(order, 'source_message_id', None)
+        priority=order.priority,
+        delivery_date=order.delivery_date,
+        notes=order.notes,
+        created_by_id=order.created_by_id
     )
     
     db.add(db_order)
     db.commit()
     db.refresh(db_order)
     return db_order
-def get_orders(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.Order).order_by(models.Order.id).offset(skip).limit(limit).all()
 
-def get_order(db: Session, order_id: uuid.UUID):
-    return db.query(models.Order).filter(models.Order.id == order_id).first()
+def get_order(db: Session, order_id: uuid.UUID) -> Optional[models.OrderMaster]:
+    """Get order by ID with related data"""
+    return db.query(models.OrderMaster).options(
+        joinedload(models.OrderMaster.client),
+        joinedload(models.OrderMaster.paper)
+    ).filter(models.OrderMaster.id == order_id).first()
 
-def update_order(db: Session, order_id: uuid.UUID, order_update: schemas.OrderUpdate):
-    db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
+def get_orders(db: Session, skip: int = 0, limit: int = 100, status: str = None, client_id: uuid.UUID = None) -> List[models.OrderMaster]:
+    """Get all orders with pagination and filters"""
+    query = db.query(models.OrderMaster).options(
+        joinedload(models.OrderMaster.client),
+        joinedload(models.OrderMaster.paper)
+    )
+    
+    if status:
+        query = query.filter(models.OrderMaster.status == status)
+    if client_id:
+        query = query.filter(models.OrderMaster.client_id == client_id)
+    
+    return query.order_by(models.OrderMaster.created_at.desc()).offset(skip).limit(limit).all()
+
+def update_order(db: Session, order_id: uuid.UUID, order_update: schemas.OrderMasterUpdate) -> Optional[models.OrderMaster]:
+    """Update order information"""
+    db_order = get_order(db, order_id)
     if not db_order:
         return None
     
@@ -106,466 +353,368 @@ def update_order(db: Session, order_id: uuid.UUID, order_update: schemas.OrderUp
     for field, value in update_data.items():
         setattr(db_order, field, value)
     
+    db_order.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(db_order)
     return db_order
 
-def delete_order(db: Session, order_id: uuid.UUID):
-    db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not db_order:
-        return False
+def get_pending_orders(db: Session, paper_id: uuid.UUID = None) -> List[models.OrderMaster]:
+    """Get orders that need fulfillment"""
+    query = db.query(models.OrderMaster).filter(
+        models.OrderMaster.status.in_(["pending", "partially_fulfilled"]),
+        models.OrderMaster.quantity_fulfilled < models.OrderMaster.quantity_rolls
+    )
     
-    # Check if the order has any cut rolls
-    if db_order.cut_rolls:
-        # Instead of deleting, mark as cancelled
-        db_order.status = 'cancelled'
-        db.commit()
-        return True
-    else:
-        # No cut rolls, safe to delete
-        db.delete(db_order)
-        db.commit()
-        return True
+    if paper_id:
+        query = query.filter(models.OrderMaster.paper_id == paper_id)
+    
+    return query.order_by(models.OrderMaster.priority.desc(), models.OrderMaster.created_at).all()
 
-# Jumbo roll CRUD operations
-def create_jumbo_roll(db: Session, roll: schemas.JumboRollCreate):
-    db_roll = models.JumboRoll(**roll.dict())
-    db.add(db_roll)
+# ============================================================================
+# PENDING ORDER MASTER CRUD
+# ============================================================================
+
+def create_pending_order(db: Session, pending: schemas.PendingOrderMasterCreate) -> models.PendingOrderMaster:
+    """Create a new pending order"""
+    db_pending = models.PendingOrderMaster(
+        order_id=pending.order_id,
+        paper_id=pending.paper_id,
+        width_inches=pending.width_inches,
+        quantity_pending=pending.quantity_pending,
+        reason=pending.reason
+    )
+    
+    db.add(db_pending)
     db.commit()
-    db.refresh(db_roll)
-    return db_roll
+    db.refresh(db_pending)
+    return db_pending
 
-def get_jumbo_rolls(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.JumboRoll).order_by(models.JumboRoll.id).offset(skip).limit(limit).all()
+def get_pending_order(db: Session, pending_id: uuid.UUID) -> Optional[models.PendingOrderMaster]:
+    """Get pending order by ID"""
+    return db.query(models.PendingOrderMaster).options(
+        joinedload(models.PendingOrderMaster.original_order),
+        joinedload(models.PendingOrderMaster.paper)
+    ).filter(models.PendingOrderMaster.id == pending_id).first()
 
-def get_jumbo_roll(db: Session, roll_id: uuid.UUID):
-    return db.query(models.JumboRoll).filter(models.JumboRoll.id == roll_id).first()
+def get_pending_orders_list(db: Session, skip: int = 0, limit: int = 100, status: str = "pending") -> List[models.PendingOrderMaster]:
+    """Get all pending orders with pagination"""
+    query = db.query(models.PendingOrderMaster).options(
+        joinedload(models.PendingOrderMaster.original_order),
+        joinedload(models.PendingOrderMaster.paper)
+    )
+    
+    if status:
+        query = query.filter(models.PendingOrderMaster.status == status)
+    
+    return query.order_by(models.PendingOrderMaster.created_at).offset(skip).limit(limit).all()
 
-# Cut roll CRUD operations
-def create_cut_roll(db: Session, roll: schemas.CutRollCreate):
-    db_roll = models.CutRoll(**roll.dict())
-    db.add(db_roll)
+def update_pending_order(db: Session, pending_id: uuid.UUID, pending_update: schemas.PendingOrderMasterUpdate) -> Optional[models.PendingOrderMaster]:
+    """Update pending order"""
+    db_pending = get_pending_order(db, pending_id)
+    if not db_pending:
+        return None
+    
+    update_data = pending_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_pending, field, value)
+    
+    if pending_update.status == "resolved":
+        db_pending.resolved_at = datetime.utcnow()
+    
     db.commit()
-    db.refresh(db_roll)
-    return db_roll
+    db.refresh(db_pending)
+    return db_pending
 
-def get_cut_rolls(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.CutRoll).order_by(models.CutRoll.id).offset(skip).limit(limit).all()
+def get_pending_by_specification(db: Session, paper_id: uuid.UUID) -> List[models.PendingOrderMaster]:
+    """Get pending orders by paper specification for consolidation"""
+    return db.query(models.PendingOrderMaster).filter(
+        models.PendingOrderMaster.paper_id == paper_id,
+        models.PendingOrderMaster.status == "pending"
+    ).all()
 
-def get_cut_roll(db: Session, roll_id: uuid.UUID):
-    return db.query(models.CutRoll).filter(models.CutRoll.id == roll_id).first()
+# ============================================================================
+# INVENTORY MASTER CRUD
+# ============================================================================
 
-def update_cut_roll(db: Session, roll_id: uuid.UUID, update: schemas.CutRollUpdate):
-    db_roll = db.query(models.CutRoll).filter(models.CutRoll.id == roll_id).first()
-    if db_roll:
-        update_data = update.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(db_roll, field, value)
-        db.commit()
-        db.refresh(db_roll)
-    return db_roll
-
-# Inventory CRUD operations
-def create_inventory_item(db: Session, item: schemas.InventoryItemCreate):
-    db_item = models.InventoryItem(**item.dict())
-    db.add(db_item)
+def create_inventory_item(db: Session, inventory: schemas.InventoryMasterCreate) -> models.InventoryMaster:
+    """Create a new inventory item"""
+    # Validate paper exists
+    paper = get_paper(db, inventory.paper_id)
+    if not paper or paper.status != "active":
+        raise HTTPException(status_code=400, detail="Invalid or inactive paper specification")
+    
+    db_inventory = models.InventoryMaster(
+        paper_id=inventory.paper_id,
+        width_inches=inventory.width_inches,
+        weight_kg=inventory.weight_kg,
+        roll_type=inventory.roll_type,
+        location=inventory.location,
+        qr_code=inventory.qr_code or generate_qr_code(uuid.uuid4()),
+        production_date=inventory.production_date,
+        created_by_id=inventory.created_by_id
+    )
+    
+    db.add(db_inventory)
     db.commit()
-    db.refresh(db_item)
-    return db_item
+    db.refresh(db_inventory)
+    return db_inventory
 
-def get_inventory_items(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.InventoryItem).order_by(models.InventoryItem.id).offset(skip).limit(limit).all()
+def get_inventory_item(db: Session, inventory_id: uuid.UUID) -> Optional[models.InventoryMaster]:
+    """Get inventory item by ID"""
+    return db.query(models.InventoryMaster).options(
+        joinedload(models.InventoryMaster.paper)
+    ).filter(models.InventoryMaster.id == inventory_id).first()
 
-def update_inventory_item(db: Session, item_id: uuid.UUID, update: schemas.InventoryItemUpdate):
-    db_item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
-    if db_item:
-        update_data = update.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(db_item, field, value)
-        db_item.last_updated = datetime.utcnow()
-        db.commit()
-        db.refresh(db_item)
-    return db_item
+def get_inventory_items(db: Session, skip: int = 0, limit: int = 100, roll_type: str = None, status: str = "available") -> List[models.InventoryMaster]:
+    """Get all inventory items with pagination and filters"""
+    query = db.query(models.InventoryMaster).options(
+        joinedload(models.InventoryMaster.paper)
+    )
+    
+    if roll_type:
+        query = query.filter(models.InventoryMaster.roll_type == roll_type)
+    if status:
+        query = query.filter(models.InventoryMaster.status == status)
+    
+    return query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
 
-# Cutting plan CRUD operations
-def create_cutting_plan(db: Session, plan: schemas.CuttingPlanCreate):
-    db_plan = models.CuttingPlan(**plan.dict())
+def update_inventory_item(db: Session, inventory_id: uuid.UUID, inventory_update: schemas.InventoryMasterUpdate) -> Optional[models.InventoryMaster]:
+    """Update inventory item"""
+    db_inventory = get_inventory_item(db, inventory_id)
+    if not db_inventory:
+        return None
+    
+    update_data = inventory_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_inventory, field, value)
+    
+    db.commit()
+    db.refresh(db_inventory)
+    return db_inventory
+
+def get_available_inventory(db: Session, paper_id: uuid.UUID, width_inches: int = None, roll_type: str = None) -> List[models.InventoryMaster]:
+    """Get available inventory for cutting optimization"""
+    query = db.query(models.InventoryMaster).filter(
+        models.InventoryMaster.paper_id == paper_id,
+        models.InventoryMaster.status == "available"
+    )
+    
+    if width_inches:
+        query = query.filter(models.InventoryMaster.width_inches >= width_inches)
+    if roll_type:
+        query = query.filter(models.InventoryMaster.roll_type == roll_type)
+    
+    return query.order_by(models.InventoryMaster.width_inches.desc()).all()
+
+# ============================================================================
+# PLAN MASTER CRUD
+# ============================================================================
+
+def create_plan(db: Session, plan: schemas.PlanMasterCreate) -> models.PlanMaster:
+    """Create a new cutting plan"""
+    db_plan = models.PlanMaster(
+        name=plan.name,
+        cut_pattern=plan.cut_pattern,
+        expected_waste_percentage=plan.expected_waste_percentage,
+        created_by_id=plan.created_by_id
+    )
+    
     db.add(db_plan)
+    db.flush()  # Get the ID
+    
+    # Create order links
+    for order_id in plan.order_ids:
+        order_link = models.PlanOrderLink(
+            plan_id=db_plan.id,
+            order_id=order_id,
+            quantity_allocated=1  # This should be calculated based on the plan
+        )
+        db.add(order_link)
+    
+    # Create inventory links
+    for inventory_id in plan.inventory_ids:
+        inventory_link = models.PlanInventoryLink(
+            plan_id=db_plan.id,
+            inventory_id=inventory_id,
+            quantity_used=1.0  # This should be calculated based on the plan
+        )
+        db.add(inventory_link)
+    
     db.commit()
     db.refresh(db_plan)
     return db_plan
 
-def get_cutting_plans(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.CuttingPlan).order_by(models.CuttingPlan.id).offset(skip).limit(limit).all()
+def get_plan(db: Session, plan_id: uuid.UUID) -> Optional[models.PlanMaster]:
+    """Get plan by ID"""
+    return db.query(models.PlanMaster).filter(models.PlanMaster.id == plan_id).first()
 
-def update_cutting_plan(db: Session, plan_id: uuid.UUID, update: schemas.CuttingPlanUpdate):
-    db_plan = db.query(models.CuttingPlan).filter(models.CuttingPlan.id == plan_id).first()
-    if db_plan:
-        update_data = update.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            setattr(db_plan, field, value)
-        db.commit()
-        db.refresh(db_plan)
-    return db_plan
-
-def get_order_with_details(db: Session, order_id: uuid.UUID):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+def get_plans(db: Session, skip: int = 0, limit: int = 100, status: str = None) -> List[models.PlanMaster]:
+    """Get all plans with pagination"""
+    query = db.query(models.PlanMaster)
     
-    if not order:
+    if status:
+        query = query.filter(models.PlanMaster.status == status)
+    
+    return query.order_by(models.PlanMaster.created_at.desc()).offset(skip).limit(limit).all()
+
+def update_plan(db: Session, plan_id: uuid.UUID, plan_update: schemas.PlanMasterUpdate) -> Optional[models.PlanMaster]:
+    """Update plan"""
+    db_plan = get_plan(db, plan_id)
+    if not db_plan:
         return None
     
-    # Load relationships
-    if order.source_message_id:
-        db.query(models.ParsedMessage).filter(models.ParsedMessage.id == order.source_message_id).first()
+    update_data = plan_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_plan, field, value)
     
-    db.query(models.CutRoll).filter(models.CutRoll.order_id == order.id).all()
+    if plan_update.status == "completed":
+        db_plan.completed_at = datetime.utcnow()
+    elif plan_update.status == "in_progress" and not db_plan.executed_at:
+        db_plan.executed_at = datetime.utcnow()
     
-    return order
-
-def find_matching_inventory(db: Session, width_inches: int, gsm: int, bf: float, shade: str, quantity: int = 1):
-    return db.query(models.InventoryItem).join(models.CutRoll).filter(
-        or_(
-            models.CutRoll.width_inches == width_inches,
-            models.CutRoll.gsm == gsm,
-            models.CutRoll.bf == bf,
-            models.CutRoll.shade == shade,
-            models.CutRoll.status == "weighed",
-            models.InventoryItem.allocated_to_order_id == None
-        )
-    ).order_by(models.InventoryItem.id).limit(quantity).all()
-
-def generate_qr_code(roll_id: uuid.UUID) -> str:
-    return f"ROLL_{str(roll_id).replace('-', '').upper()[:12]}"
-
-def get_order_with_inventory(db: Session, order_id: uuid.UUID):
-    """Get an order with its associated inventory items"""
-    return db.query(models.Order).\
-        options(joinedload(models.Order.cut_rolls)).\
-        filter(models.Order.id == order_id).\
-        first()
-
-def update_order_delivery(
-    db: Session,
-    order_id: uuid.UUID,
-    delivery_update: schemas.OrderDeliveryUpdate,
-    user_id: Optional[uuid.UUID] = None
-):
-    """
-    Update order delivery status and handle inventory changes
-    
-    Args:
-        db: Database session
-        order_id: ID of the order to update
-        delivery_update: Delivery update data
-        user_id: Optional user ID making the change (None if unauthenticated)
-        
-    Returns:
-        Updated order object
-        
-    Raises:
-        HTTPException: If order not found, invalid status transition, or over-delivery detected
-    """
-    db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not db_order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Validate status transition
-    valid_transitions = {
-        "processing": ["ready_for_delivery"],
-        "ready_for_delivery": ["in_transit", "cancelled"],
-        "in_transit": ["delivered", "cancelled"],
-    }
-    
-    current_status = db_order.status.lower()
-    new_status = delivery_update.status.lower()
-    
-    if current_status == new_status:
-        return db_order
-        
-    if current_status in valid_transitions and new_status not in valid_transitions[current_status]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid status transition from {current_status} to {new_status}"
-        )
-    
-    # Check for over-delivery when marking as delivered
-    if new_status == "delivered":
-        # Get total ordered quantity
-        ordered_quantity = db_order.quantity_rolls
-        
-        # Get already delivered quantity from cut rolls
-        delivered_quantity = sum(
-            1 for roll in db_order.cut_rolls 
-            if roll.status == "delivered"
-        )
-        
-        # Get current delivery quantity (non-delivered cut rolls)
-        current_delivery = sum(
-            1 for roll in db_order.cut_rolls 
-            if roll.status != "delivered"
-        )
-        
-        # Calculate remaining quantity that can be delivered
-        remaining_quantity = ordered_quantity - delivered_quantity
-        
-        if current_delivery > remaining_quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Cannot deliver {current_delivery} rolls. "
-                    f"Order quantity: {ordered_quantity}, "
-                    f"Already delivered: {delivered_quantity}, "
-                    f"Remaining: {remaining_quantity}"
-                )
-            )
-    
-    try:
-        # Update order status
-        previous_status = db_order.status
-        db_order.status = new_status
-        
-        if new_status == "delivered":
-            db_order.actual_delivery_date = delivery_update.actual_delivery_date or datetime.utcnow()
-            if delivery_update.delivery_notes:
-                db_order.delivery_notes = delivery_update.delivery_notes
-        
-        # Handle inventory changes
-        if new_status == "delivered":
-            # Update all cut rolls to delivered
-            for cut_roll in db_order.cut_rolls:
-                if cut_roll.status != "delivered":  # Only process undelivered rolls
-                    # Log the inventory change
-                    log = models.InventoryLog(
-                        roll_id=cut_roll.id,
-                        order_id=order_id,
-                        action="delivered",
-                        previous_status=cut_roll.status,
-                        new_status="delivered",
-                        notes=f"Order {order_id} marked as delivered" + 
-                              (f" by user {user_id}" if user_id else ""),
-                        created_by_id=user_id
-                    )
-                    db.add(log)
-                    
-                    # Update cut roll status
-                    cut_roll.status = "delivered"
-                    
-                    # Remove from inventory
-                    if cut_roll.inventory_item:
-                        db.delete(cut_roll.inventory_item)
-        
-        db.commit()
-        db.refresh(db_order)
-        return db_order
-        
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-def log_inventory_change(
-    db: Session,
-    roll_id: uuid.UUID,
-    action: str,
-    new_status: str,
-    user_id: uuid.UUID,
-    order_id: Optional[uuid.UUID] = None,
-    previous_status: Optional[str] = None,
-    notes: Optional[str] = None
-) -> models.InventoryLog:
-    """
-    Log an inventory change with proper validation
-    
-    Args:
-        db: Database session
-        roll_id: ID of the cut roll
-        action: Action performed (e.g., 'created', 'allocated', 'delivered')
-        new_status: New status of the roll
-        user_id: ID of the user performing the action
-        order_id: Optional associated order ID
-        previous_status: Optional previous status
-        notes: Optional notes about the change
-    """
-    log = models.InventoryLog(
-        roll_id=roll_id,
-        order_id=order_id,
-        action=action,
-        previous_status=previous_status,
-        new_status=new_status,
-        notes=notes,
-        created_by_id=user_id
-    )
-    db.add(log)
     db.commit()
-    db.refresh(log)
-    return log
+    db.refresh(db_plan)
+    return db_plan
 
-def get_inventory_logs(
-    db: Session,
-    roll_id: Optional[uuid.UUID] = None,
-    order_id: Optional[uuid.UUID] = None,
-    skip: int = 0,
-    limit: int = 100
-) -> List[models.InventoryLog]:
-    """
-    Get inventory logs with optional filtering
-    
-    Args:
-        db: Database session
-        roll_id: Optional filter by roll ID
-        order_id: Optional filter by order ID
-        skip: Number of records to skip
-        limit: Maximum number of records to return
-        
-    Returns:
-        List of inventory log entries
-    """
-    query = db.query(models.InventoryLog)
-    
-    if roll_id is not None:
-        query = query.filter(models.InventoryLog.roll_id == roll_id)
-    if order_id is not None:
-        query = query.filter(models.InventoryLog.order_id == order_id)
-    
-    return query.order_by(models.InventoryLog.created_at.desc())\
-                .offset(skip)\
-                .limit(limit)\
-                .all()
+# ============================================================================
+# PRODUCTION ORDER MASTER CRUD
+# ============================================================================
 
-def find_matching_inventory(
-    db: Session, 
-    width_inches: int, 
-    gsm: int, 
-    bf: float, 
-    shade: str, 
-    quantity: int = 1
-):
-    """
-    Find available cut rolls that match the specified criteria.
+def create_production_order(db: Session, production: schemas.ProductionOrderMasterCreate) -> models.ProductionOrderMaster:
+    """Create a new production order"""
+    # Validate paper exists
+    paper = get_paper(db, production.paper_id)
+    if not paper or paper.status != "active":
+        raise HTTPException(status_code=400, detail="Invalid or inactive paper specification")
     
-    Args:
-        db: Database session
-        width_inches: Required roll width in inches
-        gsm: Required GSM value
-        bf: Required Brightness Factor
-        shade: Required shade/color
-        quantity: Number of matching rolls needed
-        
-    Returns:
-        List of matching InventoryItem objects
-    """
-    return db.query(models.InventoryItem).join(models.CutRoll).filter(
-        models.CutRoll.width_inches == width_inches,
-        models.CutRoll.gsm == gsm,
-        models.CutRoll.bf == bf,
-        models.CutRoll.shade == shade,
-        models.CutRoll.status == "available",
-        models.InventoryItem.allocated_to_order_id == None
-    ).order_by(models.InventoryItem.id).limit(quantity).all()
+    db_production = models.ProductionOrderMaster(
+        paper_id=production.paper_id,
+        quantity=production.quantity,
+        priority=production.priority,
+        created_by_id=production.created_by_id
+    )
+    
+    db.add(db_production)
+    db.commit()
+    db.refresh(db_production)
+    return db_production
 
-def find_matching_jumbo_roll(
-    db: Session,
-    gsm: int,
-    bf: float,
-    shade: str,
-    min_width_inches: int = 0   
-    ):
-    """
-    Find a jumbo roll that can be used to cut the required specifications.
-    
-    Args:
-        db: Database session
-        gsm: Required GSM value
-        bf: Required Brightness Factor
-        shade: Required shade/color
-        min_width_inches: Total width needed for all cuts
-        
-    Returns:
-        JumboRoll object if found, None otherwise
-    """
-    return db.query(models.JumboRoll).filter(
-        models.JumboRoll.gsm == gsm,
-        models.JumboRoll.bf == bf,
-        models.JumboRoll.shade == shade,
-        models.JumboRoll.status == "available",
-        models.JumboRoll.width_inches >= min_width_inches
-    ).order_by(models.JumboRoll.width_inches).first()  # Use smallest suitable roll first
+def get_production_order(db: Session, production_id: uuid.UUID) -> Optional[models.ProductionOrderMaster]:
+    """Get production order by ID"""
+    return db.query(models.ProductionOrderMaster).options(
+        joinedload(models.ProductionOrderMaster.paper)
+    ).filter(models.ProductionOrderMaster.id == production_id).first()
 
-def cut_jumbo_roll(
-    db: Session,
-    jumbo_roll_id: uuid.UUID,
-    order_id: uuid.UUID,
-    cut_widths: List[int],  # List of widths to cut
-    user_id: Optional[uuid.UUID] = None
-):
-    """
-    Cut a jumbo roll into smaller rolls and update inventory.
+def get_production_orders(db: Session, skip: int = 0, limit: int = 100, status: str = None) -> List[models.ProductionOrderMaster]:
+    """Get all production orders with pagination"""
+    query = db.query(models.ProductionOrderMaster).options(
+        joinedload(models.ProductionOrderMaster.paper)
+    )
     
-    Args:
-        db: Database session
-        jumbo_roll_id: ID of the jumbo roll to cut
-        order_id: ID of the order being fulfilled
-        cut_widths: List of widths to cut (in inches)
-        user_id: Optional user ID performing the action
-    """
-    jumbo_roll = db.query(models.JumboRoll).filter(
-        models.JumboRoll.id == jumbo_roll_id,
-        models.JumboRoll.status == "available"
-    ).first()
+    if status:
+        query = query.filter(models.ProductionOrderMaster.status == status)
     
-    if not jumbo_roll:
-        raise HTTPException(status_code=404, detail="Jumbo roll not found or not available")
+    return query.order_by(
+        models.ProductionOrderMaster.priority.desc(),
+        models.ProductionOrderMaster.created_at
+    ).offset(skip).limit(limit).all()
+
+def update_production_order(db: Session, production_id: uuid.UUID, production_update: schemas.ProductionOrderMasterUpdate) -> Optional[models.ProductionOrderMaster]:
+    """Update production order"""
+    db_production = get_production_order(db, production_id)
+    if not db_production:
+        return None
     
-    total_cut_width = sum(cut_widths)
-    if total_cut_width > jumbo_roll.width_inches:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Total cut width ({total_cut_width}\") exceeds jumbo roll width ({jumbo_roll.width_inches}\")"
+    update_data = production_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_production, field, value)
+    
+    if production_update.status == "completed":
+        db_production.completed_at = datetime.utcnow()
+    elif production_update.status == "in_progress" and not db_production.started_at:
+        db_production.started_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(db_production)
+    return db_production
+
+def complete_production_order(db: Session, production_id: uuid.UUID, created_by_id: uuid.UUID) -> Dict[str, Any]:
+    """Complete production order and create inventory items"""
+    db_production = get_production_order(db, production_id)
+    if not db_production:
+        raise HTTPException(status_code=404, detail="Production order not found")
+    
+    if db_production.status != "in_progress":
+        raise HTTPException(status_code=400, detail="Production order is not in progress")
+    
+    # Create inventory items for completed production
+    inventory_items = []
+    for _ in range(db_production.quantity):
+        inventory_item = models.InventoryMaster(
+            paper_id=db_production.paper_id,
+            width_inches=118,  # Standard jumbo roll width
+            weight_kg=4500.0,  # Standard jumbo roll weight
+            roll_type="jumbo",
+            status="available",
+            qr_code=generate_qr_code(uuid.uuid4()),
+            created_by_id=created_by_id
         )
+        db.add(inventory_item)
+        inventory_items.append(inventory_item)
     
-    try:
-        # Mark jumbo roll as being cut
-        jumbo_roll.status = "cutting"
-        db.add(jumbo_roll)
+    # Update production order status
+    db_production.status = "completed"
+    db_production.completed_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {
+        "production_order_id": str(db_production.id),
+        "inventory_items_created": len(inventory_items),
+        "inventory_item_ids": [str(item.id) for item in inventory_items]
+    }
+
+# ============================================================================
+# LEGACY COMPATIBILITY FUNCTIONS
+# ============================================================================
+
+def create_order_legacy(db: Session, order: schemas.OrderCreate) -> models.OrderMaster:
+    """Legacy order creation - converts to master-based format"""
+    # Try to find or create client
+    client = get_client_by_name(db, order.customer_name)
+    if not client:
+        # Create a default user for system operations
+        system_user = get_user_by_username(db, "system")
+        if not system_user:
+            system_user = create_user(db, schemas.UserMasterCreate(
+                name="System User",
+                username="system",
+                password="system123",
+                role="admin"
+            ))
         
-        # Create cut rolls
-        cut_rolls = []
-        for width in cut_widths:
-            cut_roll = models.CutRoll(
-                jumbo_roll_id=jumbo_roll.id,
-                width_inches=width,
-                gsm=jumbo_roll.gsm,
-                bf=jumbo_roll.bf,
-                shade=jumbo_roll.shade,
-                status="cut",  # Will be updated to weighed after weighing
-                order_id=order_id,
-                created_by_id=user_id
-            )
-            db.add(cut_roll)
-            cut_rolls.append(cut_roll)
-        
-        # Update jumbo roll status
-        if total_cut_width == jumbo_roll.width_inches:
-            jumbo_roll.status = "used"  # Fully used
-        else:
-            jumbo_roll.status = "partial"  # Partially used
-            # Optionally create a new jumbo roll with remaining width
-            remaining_width = jumbo_roll.width_inches - total_cut_width
-            if remaining_width >= 36:  # Minimum useful width
-                new_jumbo = models.JumboRoll(
-                    width_inches=remaining_width,
-                    gsm=jumbo_roll.gsm,
-                    bf=jumbo_roll.bf,
-                    shade=jumbo_roll.shade,
-                    weight_kg=int(jumbo_roll.weight_kg * (remaining_width / jumbo_roll.width_inches)),
-                    production_date=datetime.utcnow(),
-                    status="available",
-                    created_by_id=user_id
-                )
-                db.add(new_jumbo)
-        
-        db.commit()
-        return cut_rolls
-        
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        # Create new client
+        client = create_client(db, schemas.ClientMasterCreate(
+            company_name=order.customer_name,
+            created_by_id=system_user.id
+        ))
+    
+    # Try to find or create paper specification
+    paper = get_paper_by_specs(db, order.gsm, order.bf, order.shade)
+    if not paper:
+        paper = create_paper(db, schemas.PaperMasterCreate(
+            name=f"{order.shade} {order.gsm}GSM BF{order.bf}",
+            gsm=order.gsm,
+            bf=order.bf,
+            shade=order.shade,
+            created_by_id=client.created_by_id
+        ))
+    
+    # Create order using master-based format
+    return create_order(db, schemas.OrderMasterCreate(
+        client_id=client.id,
+        paper_id=paper.id,
+        width_inches=order.width_inches,
+        quantity_rolls=order.quantity_rolls,
+        created_by_id=client.created_by_id
+    ))

@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Jumbo Roll Cutting Optimizer</title>
+    <!-- Add jsPDF library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
         
@@ -159,6 +161,15 @@
 
         .btn-danger:hover {
             background: #b91c1c;
+        }
+
+        .btn-pdf {
+            background: #7c3aed;
+            color: white;
+        }
+
+        .btn-pdf:hover:not(:disabled) {
+            background: #6d28d9;
         }
 
         .orders-list {
@@ -412,6 +423,13 @@
             color: #374151;
         }
 
+        .pdf-controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
         @media (max-width: 768px) {
             .main-content {
                 grid-template-columns: 1fr;
@@ -485,309 +503,502 @@
                             <label for="shade">Shade</label>
                             <select id="shade" required>
                                 <option value="">Select Shade</option>
-                                <option value="white">Natural</option>
-                                <option value="cream">Golden</option>
+                                <option value="Natural">Natural</option>
+                                <option value="Golden">Golden</option>
                             </select>
                         </div>
                     </div>
-
-                    <div class="form-row">
-                        <button type="submit" class="btn btn-primary">Add Order</button>
-                        <button type="button" id="clearOrders" class="btn btn-danger">Clear All</button>
-                    </div>
-                </form>
-
-                <div class="form-group">
-                    <h3 style="margin-bottom: 1rem; color: #0f172a; font-size: 1.1rem; font-weight: 600;">Current Orders</h3>
-                    <div id="ordersList" class="orders-list">
-                        <p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <button id="optimizeBtn" class="btn btn-success" style="width: 100%;" disabled>
-                        Optimize Cutting Plan
-                    </button>
-                </div>
-            </div>
-
-            <!-- Results Section -->
-            <div class="results-section">
-                <h2 class="section-title">Optimization Results</h2>
-                <div id="resultsContainer">
-                    <div class="empty-state">
-                        <h3>Ready for Optimization</h3>
-                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        class CuttingOptimizer {
-            constructor() {
-                this.orders = [];
-                this.apiBaseUrl = 'http://localhost:8000/api';
-                this.initializeEventListeners();
-            }
-
-            initializeEventListeners() {
-                document.getElementById('orderForm').addEventListener('submit', (e) => {
-                    e.preventDefault();
-                    this.addOrder();
-                });
-
-                document.getElementById('clearOrders').addEventListener('click', () => {
-                    this.clearOrders();
-                });
-
-                document.getElementById('optimizeBtn').addEventListener('click', () => {
-                    this.optimizeCutting();
-                });
-            }
-
-            addOrder() {
-                const width = parseInt(document.getElementById('width').value);
-                const quantity = parseInt(document.getElementById('quantity').value);
-                const gsm = parseInt(document.getElementById('gsm').value);
-                const bf = parseFloat(document.getElementById('bf').value);
-                const shade = document.getElementById('shade').value;
-
-                if (!width || !quantity || !gsm || !bf || !shade) {
-                    this.showError('Please fill in all fields');
-                    return;
-                }
-
-                const order = {
-                    id: Date.now(),
-                    width,
-                    quantity,
-                    gsm,
-                    bf,
-                    shade,
-                    min_length: 1000
-                };
-
-                this.orders.push(order);
-                this.updateOrdersList();
-                this.clearForm();
-                this.updateOptimizeButton();
-            }
-
-            removeOrder(orderId) {
-                this.orders = this.orders.filter(order => order.id !== orderId);
-                this.updateOrdersList();
-                this.updateOptimizeButton();
-            }
-
-            clearOrders() {
-                this.orders = [];
-                this.updateOrdersList();
-                this.updateOptimizeButton();
-                this.clearResults();
-            }
-
-            clearForm() {
-                document.getElementById('orderForm').reset();
-            }
-
-            updateOrdersList() {
-                const container = document.getElementById('ordersList');
-                
-                if (this.orders.length === 0) {
-                    container.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>';
-                    return;
-                }
-
-                container.innerHTML = this.orders.map(order => `
-                    <div class="order-item">
-                        <div class="order-details">
-                            <div class="order-spec">${order.width}" × ${order.quantity} rolls</div>
-                            <div class="order-meta">GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</div>
-                        </div>
-                        <button class="btn btn-danger remove-btn" onclick="optimizer.removeOrder(${order.id})">×</button>
-                    </div>
-                `).join('');
-            }
-
-            updateOptimizeButton() {
-                const btn = document.getElementById('optimizeBtn');
-                btn.disabled = this.orders.length === 0;
-            }
-
-            async optimizeCutting() {
-                if (this.orders.length === 0) return;
-
-                this.showLoading();
-
-                try {
-                    const requestData = {
-                        rolls: this.orders.map(order => ({
-                            width: order.width,
-                            quantity: order.quantity,
-                            gsm: order.gsm,
-                            bf: order.bf,
-                            shade: order.shade,
-                            min_length: order.min_length
-                        })),
-                        jumbo_roll_width: 118,
-                        consider_standard_sizes: true,
-                        strict_matching: true
-                    };
-
-                    const response = await fetch(`${this.apiBaseUrl}/cutting-optimization/from-specs`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(requestData)
-                    });
-
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-
-                    const result = await response.json();
-                    this.displayResults(result);
-
-                } catch (error) {
-                    console.error('Optimization error:', error);
-                    this.showError(`Optimization failed: ${error.message}`);
-                }
-            }
-
-            displayResults(result) {
-                const container = document.getElementById('resultsContainer');
-                
-                // Summary statistics
-                const summaryHtml = `
-                    <div class="results-grid">
-                        <div class="stat-card">
-                            <div class="stat-value">${result.total_rolls_needed}</div>
-                            <div class="stat-label">Jumbo Rolls Needed</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${result.total_waste_percentage.toFixed(1)}%</div>
-                            <div class="stat-label">Total Waste</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${result.total_waste_inches.toFixed(1)}"</div>
-                            <div class="stat-label">Waste Inches</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">${result.patterns.length}</div>
-                            <div class="stat-label">Cutting Patterns</div>
-                        </div>
-                    </div>
-                `;
-
-                // Jumbo rolls visualization
-                const patternsHtml = result.patterns.map((pattern, index) => {
-                    const wasteClass = pattern.waste_percentage < 5 ? 'waste-low' : 
-                                     pattern.waste_percentage < 15 ? 'waste-medium' : 'waste-high';
+                                    <div class="form-row">
+                                        <button type="submit" class="btn btn-primary">Add Order</button>
+                                        <button type="button" id="clearOrders" class="btn btn-danger">Clear All</button>
+                                    </div>
+                                </form>
                     
-                    const usedWidth = 118 - pattern.waste_inches;
-                    const usedPercentage = (usedWidth / 118) * 100;
-                    const wastePercentage = (pattern.waste_inches / 118) * 100;
-
-                    return `
-                        <div class="jumbo-roll">
-                            <div class="jumbo-header">
-                                <div class="jumbo-title">Jumbo Roll #${index + 1}</div>
-                                <div class="waste-badge ${wasteClass}">
-                                    ${pattern.waste_percentage.toFixed(1)}% Waste
+                                <div class="form-group">
+                                    <h3 style="margin-bottom: 1rem; color: #0f172a; font-size: 1.1rem; font-weight: 600;">Current Orders</h3>
+                                    <div id="ordersList" class="orders-list">
+                                        <p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>
+                                    </div>
+                                </div>
+                    
+                                <div class="form-group">
+                                    <button id="optimizeBtn" class="btn btn-success" style="width: 100%;" disabled>
+                                        Optimize Cutting Plan
+                                    </button>
                                 </div>
                             </div>
-                            
-                            <div class="rolls-container">
-                                ${pattern.rolls.map(roll => `
-                                    <div class="roll-item">
-                                        ${roll.width}" (${roll.shade})
-                                    </div>
-                                `).join('')}
-                            </div>
-                            
-                            <div class="jumbo-visual">
-                                <div style="display: flex; width: 100%; height: 100%;">
-                                    <div class="used-space" style="width: ${usedPercentage}%; position: relative;">
-                                        <span class="visual-label">Used: ${usedWidth.toFixed(1)}"</span>
-                                    </div>
-                                    <div class="waste-space" style="width: ${wastePercentage}%; position: relative;">
-                                        <span class="visual-label">Waste: ${pattern.waste_inches.toFixed(1)}"</span>
+                    
+                            <!-- Results Section -->
+                            <div class="results-section">
+                                <h2 class="section-title">Optimization Results</h2>
+                                <div id="resultsContainer">
+                                    <div class="empty-state">
+                                        <h3>Ready for Optimization</h3>
+                                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
                                     </div>
                                 </div>
                             </div>
                         </div>
-                    `;
-                }).join('');
-
-                // Pending orders
-                const pendingHtml = result.unfulfilled_orders && result.unfulfilled_orders.length > 0 ? `
-                    <div class="pending-orders">
-                        <div class="pending-title">
-                            Pending Orders (Need Production)
-                        </div>
-                        ${result.unfulfilled_orders.map(order => `
-                            <div class="pending-item">
-                                <strong>${order.width}" × ${order.quantity} rolls</strong>
-                                <br>
-                                <small>GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</small>
-                            </div>
-                        `).join('')}
                     </div>
-                ` : '';
+                    
+                    <script>
+                        class CuttingOptimizer {
+                            constructor() {
+                                this.orders = [];
+                                this.currentResult = null;
+                                this.apiBaseUrl = 'http://localhost:8000';
+                                this.initializeEventListeners();
+                            }
+                    
+                            initializeEventListeners() {
+                                document.getElementById('orderForm').addEventListener('submit', (e) => {
+                                    e.preventDefault();
+                                    this.addOrder();
+                                });
+                    
+                                document.getElementById('clearOrders').addEventListener('click', () => {
+                                    this.clearOrders();
+                                });
+                    
+                                document.getElementById('optimizeBtn').addEventListener('click', () => {
+                                    this.optimizeCutting();
+                                });
+                            }
+                    
+                            addOrder() {
+                                const width = parseInt(document.getElementById('width').value);
+                                const quantity = parseInt(document.getElementById('quantity').value);
+                                const gsm = parseInt(document.getElementById('gsm').value);
+                                const bf = parseFloat(document.getElementById('bf').value);
+                                const shade = document.getElementById('shade').value;
+                    
+                                if (!width || !quantity || !gsm || !bf || !shade) {
+                                    this.showError('Please fill in all fields');
+                                    return;
+                                }
+                    
+                                const order = {
+                                    id: Date.now(),
+                                    width,
+                                    quantity,
+                                    gsm,
+                                    bf,
+                                    shade,
+                                    min_length: 1000
+                                };
+                    
+                                this.orders.push(order);
+                                this.updateOrdersList();
+                                this.clearForm();
+                                this.updateOptimizeButton();
+                            }
+                    
+                            removeOrder(orderId) {
+                                this.orders = this.orders.filter(order => order.id !== orderId);
+                                this.updateOrdersList();
+                                this.updateOptimizeButton();
+                            }
+                    
+                            clearOrders() {
+                                this.orders = [];
+                                this.updateOrdersList();
+                                this.updateOptimizeButton();
+                                this.clearResults();
+                            }
+                    
+                            clearForm() {
+                                document.getElementById('orderForm').reset();
+                            }
+                    
+                            updateOrdersList() {
+                                const container = document.getElementById('ordersList');
+                                
+                                if (this.orders.length === 0) {
+                                    container.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>';
+                                    return;
+                                }
+                    
+                                container.innerHTML = this.orders.map(order => `
+                                    <div class="order-item">
+                                        <div class="order-details">
+                                            <div class="order-spec">${order.width}" × ${order.quantity} rolls</div>
+                                            <div class="order-meta">GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</div>
+                                        </div>
+                                        <button class="btn btn-danger remove-btn" onclick="optimizer.removeOrder(${order.id})">×</button>
+                                    </div>
+                                `).join('');
+                            }
+                    
+                            updateOptimizeButton() {
+                                const btn = document.getElementById('optimizeBtn');
+                                btn.disabled = this.orders.length === 0;
+                            }
+                    
+                            async optimizeCutting() {
+                                if (this.orders.length === 0) return;
+                    
+                                this.showLoading();
+                    
+                                try {
+                                    const requestData = {
+                                        rolls: this.orders.map(order => ({
+                                            width: order.width,
+                                            quantity: order.quantity,
+                                            gsm: order.gsm,
+                                            bf: order.bf,
+                                            shade: order.shade,
+                                            min_length: order.min_length
+                                        })),
+                                        jumbo_roll_width: 118,
+                                        consider_standard_sizes: true,
+                                        strict_matching: true
+                                    };
+                    
+                                    const response = await fetch(`${this.apiBaseUrl}/api/optimizer/test-frontend`, {
+                                        method: 'POST',
+                                        headers: {
+                                            'Content-Type': 'application/json',
+                                        },
+                                        body: JSON.stringify(requestData)
+                                    });
+                    
+                                    if (!response.ok) {
+                                        throw new Error(`HTTP error! status: ${response.status}`);
+                                    }
+                    
+                                    const result = await response.json();
+                                    this.currentResult = result;
+                                    this.displayResults(result);
+                    
+                                } catch (error) {
+                                    console.error('Optimization error:', error);
+                                    this.showError(`Optimization failed: ${error.message}`);
+                                }
+                            }
+                    
+                            displayResults(result) {
+                                const container = document.getElementById('resultsContainer');
+                                
+                                // PDF Generation Controls
+                                const pdfControlsHtml = `
+                                    <div class="pdf-controls">
+                                        <button class="btn btn-pdf" onclick="optimizer.generatePDF()">
+                                            📄 Generate PDF Report
+                                        </button>
+                                    </div>
+                                `;
+                    
+                                // Summary statistics
+                                const summaryHtml = `
+                                    <div class="results-grid">
+                                        <div class="stat-card">
+                                            <div class="stat-value">${result.total_rolls_needed}</div>
+                                            <div class="stat-label">Jumbo Rolls Needed</div>
+                                        </div>
+                                        <div class="stat-card">
+                                            <div class="stat-value">${result.total_waste_percentage.toFixed(1)}%</div>
+                                            <div class="stat-label">Total Waste</div>
+                                        </div>
+                                        <div class="stat-card">
+                                            <div class="stat-value">${result.total_waste_inches.toFixed(1)}"</div>
+                                            <div class="stat-label">Waste Inches</div>
+                                        </div>
+                                        <div class="stat-card">
+                                            <div class="stat-value">${result.patterns.length}</div>
+                                            <div class="stat-label">Cutting Patterns</div>
+                                        </div>
+                                    </div>
+                                `;
+                    
+                                // Jumbo rolls visualization
+                                const patternsHtml = result.patterns.map((pattern, index) => {
+                                    const wasteClass = pattern.waste_percentage < 5 ? 'waste-low' : 
+                                                     pattern.waste_percentage < 15 ? 'waste-medium' : 'waste-high';
+                                    
+                                    const usedWidth = 118 - pattern.waste_inches;
+                                    const usedPercentage = (usedWidth / 118) * 100;
+                                    const wastePercentage = (pattern.waste_inches / 118) * 100;
+                    
+                                    return `
+                                        <div class="jumbo-roll">
+                                            <div class="jumbo-header">
+                                                <div class="jumbo-title">Jumbo Roll #${index + 1}</div>
+                                                <div class="waste-badge ${wasteClass}">
+                                                    ${pattern.waste_percentage.toFixed(1)}% Waste
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="rolls-container">
+                                                ${pattern.rolls.map(roll => `
+                                                    <div class="roll-item">
+                                                        ${roll.width}" (${roll.shade})
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                            
+                                            <div class="jumbo-visual">
+                                                <div style="display: flex; width: 100%; height: 100%;">
+                                                    <div class="used-space" style="width: ${usedPercentage}%; position: relative;">
+                                                        <span class="visual-label">Used: ${usedWidth.toFixed(1)}"</span>
+                                                    </div>
+                                                    <div class="waste-space" style="width: ${wastePercentage}%; position: relative;">
+                                                        <span class="visual-label">Waste: ${pattern.waste_inches.toFixed(1)}"</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('');
+                    
+                                // Pending orders
+                                const pendingHtml = result.unfulfilled_orders && result.unfulfilled_orders.length > 0 ? `
+                                    <div class="pending-orders">
+                                        <div class="pending-title">
+                                            Pending Orders (Need Production)
+                                        </div>
+                                        ${result.unfulfilled_orders.map(order => `
+                                            <div class="pending-item">
+                                                <strong>${order.width}" × ${order.quantity} rolls</strong>
+                                                <br>
+                                                <small>GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</small>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                ` : '';
+                    
+                                container.innerHTML = pdfControlsHtml + summaryHtml + patternsHtml + pendingHtml;
+                            }
+                    
+                            generatePDF() {
+                                if (!this.currentResult) {
+                                    this.showError('No optimization results to export');
+                                    return;
+                                }
+                    
+                                const { jsPDF } = window.jspdf;
+                                const doc = new jsPDF();
+                                
+                                // Set up colors
+                                const primaryColor = [30, 64, 175];
+                                const secondaryColor = [100, 116, 139];
+                                const successColor = [5, 150, 105];
+                                const dangerColor = [220, 38, 38];
+                                
+                                let yPosition = 20;
+                                const leftMargin = 20;
+                                const pageWidth = doc.internal.pageSize.getWidth();
+                                const contentWidth = pageWidth - 2 * leftMargin;
+                                
+                                // Helper function to check page break
+                                const checkPageBreak = (height) => {
+                                    if (yPosition + height > 270) {
+                                        doc.addPage();
+                                        yPosition = 20;
+                                    }
+                                };
+                    
+                                // Title
+                                doc.setFontSize(24);
+                                doc.setTextColor(...primaryColor);
+                                doc.text('Jumbo Roll Cutting Report', leftMargin, yPosition);
+                                yPosition += 10;
+                                
+                                // Date
+                                doc.setFontSize(10);
+                                doc.setTextColor(...secondaryColor);
+                                doc.text(`Generated on: ${new Date().toLocaleString()}`, leftMargin, yPosition);
+                                yPosition += 15;
+                                
+                                // Summary Section
+                                doc.setFontSize(16);
+                                doc.setTextColor(...primaryColor);
+                                doc.text('Summary', leftMargin, yPosition);
+                                yPosition += 10;
+                                
+                                // Summary stats
+                                doc.setFontSize(12);
+                                doc.setTextColor(0, 0, 0);
+                                const summaryData = [
+                                    ['Total Jumbo Rolls Needed', this.currentResult.total_rolls_needed.toString()],
+                                    ['Total Waste Percentage', `${this.currentResult.total_waste_percentage.toFixed(1)}%`],
+                                    ['Total Waste Inches', `${this.currentResult.total_waste_inches.toFixed(1)}"`],
+                                    ['Cutting Patterns', this.currentResult.patterns.length.toString()]
+                                ];
+                                
+                                summaryData.forEach(([label, value]) => {
+                                    doc.setFont(undefined, 'normal');
+                                    doc.text(`${label}: `, leftMargin, yPosition);
+                                    doc.setFont(undefined, 'bold');
+                                    doc.text(value, leftMargin + 60, yPosition);
+                                    yPosition += 7;
+                                });
+                                
+                                yPosition += 10;
+                                
+                                // Group patterns by GSM, BF, and Shade
+                                const groupedPatterns = this.groupPatternsBySpecs(this.currentResult.patterns);
+                                
+                                // Iterate through grouped patterns
+                                Object.entries(groupedPatterns).forEach(([specKey, patterns]) => {
+                                    checkPageBreak(40);
+                                    
+                                    // Spec header
+                                    doc.setFillColor(...primaryColor);
+                                    doc.rect(leftMargin, yPosition - 5, contentWidth, 10, 'F');
+                                    doc.setFontSize(14);
+                                    doc.setTextColor(255, 255, 255);
+                                    doc.setFont(undefined, 'bold');
+                                    doc.text(specKey, leftMargin + 5, yPosition);
+                                    yPosition += 10;
+                                    
+                                    // Patterns for this spec
+                                    patterns.forEach((pattern, index) => {
+                                        checkPageBreak(50);
+                                        
+                                        // Pattern header
+                                        doc.setFontSize(12);
+                                        doc.setTextColor(0, 0, 0);
+                                        doc.setFont(undefined, 'bold');
+                                        doc.text(`Jumbo Roll #${pattern.globalIndex + 1}`, leftMargin, yPosition);
+                                        
+                                        // Waste percentage
+                                        const wasteColor = pattern.waste_percentage < 5 ? successColor : 
+                                                         pattern.waste_percentage < 15 ? [251, 146, 60] : dangerColor;
+                                        doc.setTextColor(...wasteColor);
+                                        doc.text(`${pattern.waste_percentage.toFixed(1)}% Waste`, pageWidth - leftMargin - 40, yPosition);
+                                        yPosition += 8;
+                                        
+                                        // Roll details
+                                        doc.setFontSize(10);
+                                        doc.setTextColor(0, 0, 0);
+                                        doc.setFont(undefined, 'normal');
 
-                container.innerHTML = summaryHtml + patternsHtml + pendingHtml;
-            }
 
-            showLoading() {
-                const container = document.getElementById('resultsContainer');
-                container.innerHTML = `
-                    <div class="loading">
-                        <div class="spinner"></div>
-                        <h3>Optimizing Cutting Plan...</h3>
-                        <p>Calculating the most efficient cutting patterns</p>
-                    </div>
-                `;
-            }
-
-            showError(message) {
-                const container = document.getElementById('resultsContainer');
-                container.innerHTML = `
-                    <div class="error">
-                        <strong>Error:</strong> ${message}
-                    </div>
-                `;
-            }
-
-            clearResults() {
-                const container = document.getElementById('resultsContainer');
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <h3>Ready for Optimization</h3>
-                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
-                    </div>
-                `;
-            }
-        }
-
-        // Initialize the application
-        const optimizer = new CuttingOptimizer();
-
-        // Add some sample data for demonstration
-        document.addEventListener('DOMContentLoaded', () => {
-            // You can uncomment these lines to add sample orders for testing
-           
-            optimizer.orders = [
-                { id: 1, width: 32, quantity: 3, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 },
-                { id: 2, width: 38, quantity: 2, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 },
-                { id: 3, width: 46, quantity: 1, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 }
-            ];
-            optimizer.updateOrdersList();
-            optimizer.updateOptimizeButton();
-            
-        });
-    </script>
-</body>
-</html>
+                                        const rollsText = pattern.rolls.map(roll => `${roll.width}"`).join(', ');
+                                        doc.text(`Rolls: ${rollsText}`, leftMargin + 5, yPosition);
+                                        yPosition += 6;
+                                        
+                                        // Visual representation
+                                        const barHeight = 8;
+                                        const barWidth = contentWidth - 10;
+                                        const usedWidth = (118 - pattern.waste_inches) / 118 * barWidth;
+                                        
+                                        // Used space (green)
+                                        doc.setFillColor(...successColor);
+                                        doc.rect(leftMargin + 5, yPosition, usedWidth, barHeight, 'F');
+                                        
+                                        // Waste space (red)
+                                        doc.setFillColor(...dangerColor);
+                                        doc.rect(leftMargin + 5 + usedWidth, yPosition, barWidth - usedWidth, barHeight, 'F');
+                                        
+                                        // Labels
+                                        doc.setFontSize(8);
+                                        doc.setTextColor(255, 255, 255);
+                                        doc.text(`Used: ${(118 - pattern.waste_inches).toFixed(1)}"`, leftMargin + 10, yPosition + 5.5);
+                                        if (pattern.waste_inches > 0) {
+                                            doc.text(`Waste: ${pattern.waste_inches.toFixed(1)}"`, leftMargin + 5 + usedWidth + 5, yPosition + 5.5);
+                                        }
+                                        
+                                        yPosition += 15;
+                                    });
+                                    
+                                    yPosition += 5;
+                                });
+                                
+                                // Pending orders if any
+                                if (this.currentResult.unfulfilled_orders && this.currentResult.unfulfilled_orders.length > 0) {
+                                    checkPageBreak(30);
+                                    
+                                    doc.setFontSize(16);
+                                    doc.setTextColor(...dangerColor);
+                                    doc.text('Pending Orders (Need Production)', leftMargin, yPosition);
+                                    yPosition += 10;
+                                    
+                                    doc.setFontSize(10);
+                                    doc.setTextColor(0, 0, 0);
+                                    this.currentResult.unfulfilled_orders.forEach(order => {
+                                        checkPageBreak(15);
+                                        doc.text(`• ${order.width}" × ${order.quantity} rolls (GSM: ${order.gsm}, BF: ${order.bf}, Shade: ${order.shade})`, 
+                                                leftMargin + 5, yPosition);
+                                        yPosition += 6;
+                                    });
+                                }
+                                
+                                // Save the PDF
+                                doc.save(`cutting_optimization_${new Date().getTime()}.pdf`);
+                            }
+                    
+                            groupPatternsBySpecs(patterns) {
+                                const grouped = {};
+                                
+                                patterns.forEach((pattern, globalIndex) => {
+                                    // Get the first roll's specs (assuming all rolls in a pattern have same specs)
+                                    if (pattern.rolls && pattern.rolls.length > 0) {
+                                        const firstRoll = pattern.rolls[0];
+                                        const key = `GSM: ${firstRoll.gsm} | BF: ${firstRoll.bf} | Shade: ${firstRoll.shade}`;
+                                        
+                                        if (!grouped[key]) {
+                                            grouped[key] = [];
+                                        }
+                                        
+                                        grouped[key].push({
+                                            ...pattern,
+                                            globalIndex: globalIndex
+                                        });
+                                    }
+                                });
+                                return grouped;
+                            }
+                    
+                            showLoading() {
+                                const container = document.getElementById('resultsContainer');
+                                container.innerHTML = `
+                                    <div class="loading">
+                                        <div class="spinner"></div>
+                                        <h3>Optimizing Cutting Plan...</h3>
+                                        <p>Calculating the most efficient cutting patterns</p>
+                                    </div>
+                                `;
+                            }
+                    
+                            showError(message) {
+                                const container = document.getElementById('resultsContainer');
+                                container.innerHTML = `
+                                    <div class="error">
+                                        <strong>Error:</strong> ${message}
+                                    </div>
+                                `;
+                            }
+                    
+                            clearResults() {
+                                const container = document.getElementById('resultsContainer');
+                                this.currentResult = null;
+                                container.innerHTML = `
+                                    <div class="empty-state">
+                                        <h3>Ready for Optimization</h3>
+                                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
+                                    </div>
+                                `;
+                            }
+                        }
+                    
+                        // Initialize the application
+                        const optimizer = new CuttingOptimizer();
+                    
+                        // Add some sample data for demonstration
+                        document.addEventListener('DOMContentLoaded', () => {
+                            // You can uncomment these lines to add sample orders for testing
+                           
+                            optimizer.orders = [
+                                { id: 1, width: 32, quantity: 3, gsm: 90, bf: 18.0, shade: 'Natural', min_length: 1000 },
+                                { id: 2, width: 38, quantity: 2, gsm: 90, bf: 18.0, shade: 'Natural', min_length: 1000 },
+                                { id: 3, width: 46, quantity: 1, gsm: 90, bf: 18.0, shade: 'Natural', min_length: 1000 },
+                                { id: 4, width: 35, quantity: 2, gsm: 80, bf: 16.0, shade: 'Golden', min_length: 1000 },
+                                { id: 5, width: 40, quantity: 1, gsm: 80, bf: 16.0, shade: 'Golden', min_length: 1000 },
+                                { id: 6, width: 42, quantity: 1, gsm: 80, bf: 16.0, shade: 'Golden', min_length: 1000 }
+                            ];
+                            optimizer.updateOrdersList();
+                            optimizer.updateOptimizeButton();
+                            
+                        });
+                    </script>

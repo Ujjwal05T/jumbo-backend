@@ -4,6 +4,12 @@ from typing import List, Tuple, Dict, Optional, Set, Union, Any
 import json
 from dataclasses import dataclass
 from enum import Enum
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from datetime import datetime
+import uuid
+
+from .. import models, schemas, crud
 
 class CutRollStatus(str, Enum):
     AVAILABLE = "available"
@@ -241,6 +247,138 @@ class CuttingOptimizer:
             Optimized cutting plan with jumbo rolls used and pending orders
         """
         return self.optimize_with_new_algorithm(order_requirements, interactive)
+
+    def create_plan_from_orders(
+        self,
+        db: Session,
+        order_ids: List[uuid.UUID],
+        created_by_id: uuid.UUID,
+        plan_name: Optional[str] = None,
+        interactive: bool = False
+    ) -> models.PlanMaster:
+        """
+        Create a cutting plan from order IDs using the master-based architecture.
+        
+        Args:
+            db: Database session
+            order_ids: List of order IDs to include in the plan
+            created_by_id: ID of user creating the plan
+            plan_name: Optional name for the plan
+            interactive: Whether to prompt user for high trim decisions
+            
+        Returns:
+            Created PlanMaster instance
+        """
+        # Fetch orders from database
+        orders = []
+        for order_id in order_ids:
+            order = crud.get_order(db, order_id)
+            if not order:
+                raise ValueError(f"Order with ID {order_id} not found")
+            orders.append(order)
+        
+        # Convert orders to optimizer format
+        order_requirements = []
+        for order in orders:
+            # Get paper specifications
+            paper = crud.get_paper(db, order.paper_id)
+            if not paper:
+                raise ValueError(f"Paper not found for order {order.id}")
+            
+            order_requirements.append({
+                'width': float(order.width),
+                'quantity': order.quantity,
+                'gsm': paper.gsm,
+                'bf': paper.bf,
+                'shade': paper.shade,
+                'min_length': order.min_length or 0,
+                'order_id': str(order.id)
+            })
+        
+        # Generate optimization result
+        optimization_result = self.optimize_with_new_algorithm(order_requirements, interactive)
+        
+        # Create plan in database
+        plan_data = schemas.PlanMasterCreate(
+            name=plan_name or f"Auto Plan {datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            cut_pattern=optimization_result['jumbo_rolls_used'],
+            expected_waste_percentage=optimization_result['summary']['overall_waste_percentage'],
+            created_by_id=created_by_id,
+            order_ids=order_ids,
+            inventory_ids=[]  # Will be populated when inventory is allocated
+        )
+        
+        return crud.create_plan(db, plan_data)
+
+    def get_order_requirements_from_db(
+        self,
+        db: Session,
+        order_ids: List[uuid.UUID]
+    ) -> List[Dict]:
+        """
+        Fetch order requirements from database for testing purposes.
+        
+        Args:
+            db: Database session
+            order_ids: List of order IDs
+            
+        Returns:
+            List of order requirements in optimizer format
+        """
+        order_requirements = []
+        
+        for order_id in order_ids:
+            order = crud.get_order(db, order_id)
+            if not order:
+                continue
+                
+            # Get paper specifications
+            paper = crud.get_paper(db, order.paper_id)
+            if not paper:
+                continue
+            
+            order_requirements.append({
+                'width': float(order.width),
+                'quantity': order.quantity,
+                'gsm': paper.gsm,
+                'bf': paper.bf,
+                'shade': paper.shade,
+                'min_length': order.min_length or 0,
+                'order_id': str(order.id),
+                'client_name': order.client.name if order.client else 'Unknown'
+            })
+        
+        return order_requirements
+
+    def test_algorithm_with_sample_data(self) -> Dict:
+        """
+        Test the algorithm with sample data without affecting the database.
+        This method is useful for testing the optimization logic.
+        
+        Returns:
+            Optimization result with sample data
+        """
+        # Sample data for testing
+        sample_orders = [
+            # White paper, GSM 90, BF 18.0 - GROUP 1
+            {"width": 29.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1500},
+            {"width": 32.5, "quantity": 3, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
+            {"width": 38, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
+            
+            # Blue paper, GSM 90, BF 18.0 - GROUP 2 (different shade)
+            {"width": 32.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
+            {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
+            
+            # White paper, GSM 120, BF 18.0 - GROUP 3 (different GSM)
+            {"width": 38, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
+            {"width": 48, "quantity": 3, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
+            
+            # White paper, GSM 90, BF 20.0 - GROUP 4 (different BF)
+            {"width": 51, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600},
+            {"width": 54, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600}
+        ]
+        
+        return self.optimize_with_new_algorithm(sample_orders, interactive=False)
 
 # Example usage and testing
 def test_optimizer():
