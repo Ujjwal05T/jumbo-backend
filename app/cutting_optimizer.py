@@ -9,6 +9,29 @@ from .services.cutting_optimizer import CuttingOptimizer
 
 router = APIRouter()
 
+def _find_or_create_jumbo_roll(db: Session, paper_spec: Dict[str, Any]) -> models.JumboRoll:
+    """Find an existing jumbo roll or create a new one with the required specifications."""
+    # Try to find an existing available jumbo roll
+    jumbo_roll = db.query(models.JumboRoll).filter(
+        models.JumboRoll.gsm == paper_spec['gsm'],
+        models.JumboRoll.bf == paper_spec['bf'],
+        models.JumboRoll.shade == paper_spec['shade'],
+        models.JumboRoll.status == models.JumboRollStatus.AVAILABLE
+    ).first()
+    
+    if not jumbo_roll:
+        # Create a new jumbo roll (this would typically be from production)
+        jumbo_roll = models.JumboRoll(
+            gsm=paper_spec['gsm'],
+            bf=paper_spec['bf'],
+            shade=paper_spec['shade'],
+            status=models.JumboRollStatus.AVAILABLE
+        )
+        db.add(jumbo_roll)
+        db.flush()  # Get the ID without committing
+    
+    return jumbo_roll
+
 @router.post("/from-orders", response_model=schemas.OptimizedCuttingPlan)
 async def generate_cutting_plan_from_orders(
     request: schemas.OrderCuttingPlanRequest,
@@ -69,28 +92,71 @@ async def generate_cutting_plan_from_orders(
                         'status': item.status
                     })
         
-        # Generate the optimized plan
+        # Generate the optimized plan using new algorithm
         plan = optimizer.generate_optimized_plan(
             order_requirements=order_requirements,
-            available_inventory=available_inventory if request.consider_inventory else [],
-            consider_standard_sizes=True
+            interactive=False  # Non-interactive for API
         )
         
+        # Create cutting plans in database for each jumbo roll
+        cutting_plans_created = []
+        for jumbo in plan.get('jumbo_rolls_used', []):
+            # Find or create a suitable jumbo roll
+            jumbo_roll = _find_or_create_jumbo_roll(db, jumbo['paper_spec'])
+            
+            # Create cutting plan
+            cutting_plan = models.CuttingPlan(
+                order_id=orders[0].id,  # Associate with first order for now
+                jumbo_roll_id=jumbo_roll.id,
+                cut_pattern=jumbo['rolls'],
+                expected_waste_percentage=jumbo['waste_percentage'],
+                status="planned"
+            )
+            db.add(cutting_plan)
+            cutting_plans_created.append(cutting_plan)
+        
+        # Handle pending orders - create production orders
+        production_orders_created = []
+        for pending in plan.get('pending_orders', []):
+            production_order = models.ProductionOrder(
+                gsm=pending['gsm'],
+                bf=pending['bf'],
+                shade=pending['shade'],
+                quantity=1,  # One jumbo roll
+                status="pending"
+            )
+            db.add(production_order)
+            production_orders_created.append(production_order)
+        
+        db.commit()
+        
         # Convert the plan to the response model
+        patterns = []
+        for jumbo in plan.get('jumbo_rolls_used', []):
+            patterns.append({
+                'rolls': jumbo['rolls'],
+                'waste_percentage': jumbo['waste_percentage'],
+                'waste_inches': jumbo['trim_left']
+            })
+        
         return {
-            'patterns': [
+            'patterns': patterns,
+            'total_rolls_needed': plan['summary']['total_jumbos_used'],
+            'total_waste_percentage': plan['summary']['overall_waste_percentage'],
+            'total_waste_inches': plan['summary']['total_trim_inches'],
+            'fulfilled_orders': [],
+            'unfulfilled_orders': [
                 {
-                    'rolls': pattern,
-                    'waste_percentage': optimizer.calculate_waste(pattern),
-                    'waste_inches': optimizer.jumbo_roll_width - sum(pattern)
+                    'width': order['width'],
+                    'quantity': order['quantity'],
+                    'gsm': order['gsm'],
+                    'bf': order['bf'],
+                    'shade': order['shade']
                 }
-                for pattern in plan.get('cutting_patterns', [])
+                for order in plan.get('pending_orders', [])
             ],
-            'total_rolls_needed': plan.get('rolls_used', 0),
-            'total_waste_percentage': plan.get('waste_percentage', 0),
-            'total_waste_inches': plan.get('waste_percentage', 0) * optimizer.jumbo_roll_width / 100,
-            'fulfilled_orders': plan.get('fulfilled_orders', []),
-            'unfulfilled_orders': plan.get('unfulfilled_orders', [])
+            'cutting_plans_created': len(cutting_plans_created),
+            'production_orders_created': len(production_orders_created)
         }
         
     except Exception as e:
@@ -139,43 +205,38 @@ async def generate_cutting_plan_from_specs(
                     'status': inv.status
                 })
         
-        # Generate the optimized plan
+        # Generate the optimized plan using new algorithm
         plan = optimizer.generate_optimized_plan(
             order_requirements=order_requirements,
-            available_inventory=available_inventory,
-            consider_standard_sizes=request.consider_standard_sizes
+            interactive=False  # Non-interactive for API
         )
         
-        # Convert the plan to the response model
+        # Convert the plan to the response model using new algorithm format
+        patterns = []
+        for jumbo in plan.get('jumbo_rolls_used', []):
+            patterns.append({
+                'rolls': jumbo['rolls'],
+                'waste_percentage': jumbo['waste_percentage'],
+                'waste_inches': jumbo['trim_left']
+            })
+        
         return {
-            'patterns': [
+            'patterns': patterns,
+            'total_rolls_needed': plan['summary']['total_jumbos_used'],
+            'total_waste_percentage': plan['summary']['overall_waste_percentage'],
+            'total_waste_inches': plan['summary']['total_trim_inches'],
+            'fulfilled_orders': [],  # Not applicable for custom specs
+            'unfulfilled_orders': [
                 {
-                    'rolls': [
-                        {
-                            'width': width,
-                            'gsm': next((r.get('gsm', 80) for r in order_requirements 
-                                       if r['width'] == width), 80),
-                            'bf': next((r.get('bf', 14.5) for r in order_requirements 
-                                       if r['width'] == width), 14.5),
-                            'shade': next((r.get('shade', 'white') for r in order_requirements 
-                                       if r['width'] == width), 'white')
-                        }
-                    for width in pattern
-                ] if isinstance(pattern, list) else pattern.get('rolls', []),
-                'waste_percentage': optimizer.calculate_waste(pattern),
-                'waste_inches': optimizer.jumbo_roll_width - (
-                    sum(width for width in pattern) if isinstance(pattern, list) 
-                    else sum(roll.get('width', 0) for roll in pattern.get('rolls', []))
-                )
-            }
-            for pattern in plan.get('cutting_patterns', [])
-        ],
-        'total_rolls_needed': plan.get('rolls_used', 0),
-        'total_waste_percentage': plan.get('waste_percentage', 0),
-        'total_waste_inches': plan.get('waste_percentage', 0) * optimizer.jumbo_roll_width / 100,
-        'fulfilled_orders': plan.get('fulfilled_orders', []),
-        'unfulfilled_orders': plan.get('unfulfilled_orders', [])
-    }
+                    'width': order['width'],
+                    'quantity': order['quantity'],
+                    'gsm': order['gsm'],
+                    'bf': order['bf'],
+                    'shade': order['shade']
+                }
+                for order in plan.get('pending_orders', [])
+            ]
+        }
         
     except Exception as e:
         raise HTTPException(
@@ -200,12 +261,33 @@ async def validate_cutting_plan(
         requirements = plan.get('requirements', [])
         available_inventory = plan.get('available_inventory', [])
         
-        # Validate the plan
-        validation_result = optimizer.validate_cutting_plan(
-            plan=plan,
-            requirements=requirements,
-            available_inventory=available_inventory
-        )
+        # Basic validation for the new algorithm
+        validation_result = {
+            "valid": True,
+            "issues": [],
+            "recommendations": [],
+            "summary": {
+                "total_patterns": len(plan.get('patterns', [])),
+                "total_requirements": len(requirements),
+                "validation_passed": True
+            }
+        }
+        
+        # Basic checks
+        if not plan.get('patterns'):
+            validation_result["valid"] = False
+            validation_result["issues"].append("No cutting patterns found in plan")
+        
+        if not requirements:
+            validation_result["issues"].append("No requirements provided for validation")
+        
+        # Add recommendations
+        if plan.get('patterns'):
+            avg_waste = sum(p.get('waste_percentage', 0) for p in plan['patterns']) / len(plan['patterns'])
+            if avg_waste > 15:
+                validation_result["recommendations"].append("Consider optimizing patterns to reduce waste")
+            elif avg_waste < 5:
+                validation_result["recommendations"].append("Excellent waste optimization achieved")
         
         return validation_result
         

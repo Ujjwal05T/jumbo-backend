@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 from . import models, schemas
 from typing import List, Optional, Dict, Any
@@ -59,7 +59,7 @@ def update_parsed_message(db: Session, message_id: uuid.UUID, update: schemas.Pa
     return db_message
 
 def get_parsed_messages(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.ParsedMessage).offset(skip).limit(limit).all()
+    return db.query(models.ParsedMessage).order_by(models.ParsedMessage.id).offset(skip).limit(limit).all()
 
 # Order CRUD operations
 def create_order(db: Session, order: schemas.OrderCreate):
@@ -70,36 +70,12 @@ def create_order(db: Session, order: schemas.OrderCreate):
             detail="Missing required order specifications"
         )
     
-    # Check if we have matching inventory
-    matching_inventory = find_matching_inventory(
-        db=db,
-        width_inches=order.width_inches,
-        gsm=order.gsm,
-        bf=order.bf,
-        shade=order.shade,
-        quantity=order.quantity_rolls
-    )
+    # Create the order - fulfillment will be handled separately by the workflow system
+    # This allows for more flexible fulfillment strategies including:
+    # - Partial fulfillment from inventory
+    # - Cutting optimization across multiple orders
+    # - Production planning for missing specifications
     
-    if len(matching_inventory) < order.quantity_rolls:
-        # Not enough in inventory, check if we can cut from jumbo rolls
-        jumbo_roll = find_matching_jumbo_roll(
-            db=db,
-            gsm=order.gsm,
-            bf=order.bf,
-            shade=order.shade,
-            min_width_inches=order.width_inches * order.quantity_rolls  # Total width needed
-        )
-        
-        if not jumbo_roll:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Insufficient inventory. Need {order.quantity_rolls} rolls of "
-                    f"{order.width_inches}\" (W) x {order.gsm} GSM x {order.bf} BF {order.shade}"
-                )
-            )
-    
-    # If we get here, we either have enough inventory or can cut from jumbo roll
     db_order = models.Order(
         customer_name=order.customer_name,
         width_inches=order.width_inches,
@@ -107,7 +83,7 @@ def create_order(db: Session, order: schemas.OrderCreate):
         bf=order.bf,
         shade=order.shade,
         quantity_rolls=order.quantity_rolls,
-        status="pending",
+        status=models.OrderStatus.PENDING,
         source_message_id=getattr(order, 'source_message_id', None)
     )
     
@@ -160,7 +136,7 @@ def create_jumbo_roll(db: Session, roll: schemas.JumboRollCreate):
     return db_roll
 
 def get_jumbo_rolls(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.JumboRoll).offset(skip).limit(limit).all()
+    return db.query(models.JumboRoll).order_by(models.JumboRoll.id).offset(skip).limit(limit).all()
 
 def get_jumbo_roll(db: Session, roll_id: uuid.UUID):
     return db.query(models.JumboRoll).filter(models.JumboRoll.id == roll_id).first()
@@ -174,7 +150,7 @@ def create_cut_roll(db: Session, roll: schemas.CutRollCreate):
     return db_roll
 
 def get_cut_rolls(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.CutRoll).offset(skip).limit(limit).all()
+    return db.query(models.CutRoll).order_by(models.CutRoll.id).offset(skip).limit(limit).all()
 
 def get_cut_roll(db: Session, roll_id: uuid.UUID):
     return db.query(models.CutRoll).filter(models.CutRoll.id == roll_id).first()
@@ -198,7 +174,7 @@ def create_inventory_item(db: Session, item: schemas.InventoryItemCreate):
     return db_item
 
 def get_inventory_items(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.InventoryItem).offset(skip).limit(limit).all()
+    return db.query(models.InventoryItem).order_by(models.InventoryItem.id).offset(skip).limit(limit).all()
 
 def update_inventory_item(db: Session, item_id: uuid.UUID, update: schemas.InventoryItemUpdate):
     db_item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
@@ -220,7 +196,7 @@ def create_cutting_plan(db: Session, plan: schemas.CuttingPlanCreate):
     return db_plan
 
 def get_cutting_plans(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.CuttingPlan).offset(skip).limit(limit).all()
+    return db.query(models.CuttingPlan).order_by(models.CuttingPlan.id).offset(skip).limit(limit).all()
 
 def update_cutting_plan(db: Session, plan_id: uuid.UUID, update: schemas.CuttingPlanUpdate):
     db_plan = db.query(models.CuttingPlan).filter(models.CuttingPlan.id == plan_id).first()
@@ -254,9 +230,9 @@ def find_matching_inventory(db: Session, width_inches: int, gsm: int, bf: float,
             models.CutRoll.bf == bf,
             models.CutRoll.shade == shade,
             models.CutRoll.status == "weighed",
-            models.InventoryItem.allocated_to_order.is_(None)
+            models.InventoryItem.allocated_to_order_id == None
         )
-    ).limit(quantity).all()
+    ).order_by(models.InventoryItem.id).limit(quantity).all()
 
 def generate_qr_code(roll_id: uuid.UUID) -> str:
     return f"ROLL_{str(roll_id).replace('-', '').upper()[:12]}"
@@ -483,8 +459,8 @@ def find_matching_inventory(
         models.CutRoll.bf == bf,
         models.CutRoll.shade == shade,
         models.CutRoll.status == "available",
-        models.InventoryItem.allocated_to_order.is_(None)
-    ).limit(quantity).all()
+        models.InventoryItem.allocated_to_order_id == None
+    ).order_by(models.InventoryItem.id).limit(quantity).all()
 
 def find_matching_jumbo_roll(
     db: Session,

@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jumbo Roll Cutting Optimizer</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #f8fafc;
+            min-height: 100vh;
+            color: #334155;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            min-height: 100vh;
+            box-shadow: 0 0 20px rgba(0,0,0,0.05);
+        }
+
+        .header {
+            background: #1e40af;
+            color: white;
+            padding: 2rem;
+            text-align: center;
+            border-bottom: 4px solid #1d4ed8;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+
+        .header p {
+            font-size: 1rem;
+            opacity: 0.9;
+            font-weight: 400;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 420px 1fr;
+            min-height: calc(100vh - 140px);
+        }
+
+        .input-section {
+            background: #f1f5f9;
+            padding: 2rem;
+            border-right: 1px solid #e2e8f0;
+        }
+
+        .results-section {
+            padding: 2rem;
+            background: white;
+        }
+
+        .section-title {
+            font-size: 1.25rem;
+            color: #0f172a;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .form-row.full {
+            grid-template-columns: 1fr;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: #374151;
+            font-size: 0.95rem;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            background: white;
+            transition: border-color 0.2s ease;
+            font-family: inherit;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        .btn {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-family: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #1d4ed8;
+        }
+
+        .btn-success {
+            background: #059669;
+            color: white;
+        }
+
+        .btn-success:hover:not(:disabled) {
+            background: #047857;
+        }
+
+        .btn-danger {
+            background: #dc2626;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+
+        .orders-list {
+            max-height: 280px;
+            overflow-y: auto;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 1rem;
+            background: white;
+        }
+
+        .order-item {
+            background: #f9fafb;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            border-radius: 6px;
+            border-left: 4px solid #2563eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .order-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .order-details {
+            flex: 1;
+        }
+
+        .order-spec {
+            font-weight: 600;
+            color: #0f172a;
+            margin-bottom: 0.25rem;
+            font-size: 0.95rem;
+        }
+
+        .order-meta {
+            font-size: 0.85rem;
+            color: #6b7280;
+        }
+
+        .remove-btn {
+            padding: 0.5rem;
+            font-size: 0.85rem;
+            min-width: auto;
+            border-radius: 4px;
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #0f172a;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            color: #6b7280;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 500;
+        }
+
+        .jumbo-roll {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .jumbo-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .jumbo-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .waste-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .waste-low {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .waste-medium {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .waste-high {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .rolls-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .roll-item {
+            background: #2563eb;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .jumbo-visual {
+            background: #f1f5f9;
+            height: 40px;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid #e5e7eb;
+        }
+
+        .used-space {
+            background: #059669;
+            height: 100%;
+            position: relative;
+        }
+
+        .waste-space {
+            background: #dc2626;
+            height: 100%;
+        }
+
+        .visual-label {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 0.8rem;
+            font-weight: 500;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+
+        .pending-orders {
+            background: #fffbeb;
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .pending-title {
+            color: #92400e;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .pending-item {
+            background: white;
+            padding: 1rem;
+            border-radius: 4px;
+            margin-bottom: 0.75rem;
+            border-left: 4px solid #f59e0b;
+        }
+
+        .pending-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: #6b7280;
+        }
+
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #2563eb;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fef2f2;
+            color: #991b1b;
+            padding: 1rem;
+            border-radius: 6px;
+            border-left: 4px solid #dc2626;
+            margin: 1rem 0;
+        }
+
+        .success {
+            background: #f0fdf4;
+            color: #166534;
+            padding: 1rem;
+            border-radius: 6px;
+            border-left: 4px solid #059669;
+            margin: 1rem 0;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: #6b7280;
+        }
+
+        .empty-state h3 {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+            color: #374151;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .results-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .header {
+                padding: 1.5rem;
+            }
+
+            .input-section,
+            .results-section {
+                padding: 1.5rem;
+            }
+        }
+
+        /* Improved accessibility for older users */
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Jumbo Roll Cutting Optimizer</h1>
+            <p>Optimize your paper roll cutting with minimal waste and maximum efficiency</p>
+        </div>
+
+        <div class="main-content">
+            <!-- Input Section -->
+            <div class="input-section">
+                <h2 class="section-title">Order Input</h2>
+                
+                <form id="orderForm">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="width">Width (inches)</label>
+                            <input type="number" id="width" min="1" max="118" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="quantity">Quantity</label>
+                            <input type="number" id="quantity" min="1" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="gsm">GSM</label>
+                            <input type="number" id="gsm" min="50" max="300" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="bf">BF</label>
+                            <input type="number" id="bf" step="0.1" min="10" max="30" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row full">
+                        <div class="form-group">
+                            <label for="shade">Shade</label>
+                            <select id="shade" required>
+                                <option value="">Select Shade</option>
+                                <option value="white">Natural</option>
+                                <option value="cream">Golden</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <button type="submit" class="btn btn-primary">Add Order</button>
+                        <button type="button" id="clearOrders" class="btn btn-danger">Clear All</button>
+                    </div>
+                </form>
+
+                <div class="form-group">
+                    <h3 style="margin-bottom: 1rem; color: #0f172a; font-size: 1.1rem; font-weight: 600;">Current Orders</h3>
+                    <div id="ordersList" class="orders-list">
+                        <p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <button id="optimizeBtn" class="btn btn-success" style="width: 100%;" disabled>
+                        Optimize Cutting Plan
+                    </button>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <div class="results-section">
+                <h2 class="section-title">Optimization Results</h2>
+                <div id="resultsContainer">
+                    <div class="empty-state">
+                        <h3>Ready for Optimization</h3>
+                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class CuttingOptimizer {
+            constructor() {
+                this.orders = [];
+                this.apiBaseUrl = 'http://localhost:8000/api';
+                this.initializeEventListeners();
+            }
+
+            initializeEventListeners() {
+                document.getElementById('orderForm').addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.addOrder();
+                });
+
+                document.getElementById('clearOrders').addEventListener('click', () => {
+                    this.clearOrders();
+                });
+
+                document.getElementById('optimizeBtn').addEventListener('click', () => {
+                    this.optimizeCutting();
+                });
+            }
+
+            addOrder() {
+                const width = parseInt(document.getElementById('width').value);
+                const quantity = parseInt(document.getElementById('quantity').value);
+                const gsm = parseInt(document.getElementById('gsm').value);
+                const bf = parseFloat(document.getElementById('bf').value);
+                const shade = document.getElementById('shade').value;
+
+                if (!width || !quantity || !gsm || !bf || !shade) {
+                    this.showError('Please fill in all fields');
+                    return;
+                }
+
+                const order = {
+                    id: Date.now(),
+                    width,
+                    quantity,
+                    gsm,
+                    bf,
+                    shade,
+                    min_length: 1000
+                };
+
+                this.orders.push(order);
+                this.updateOrdersList();
+                this.clearForm();
+                this.updateOptimizeButton();
+            }
+
+            removeOrder(orderId) {
+                this.orders = this.orders.filter(order => order.id !== orderId);
+                this.updateOrdersList();
+                this.updateOptimizeButton();
+            }
+
+            clearOrders() {
+                this.orders = [];
+                this.updateOrdersList();
+                this.updateOptimizeButton();
+                this.clearResults();
+            }
+
+            clearForm() {
+                document.getElementById('orderForm').reset();
+            }
+
+            updateOrdersList() {
+                const container = document.getElementById('ordersList');
+                
+                if (this.orders.length === 0) {
+                    container.innerHTML = '<p style="text-align: center; color: #6b7280; padding: 1.5rem;">No orders added yet</p>';
+                    return;
+                }
+
+                container.innerHTML = this.orders.map(order => `
+                    <div class="order-item">
+                        <div class="order-details">
+                            <div class="order-spec">${order.width}" × ${order.quantity} rolls</div>
+                            <div class="order-meta">GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</div>
+                        </div>
+                        <button class="btn btn-danger remove-btn" onclick="optimizer.removeOrder(${order.id})">×</button>
+                    </div>
+                `).join('');
+            }
+
+            updateOptimizeButton() {
+                const btn = document.getElementById('optimizeBtn');
+                btn.disabled = this.orders.length === 0;
+            }
+
+            async optimizeCutting() {
+                if (this.orders.length === 0) return;
+
+                this.showLoading();
+
+                try {
+                    const requestData = {
+                        rolls: this.orders.map(order => ({
+                            width: order.width,
+                            quantity: order.quantity,
+                            gsm: order.gsm,
+                            bf: order.bf,
+                            shade: order.shade,
+                            min_length: order.min_length
+                        })),
+                        jumbo_roll_width: 118,
+                        consider_standard_sizes: true,
+                        strict_matching: true
+                    };
+
+                    const response = await fetch(`${this.apiBaseUrl}/cutting-optimization/from-specs`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(requestData)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    this.displayResults(result);
+
+                } catch (error) {
+                    console.error('Optimization error:', error);
+                    this.showError(`Optimization failed: ${error.message}`);
+                }
+            }
+
+            displayResults(result) {
+                const container = document.getElementById('resultsContainer');
+                
+                // Summary statistics
+                const summaryHtml = `
+                    <div class="results-grid">
+                        <div class="stat-card">
+                            <div class="stat-value">${result.total_rolls_needed}</div>
+                            <div class="stat-label">Jumbo Rolls Needed</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${result.total_waste_percentage.toFixed(1)}%</div>
+                            <div class="stat-label">Total Waste</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${result.total_waste_inches.toFixed(1)}"</div>
+                            <div class="stat-label">Waste Inches</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${result.patterns.length}</div>
+                            <div class="stat-label">Cutting Patterns</div>
+                        </div>
+                    </div>
+                `;
+
+                // Jumbo rolls visualization
+                const patternsHtml = result.patterns.map((pattern, index) => {
+                    const wasteClass = pattern.waste_percentage < 5 ? 'waste-low' : 
+                                     pattern.waste_percentage < 15 ? 'waste-medium' : 'waste-high';
+                    
+                    const usedWidth = 118 - pattern.waste_inches;
+                    const usedPercentage = (usedWidth / 118) * 100;
+                    const wastePercentage = (pattern.waste_inches / 118) * 100;
+
+                    return `
+                        <div class="jumbo-roll">
+                            <div class="jumbo-header">
+                                <div class="jumbo-title">Jumbo Roll #${index + 1}</div>
+                                <div class="waste-badge ${wasteClass}">
+                                    ${pattern.waste_percentage.toFixed(1)}% Waste
+                                </div>
+                            </div>
+                            
+                            <div class="rolls-container">
+                                ${pattern.rolls.map(roll => `
+                                    <div class="roll-item">
+                                        ${roll.width}" (${roll.shade})
+                                    </div>
+                                `).join('')}
+                            </div>
+                            
+                            <div class="jumbo-visual">
+                                <div style="display: flex; width: 100%; height: 100%;">
+                                    <div class="used-space" style="width: ${usedPercentage}%; position: relative;">
+                                        <span class="visual-label">Used: ${usedWidth.toFixed(1)}"</span>
+                                    </div>
+                                    <div class="waste-space" style="width: ${wastePercentage}%; position: relative;">
+                                        <span class="visual-label">Waste: ${pattern.waste_inches.toFixed(1)}"</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Pending orders
+                const pendingHtml = result.unfulfilled_orders && result.unfulfilled_orders.length > 0 ? `
+                    <div class="pending-orders">
+                        <div class="pending-title">
+                            Pending Orders (Need Production)
+                        </div>
+                        ${result.unfulfilled_orders.map(order => `
+                            <div class="pending-item">
+                                <strong>${order.width}" × ${order.quantity} rolls</strong>
+                                <br>
+                                <small>GSM: ${order.gsm} | BF: ${order.bf} | Shade: ${order.shade}</small>
+                            </div>
+                        `).join('')}
+                    </div>
+                ` : '';
+
+                container.innerHTML = summaryHtml + patternsHtml + pendingHtml;
+            }
+
+            showLoading() {
+                const container = document.getElementById('resultsContainer');
+                container.innerHTML = `
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <h3>Optimizing Cutting Plan...</h3>
+                        <p>Calculating the most efficient cutting patterns</p>
+                    </div>
+                `;
+            }
+
+            showError(message) {
+                const container = document.getElementById('resultsContainer');
+                container.innerHTML = `
+                    <div class="error">
+                        <strong>Error:</strong> ${message}
+                    </div>
+                `;
+            }
+
+            clearResults() {
+                const container = document.getElementById('resultsContainer');
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <h3>Ready for Optimization</h3>
+                        <p>Add orders and click "Optimize Cutting Plan" to see results</p>
+                    </div>
+                `;
+            }
+        }
+
+        // Initialize the application
+        const optimizer = new CuttingOptimizer();
+
+        // Add some sample data for demonstration
+        document.addEventListener('DOMContentLoaded', () => {
+            // You can uncomment these lines to add sample orders for testing
+           
+            optimizer.orders = [
+                { id: 1, width: 32, quantity: 3, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 },
+                { id: 2, width: 38, quantity: 2, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 },
+                { id: 3, width: 46, quantity: 1, gsm: 90, bf: 18.0, shade: 'white', min_length: 1000 }
+            ];
+            optimizer.updateOrdersList();
+            optimizer.updateOptimizeButton();
+            
+        });
+    </script>
+</body>
+</html>

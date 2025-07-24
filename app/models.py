@@ -8,6 +8,7 @@ from .database import Base
 from enum import Enum as PyEnum
 from typing import Optional, List, Dict, Any
 
+# Status Enums
 class OrderStatus(str, PyEnum):
     PENDING = "pending"
     PROCESSING = "processing"
@@ -15,12 +16,12 @@ class OrderStatus(str, PyEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
-class JumboRollStatus(str, PyEnum):
+class InventoryStatus(str, PyEnum):
     AVAILABLE = "available"
+    ALLOCATED = "allocated"
     CUTTING = "cutting"
     USED = "used"
-    PARTIAL = "partial"
-    PRODUCED = "produced"
+    DAMAGED = "damaged"
 
 class ProductionOrderStatus(str, PyEnum):
     PENDING = "pending"
@@ -28,112 +29,117 @@ class ProductionOrderStatus(str, PyEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
-class CuttingPlanStatus(str, PyEnum):
+class PlanStatus(str, PyEnum):
     PLANNED = "planned"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
 
-class StatusLog(Base):
-    __tablename__ = "status_logs"
+class PendingOrderStatus(str, PyEnum):
+    PENDING = "pending"
+    IN_PRODUCTION = "in_production"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+
+class RollType(str, PyEnum):
+    JUMBO = "jumbo"
+    CUT = "cut"
+
+# ============================================================================
+# MASTER TABLES - Core reference data
+# ============================================================================
+
+# Client Master - Stores all client information
+class ClientMaster(Base):
+    __tablename__ = "client_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    model_type = Column(String(50), nullable=False)  # e.g., 'Order', 'JumboRoll'
-    model_id = Column(UNIQUEIDENTIFIER, nullable=False, index=True)
-    old_status = Column(String(50), nullable=True)
-    new_status = Column(String(50), nullable=False)
-    notes = Column(Text, nullable=True)
-    changed_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"), nullable=True)
-    changed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    changed_by = relationship("User", back_populates="status_logs")
-    # Index for faster lookups
-    __table_args__ = (
-        {'comment': 'Audit log for status changes across all models'},
-    )
-# User model for authentication
-class User(Base):
-    __tablename__ = "users"
+    company_name = Column(String(255), nullable=False, index=True)
+    email = Column(String(255), nullable=True)
+    address = Column(Text, nullable=True)
+    contact_person = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status = Column(String(20), default="active", nullable=False)
+    
+    # Relationships
+    created_by = relationship("UserMaster", back_populates="clients_created")
+    orders = relationship("OrderMaster", back_populates="client")
+
+# User Master - All system users (sales, planners, supervisors)
+class UserMaster(Base):
+    __tablename__ = "user_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    name = Column(String(255), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
-    password = Column(String(255), nullable=False)  # Storing plain text password
-    role = Column(String(20), default="operator", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    password_hash = Column(String(255), nullable=False)  # For simple registration
+    role = Column(String(50), nullable=False)  # sales, planner, supervisor, admin
+    contact = Column(String(255), nullable=True)
+    department = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_login = Column(DateTime, nullable=True)
+    status = Column(String(20), default="active", nullable=False)
     
     # Relationships
-    status_logs = relationship("StatusLog", back_populates="changed_by")
-    orders = relationship("Order", back_populates="created_by")
-    messages = relationship("ParsedMessage", back_populates="created_by")
-    jumbo_rolls = relationship("JumboRoll", back_populates="created_by")
-    cut_rolls = relationship("CutRoll", back_populates="created_by")
-    cutting_plans = relationship("CuttingPlan", back_populates="created_by")
-    inventory_logs = relationship("InventoryLog", back_populates="created_by")
-    production_orders = relationship("ProductionOrder", back_populates="created_by")
+    clients_created = relationship("ClientMaster", back_populates="created_by")
+    papers_created = relationship("PaperMaster", back_populates="created_by")
+    orders_created = relationship("OrderMaster", back_populates="created_by")
+    plans_created = relationship("PlanMaster", back_populates="created_by")
+    inventory_created = relationship("InventoryMaster", back_populates="created_by")
+    production_orders_created = relationship("ProductionOrderMaster", back_populates="created_by")
 
-# Parsed message model
-class ParsedMessage(Base):
-    __tablename__ = "parsed_messages"
+# Paper Master - Centralized paper specifications
+class PaperMaster(Base):
+    __tablename__ = "paper_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    raw_message = Column(Text, nullable=False)  # Store full message text
-    received_at = Column(DateTime, default=datetime.utcnow)
-    parsed_json = Column(Text)  # Store parsed JSON data
-    parsing_status = Column(String(20), nullable=False, default="pending")  # pending, success, failed
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
+    name = Column(String(255), nullable=False, index=True)  # e.g., "White Bond 90GSM"
+    gsm = Column(Integer, nullable=False, index=True)  # Grams per square meter
+    bf = Column(Numeric(4, 2), nullable=False, index=True)  # Brightness Factor
+    shade = Column(String(50), nullable=False, index=True)  # Paper shade/color
+    thickness = Column(Numeric(6, 3), nullable=True)  # Thickness in mm
+    type = Column(String(100), nullable=True)  # Bond, Offset, etc.
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status = Column(String(20), default="active", nullable=False)
     
     # Relationships
-    orders = relationship("Order", back_populates="source_message")
-    created_by = relationship("User", back_populates="messages")
+    created_by = relationship("UserMaster", back_populates="papers_created")
+    orders = relationship("OrderMaster", back_populates="paper")
+    inventory_items = relationship("InventoryMaster", back_populates="paper")
+    pending_orders = relationship("PendingOrderMaster", back_populates="paper")
+    production_orders = relationship("ProductionOrderMaster", back_populates="paper")
 
-# Order model
-class Order(Base):
-    __tablename__ = "orders"
+# ============================================================================
+# TRANSACTION TABLES - Business operations
+# ============================================================================
+
+# Order Master - Customer orders linked to Client and Paper masters
+class OrderMaster(Base):
+    __tablename__ = "order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    customer_name = Column(String(255), nullable=False)
+    client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     width_inches = Column(Integer, nullable=False)
-    gsm = Column(Integer, nullable=False)
-    bf = Column(Numeric(4, 2), nullable=False)
-    shade = Column(String(50), nullable=False)
     quantity_rolls = Column(Integer, nullable=False)
     quantity_fulfilled = Column(Integer, default=0, nullable=False)
-    quantity_tons = Column(Numeric(8, 2))
-    status = Column(String(50), default=OrderStatus.PENDING, nullable=False)
-    source_message_id = Column(UNIQUEIDENTIFIER, ForeignKey("parsed_messages.id"), nullable=True)
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
-    parent_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"), nullable=True)
-    original_order_id = Column(UNIQUEIDENTIFIER, nullable=True)
+    status = Column(String(50), default=OrderStatus.PENDING, nullable=False, index=True)
+    priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
+    delivery_date = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    source_message = relationship("ParsedMessage", back_populates="orders")
-    created_by = relationship("User", back_populates="orders")
-    cut_rolls = relationship("CutRoll", back_populates="order")
-    inventory_allocations = relationship("InventoryItem", back_populates="allocated_order")
-    inventory_logs = relationship("InventoryLog", back_populates="order")
-    cutting_plans = relationship("CuttingPlan", back_populates="order")
-    production_orders = relationship("ProductionOrder", back_populates="order")
-    status_logs = relationship(
-        "StatusLog",
-        primaryjoin="and_(StatusLog.model_type=='Order', foreign(StatusLog.model_id)==Order.id)",
-        overlaps="status_logs"
-    )
-    backorders = relationship(
-        "Order",
-        back_populates="parent_order",
-        cascade="all, delete-orphan",
-        single_parent=True,
-        remote_side=[parent_order_id]
-    )
-    parent_order = relationship(
-        "Order",
-        remote_side=[id],
-        back_populates="backorders",
-        post_update=True
-    )
+    client = relationship("ClientMaster", back_populates="orders")
+    paper = relationship("PaperMaster", back_populates="orders")
+    created_by = relationship("UserMaster", back_populates="orders_created")
+    pending_orders = relationship("PendingOrderMaster", back_populates="original_order")
+    plan_orders = relationship("PlanOrderLink", back_populates="order")
     
     @property
     def remaining_quantity(self) -> int:
@@ -142,125 +148,115 @@ class Order(Base):
     @property
     def is_fully_fulfilled(self) -> bool:
         return self.quantity_fulfilled >= self.quantity_rolls
-    
-    @property
-    def has_backorders(self) -> bool:
-        return len(self.backorders) > 0
 
-# Jumbo roll model
-class JumboRoll(Base):
-    __tablename__ = "jumbo_rolls"
+# Pending Order Master - Tracks unfulfilled orders for batch processing
+class PendingOrderMaster(Base):
+    __tablename__ = "pending_order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    width_inches = Column(Integer, default=119, nullable=False)  # Standard jumbo roll width
-    weight_kg = Column(Integer, default=4500, nullable=False)  # Standard jumbo roll weight
-    gsm = Column(Integer, nullable=False)  # Grams per square meter
-    bf = Column(Numeric(4, 2), nullable=False)  # Brightness Factor
-    shade = Column(String(50), nullable=False)  # Paper shade/color
-    production_date = Column(DateTime, nullable=False, default=datetime.utcnow)
-    status = Column(String(20), nullable=False, default=JumboRollStatus.AVAILABLE)  # available, cutting, used, partial, produced
-    production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_orders.id"), nullable=True)
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
+    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    width_inches = Column(Integer, nullable=False)
+    quantity_pending = Column(Integer, nullable=False)
+    reason = Column(String(100), nullable=False)  # no_inventory, no_jumbo, etc.
+    status = Column(String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
+    production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_order_master.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
     
     # Relationships
-    cut_rolls = relationship("CutRoll", back_populates="jumbo_roll")
-    cutting_plans = relationship("CuttingPlan", back_populates="jumbo_roll")
-    created_by = relationship("User", back_populates="jumbo_rolls")
-    production_order = relationship("ProductionOrder", back_populates="jumbo_rolls")
+    original_order = relationship("OrderMaster", back_populates="pending_orders")
+    paper = relationship("PaperMaster", back_populates="pending_orders")
+    production_order = relationship("ProductionOrderMaster", back_populates="pending_orders")
 
-# Cut roll model
-class CutRoll(Base):
-    __tablename__ = "cut_rolls"
+# Inventory Master - Manages both jumbo and cut rolls
+class InventoryMaster(Base):
+    __tablename__ = "inventory_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    jumbo_roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("jumbo_rolls.id"), nullable=False)
-    width_inches = Column(Integer, nullable=False)  # Cut roll width
-    gsm = Column(Integer, nullable=False)  # Grams per square meter
-    bf = Column(Numeric(4, 2), nullable=False)  # Brightness Factor
-    shade = Column(String(50), nullable=False)  # Paper shade/color
-    weight_kg = Column(Numeric(8, 2))  # Actual weight after cutting and weighing
-    qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code
-    cut_date = Column(DateTime, default=datetime.utcnow)
-    status = Column(String(20), default="cut", nullable=False)  # cut, weighed, allocated, used
-    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"))
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    width_inches = Column(Integer, nullable=False, index=True)
+    weight_kg = Column(Numeric(8, 2), nullable=False)
+    roll_type = Column(String(20), nullable=False, index=True)  # jumbo, cut
+    location = Column(String(100), nullable=True)
+    status = Column(String(50), default=InventoryStatus.AVAILABLE, nullable=False, index=True)
+    qr_code = Column(String(255), unique=True, nullable=True, index=True)
+    production_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    allocated_to_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     
     # Relationships
-    jumbo_roll = relationship("JumboRoll", back_populates="cut_rolls")
-    order = relationship("Order", back_populates="cut_rolls")
-    created_by = relationship("User", back_populates="cut_rolls")
-    inventory_item = relationship("InventoryItem", back_populates="roll", uselist=False)
-    inventory_logs = relationship("InventoryLog", back_populates="roll")
+    paper = relationship("PaperMaster", back_populates="inventory_items")
+    created_by = relationship("UserMaster", back_populates="inventory_created")
+    allocated_order = relationship("OrderMaster")
+    plan_inventory = relationship("PlanInventoryLink", back_populates="inventory")
 
-# Inventory model for tracking cut rolls
-class InventoryItem(Base):
-    __tablename__ = "inventory"
+# Plan Master - Cutting optimization plans
+class PlanMaster(Base):
+    __tablename__ = "plan_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("cut_rolls.id"), nullable=False, unique=True)
-    location = Column(String(100))  # Storage location
-    allocated_to_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"))  # If allocated to an order
-    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationships
-    roll = relationship("CutRoll", back_populates="inventory_item")
-    allocated_order = relationship("Order", back_populates="inventory_allocations")
-
-# Inventory log model
-class InventoryLog(Base):
-    __tablename__ = "inventory_logs"
-    
-    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("cut_rolls.id"), nullable=False)
-    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"), nullable=True)
-    action = Column(String(50), nullable=False)  # created, allocated, delivered, adjusted, etc.
-    previous_status = Column(String(50), nullable=True)
-    new_status = Column(String(50), nullable=False)
-    notes = Column(Text, nullable=True)
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    roll = relationship("CutRoll", back_populates="inventory_logs")
-    order = relationship("Order", back_populates="inventory_logs")
-    created_by = relationship("User", back_populates="inventory_logs")
-
-# Production order for jumbo rolls
-class ProductionOrder(Base):
-    __tablename__ = "production_orders"
-    
-    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    gsm = Column(Integer, nullable=False)
-    bf = Column(Numeric(4, 2), nullable=False)
-    shade = Column(String(50), nullable=False)
-    quantity = Column(Integer, nullable=False, default=1)
-    status = Column(String(20), default=ProductionOrderStatus.PENDING)  # pending, in_production, completed, cancelled
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
-    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-    
-    # Relationships
-    jumbo_rolls = relationship("JumboRoll", back_populates="production_order")
-    created_by = relationship("User", back_populates="production_orders")
-    order = relationship("Order", back_populates="production_orders")
-
-# Enhanced cutting plan model
-class CuttingPlan(Base):
-    __tablename__ = "cutting_plans"
-    
-    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("orders.id"), nullable=False)
-    jumbo_roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("jumbo_rolls.id"), nullable=False)
-    cut_pattern = Column(Text, nullable=False)  # JSON array of cut widths
-    expected_waste_percentage = Column(Numeric(5, 2))
+    name = Column(String(255), nullable=True)  # Optional plan name
+    cut_pattern = Column(Text, nullable=False)  # JSON array of cutting pattern
+    expected_waste_percentage = Column(Numeric(5, 2), nullable=False)
     actual_waste_percentage = Column(Numeric(5, 2), nullable=True)
-    status = Column(String(20), default=CuttingPlanStatus.PLANNED, nullable=False)  # planned, in_progress, completed, failed
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("users.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(50), default=PlanStatus.PLANNED, nullable=False, index=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    executed_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     
     # Relationships
-    jumbo_roll = relationship("JumboRoll", back_populates="cutting_plans")
-    order = relationship("Order", back_populates="cutting_plans")
-    created_by = relationship("User", back_populates="cutting_plans")
+    created_by = relationship("UserMaster", back_populates="plans_created")
+    plan_orders = relationship("PlanOrderLink", back_populates="plan")
+    plan_inventory = relationship("PlanInventoryLink", back_populates="plan")
+
+# Production Order Master - Manufacturing queue for jumbo rolls
+class ProductionOrderMaster(Base):
+    __tablename__ = "production_order_master"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    quantity = Column(Integer, nullable=False, default=1)  # Number of jumbo rolls
+    priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
+    status = Column(String(50), default=ProductionOrderStatus.PENDING, nullable=False, index=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    paper = relationship("PaperMaster", back_populates="production_orders")
+    created_by = relationship("UserMaster", back_populates="production_orders_created")
+    pending_orders = relationship("PendingOrderMaster", back_populates="production_order")
+
+# ============================================================================
+# LINKING TABLES - Many-to-many relationships
+# ============================================================================
+
+# Plan-Order Link - Links plans to multiple orders
+class PlanOrderLink(Base):
+    __tablename__ = "plan_order_link"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
+    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    quantity_allocated = Column(Integer, nullable=False)  # How many rolls from this order
+    
+    # Relationships
+    plan = relationship("PlanMaster", back_populates="plan_orders")
+    order = relationship("OrderMaster", back_populates="plan_orders")
+
+# Plan-Inventory Link - Links plans to inventory items used
+class PlanInventoryLink(Base):
+    __tablename__ = "plan_inventory_link"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
+    inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=False, index=True)
+    quantity_used = Column(Numeric(8, 2), nullable=False)  # Weight or length used
+    
+    # Relationships
+    plan = relationship("PlanMaster", back_populates="plan_inventory")
+    inventory = relationship("InventoryMaster", back_populates="plan_inventory")

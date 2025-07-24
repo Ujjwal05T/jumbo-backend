@@ -1,3 +1,5 @@
+from collections import Counter, defaultdict
+from itertools import product
 from typing import List, Tuple, Dict, Optional, Set, Union, Any
 import json
 from dataclasses import dataclass
@@ -17,335 +19,282 @@ class RollSpec:
     bf: float
     shade: str
 
+# --- CONFIGURATIONS ---
+JUMBO_WIDTH = 118
+MIN_TRIM = 1
+MAX_TRIM = 6
+MAX_TRIM_WITH_CONFIRMATION = 20
+MAX_ROLLS_PER_JUMBO = 5
+
 class CuttingOptimizer:
-    def __init__(self, jumbo_roll_width: int = 119):
+    def __init__(self, jumbo_roll_width: int = JUMBO_WIDTH):
         """
         Initialize the cutting optimizer with configuration.
         
         Args:
-            jumbo_roll_width: Width of jumbo rolls in inches (default: 119)
+            jumbo_roll_width: Width of jumbo rolls in inches (default: 118)
         """
         self.jumbo_roll_width = jumbo_roll_width
-        self.standard_widths = [36, 42, 48, 55, 60]  # Common standard sizes in inches
     
-    def calculate_waste(self, pattern: List[Union[Dict[str, Any], int]]) -> float:
+    def generate_combos(self, sizes: List[float]) -> List[Tuple[Tuple[float, ...], float]]:
         """
-        Calculate the waste percentage for a given cutting pattern.
+        Generate all combos (1 to 3 rolls) with trim calculation.
+        Returns combos sorted by: more rolls first, then lower trim.
+        """
+        valid_combos = []
+        for r in range(1, MAX_ROLLS_PER_JUMBO + 1):
+            for combo in product(sizes, repeat=r):
+                total = sum(combo)
+                trim = round(JUMBO_WIDTH - total, 2)
+                if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION:
+                    valid_combos.append((tuple(sorted(combo)), trim))
+        
+        # Prefer: more rolls, then lower trim
+        return sorted(valid_combos, key=lambda x: (-len(x[0]), x[1]))
+
+    def match_combos(self, orders: Dict[float, int], interactive: bool = False) -> Tuple[List[Tuple[Tuple[float, ...], float]], Dict[float, int], List[Tuple[Tuple[float, ...], float]]]:
+        """
+        Match combos with orders using the provided algorithm logic.
         
         Args:
-            pattern: List of roll specifications (either dict with 'width' or int)
-    
+            orders: Dictionary of {width: quantity}
+            interactive: Whether to prompt user for high trim combos
+            
         Returns:
-            Waste percentage (0-100)
+            Tuple of (used_combos, pending_orders, high_trim_log)
         """
-        if not pattern:
-            return 100.0  # 100% waste if no rolls in pattern
-    
-        total_used = 0
-        for item in pattern:
-            if isinstance(item, dict):
-                total_used += item.get('width', 0)
+        order_counter = Counter(orders)
+        combos = self.generate_combos(list(orders.keys()))
+        used = []
+        high_trim_log = []
+        pending = defaultdict(int)
+        
+        for combo, trim in combos:
+            combo_count = Counter(combo)
+            while all(order_counter[k] >= v for k, v in combo_count.items()):
+                if trim <= MAX_TRIM:
+                    # Accept directly
+                    for k in combo:
+                        order_counter[k] -= 1
+                    used.append((combo, trim))
+                elif trim <= MAX_TRIM_WITH_CONFIRMATION:
+                    # Ask user or auto-accept based on interactive flag
+                    if interactive:
+                        print(f"\n⚠️ Combo {combo} leaves {trim}\" trim. Use it? (yes/no):")
+                        choice = input().strip().lower()
+                        if choice == "yes":
+                            for k in combo:
+                                order_counter[k] -= 1
+                            used.append((combo, trim))
+                            high_trim_log.append((combo, trim))
+                        else:
+                            break
+                    else:
+                        # Auto-accept for non-interactive mode
+                        for k in combo:
+                            order_counter[k] -= 1
+                        used.append((combo, trim))
+                        high_trim_log.append((combo, trim))
+                else:
+                    break
+        
+        # Remaining = pending
+        for size, qty in order_counter.items():
+            if qty > 0:
+                pending[size] = qty
+                
+        return used, dict(pending), high_trim_log
+
+
+
+    def optimize_with_new_algorithm(
+        self,
+        order_requirements: List[Dict],
+        interactive: bool = False
+    ) -> Dict:
+        """
+        Use the new algorithm logic with existing input format.
+        Groups orders by complete specification (GSM + Shade + BF) to ensure
+        different paper types are not mixed in the same jumbo roll.
+        
+        Args:
+            order_requirements: List of order dicts with width, quantity, etc.
+            interactive: Whether to prompt user for high trim decisions
+            
+        Returns:
+            Optimized cutting plan with jumbo rolls used and pending orders
+        """
+        # Group orders by complete specification (GSM + Shade + BF)
+        spec_groups = {}
+        for req in order_requirements:
+            # Create unique key for paper specification
+            spec_key = (req['gsm'], req['shade'], req['bf'])
+            if spec_key not in spec_groups:
+                spec_groups[spec_key] = {
+                    'orders': {},
+                    'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']}
+                }
+            
+            # Add width and quantity to this specification group
+            width = float(req['width'])
+            if width in spec_groups[spec_key]['orders']:
+                spec_groups[spec_key]['orders'][width] += req['quantity']
             else:
-                # Assume it's a number if not a dict
-                total_used += item
-    
-        if total_used == 0:
-            return 100.0
-    
-        waste = self.jumbo_roll_width - total_used
-        waste_percentage = (waste / self.jumbo_roll_width) * 100
-        return round(waste_percentage, 2)
+                spec_groups[spec_key]['orders'][width] = req['quantity']
+        
+        # Process each specification group separately
+        all_jumbo_rolls = []
+        all_pending_orders = []
+        all_high_trims = []
+        jumbo_counter = 1
+        
+        for spec_key, group_data in spec_groups.items():
+            orders = group_data['orders']
+            spec = group_data['spec']
+            
+            print(f"\n🔧 Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
+            print(f"   Orders: {orders}")
+            
+            # Run the matching algorithm for this specification group
+            used, pending, high_trims = self.match_combos(orders, interactive)
+            
+            # Convert results back to detailed format for this group
+            for combo, trim in used:
+                roll_details = []
+                for width in combo:
+                    roll_details.append({
+                        'width': width,
+                        'gsm': spec['gsm'],
+                        'bf': spec['bf'],
+                        'shade': spec['shade'],
+                        'min_length': next((req.get('min_length', 0) for req in order_requirements 
+                                          if float(req['width']) == width and req['gsm'] == spec['gsm'] 
+                                          and req['shade'] == spec['shade'] and req['bf'] == spec['bf']), 0)
+                    })
+                
+                all_jumbo_rolls.append({
+                    'jumbo_number': jumbo_counter,
+                    'rolls': roll_details,
+                    'trim_left': trim,
+                    'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
+                    'paper_spec': spec
+                })
+                jumbo_counter += 1
+            
+            # Add pending orders for this specification
+            for width, qty in pending.items():
+                all_pending_orders.append({
+                    'width': width,
+                    'quantity': qty,
+                    'gsm': spec['gsm'],
+                    'bf': spec['bf'],
+                    'shade': spec['shade'],
+                    'min_length': next((req.get('min_length', 0) for req in order_requirements 
+                                      if float(req['width']) == width and req['gsm'] == spec['gsm'] 
+                                      and req['shade'] == spec['shade'] and req['bf'] == spec['bf']), 0)
+                })
+            
+            # Add high trim combos for this specification
+            for combo, trim in high_trims:
+                all_high_trims.append({
+                    'combo': combo,
+                    'trim': trim,
+                    'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
+                    'paper_spec': spec
+                })
+        
+        # Calculate summary statistics
+        total_trim = sum(jumbo['trim_left'] for jumbo in all_jumbo_rolls)
+        total_jumbo_width = len(all_jumbo_rolls) * JUMBO_WIDTH
+        overall_waste_percentage = (total_trim / total_jumbo_width * 100) if total_jumbo_width > 0 else 0
+        
+        all_fulfilled = len(all_pending_orders) == 0
+        
+        return {
+            'jumbo_rolls_used': all_jumbo_rolls,
+            'pending_orders': all_pending_orders,
+            'high_trim_approved': all_high_trims,
+            'summary': {
+                'total_jumbos_used': len(all_jumbo_rolls),
+                'total_trim_inches': round(total_trim, 2),
+                'overall_waste_percentage': round(overall_waste_percentage, 2),
+                'all_orders_fulfilled': all_fulfilled,
+                'pending_rolls_count': sum(order['quantity'] for order in all_pending_orders),
+                'specification_groups_processed': len(spec_groups)
+            }
+        }
 
     def generate_optimized_plan(
         self,
         order_requirements: List[Dict],
-        available_inventory: List[Dict],
-        consider_standard_sizes: bool = True
+        interactive: bool = False
     ) -> Dict:
         """
-        Generate an optimized cutting plan considering inventory and standard sizes.
+        Generate an optimized cutting plan using the new algorithm.
+        This is now an alias for optimize_with_new_algorithm for backward compatibility.
         
         Args:
-            order_requirements: List of dicts with 'width', 'quantity', 'gsm', 'bf', 'shade'
-            available_inventory: List of available cut rolls with specifications
-            consider_standard_sizes: Whether to consider standard sizes for optimization
+            order_requirements: List of order dicts with width, quantity, etc.
+            interactive: Whether to prompt user for high trim decisions
             
         Returns:
-            Dictionary containing optimized cutting plan
+            Optimized cutting plan with jumbo rolls used and pending orders
         """
-        self._validate_order_requirements(order_requirements)
-        
-        # First, try to fulfill from existing inventory
-        plan = self._fulfill_from_inventory(order_requirements, available_inventory)
-        remaining_requirements = self._get_remaining_requirements(order_requirements, plan['fulfilled_orders'])
-        
-        if remaining_requirements:
-            # Generate new cutting patterns for remaining requirements
-            cutting_plan = self._generate_cutting_plan_with_standard_sizes(
-                remaining_requirements,
-                consider_standard_sizes
-            )
-            plan.update({
-                'cutting_patterns': cutting_plan['patterns'],
-                'waste_percentage': cutting_plan['waste_percentage'],
-                'rolls_used': cutting_plan['rolls_used']
-            })
-        
-        return plan
+        return self.optimize_with_new_algorithm(order_requirements, interactive)
+
+# Example usage and testing
+def test_optimizer():
+    optimizer = CuttingOptimizer()
     
-    def _validate_order_requirements(self, order_requirements: List[Dict]):
-        """Validate order requirements before processing."""
-        if not order_requirements:
-            raise ValueError("No order requirements provided")
-            
-        for req in order_requirements:
-            if not all(k in req for k in ['width', 'quantity', 'gsm', 'bf', 'shade']):
-                raise ValueError("Missing required fields in order requirements")
-            if req['width'] > self.jumbo_roll_width:
-                raise ValueError(f"Order width {req['width']} exceeds jumbo roll width {self.jumbo_roll_width}")
+    # Test with mixed specifications to demonstrate proper grouping
+    sample_orders = [
+        # White paper, GSM 90, BF 18.0 - GROUP 1
+        {"width": 29.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1500},
+        {"width": 32.5, "quantity": 3, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
+        {"width": 38, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
+        
+        # Blue paper, GSM 90, BF 18.0 - GROUP 2 (different shade)
+        {"width": 32.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
+        {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
+        
+        # White paper, GSM 120, BF 18.0 - GROUP 3 (different GSM)
+        {"width": 38, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
+        {"width": 48, "quantity": 3, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
+        
+        # White paper, GSM 90, BF 20.0 - GROUP 4 (different BF)
+        {"width": 51, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600},
+        {"width": 54, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600}
+    ]
     
-    def _fulfill_from_inventory(
-        self,
-        order_requirements: List[Dict],
-        available_inventory: List[Dict],
-        strict_matching: bool = True
-    ) -> Dict:
-        """
-        Fulfill orders from available inventory.
-        
-        Args:
-            order_requirements: List of order requirements
-            available_inventory: List of available cut rolls
-            strict_matching: If True, requires exact GSM, BF, and Shade matches
-            
-        Returns:
-            Dictionary with fulfilled orders and remaining inventory
-        """
-        fulfilled = []
-        remaining_inventory = available_inventory.copy()
-        
-        for req in order_requirements:
-            req_width = req['width']
-            req_quantity = req['quantity']
-            
-            for inv in remaining_inventory[:]:
-                if inv['status'] != CutRollStatus.AVAILABLE.value:
-                    continue
-                    
-                # Check specifications match
-                if strict_matching:
-                    if not all(inv.get(k) == req[k] for k in ['gsm', 'bf', 'shade']):
-                        continue
-                
-                # Check if inventory item can be used
-                if inv['width'] == req_width and inv['length'] >= req.get('min_length', 0):
-                    fulfilled.append({
-                        'order_id': req.get('order_id'),
-                        'width': req_width,
-                        'quantity': 1,
-                        'inventory_id': inv['id'],
-                        'spec_match': True
-                    })
-                    req_quantity -= 1
-                    remaining_inventory.remove(inv)
-                    
-                    if req_quantity <= 0:
-                        break
-            
-            # If we still need more, check for larger rolls that can be cut down
-            if req_quantity > 0:
-                for inv in sorted(remaining_inventory, key=lambda x: x['width']):
-                    if inv['width'] > req_width and inv['status'] == CutRollStatus.AVAILABLE.value:
-                        if not strict_matching or all(inv.get(k) == req[k] for k in ['gsm', 'bf', 'shade']):
-                            # Calculate how many we can get from this roll
-                            possible = min(req_quantity, inv['width'] // req_width)
-                            if possible > 0:
-                                fulfilled.append({
-                                    'order_id': req.get('order_id'),
-                                    'width': req_width,
-                                    'quantity': possible,
-                                    'inventory_id': inv['id'],
-                                    'spec_match': True,
-                                    'needs_cutting': True
-                                })
-                                req_quantity -= possible
-                                
-                                if req_quantity <= 0:
-                                    break
-        
-        return {
-            'fulfilled_orders': fulfilled,
-            'remaining_inventory': remaining_inventory,
-            'inventory_fulfillment_ratio': len(fulfilled) / len(order_requirements) if order_requirements else 0
-        }
+    print("=== CUTTING OPTIMIZER RESULTS ===")
+    result = optimizer.generate_optimized_plan(
+        order_requirements=sample_orders,
+        interactive=False  # Set to True for interactive mode
+    )
     
-    def _generate_cutting_plan_with_standard_sizes(
-        self,
-        requirements: List[Dict],
-        consider_standard_sizes: bool = True
-    ) -> Dict:
-        """
-        Generate cutting plan considering standard sizes to minimize waste.
-        """
-        # Flatten requirements
-        all_widths = []
-        for req in requirements:
-            all_widths.extend([req['width']] * req['quantity'])
-        
-        if not all_widths:
-            return {"patterns": [], "waste_percentage": 0, "rolls_used": 0}
-        
-        # Sort in descending order for FFD
-        all_widths.sort(reverse=True)
-        patterns = []
-        
-        while all_widths:
-            current_roll = []
-            remaining_width = self.jumbo_roll_width
-            i = 0
-            
-            while i < len(all_widths):
-                if all_widths[i] <= remaining_width:
-                    current_roll.append(all_widths[i])
-                    remaining_width -= all_widths[i]
-                    all_widths.pop(i)
-                else:
-                    i += 1
-            
-            # If we have remaining space, try to fill with standard sizes
-            if consider_standard_sizes and remaining_width > 0:
-                self._fill_with_standard_sizes(current_roll, remaining_width)
-            
-            patterns.append(current_roll)
-        
-        # Calculate waste
-        total_used = sum(sum(pattern) for pattern in patterns)
-        total_rolls = len(patterns)
-        total_possible = total_rolls * self.jumbo_roll_width
-        waste_percentage = ((total_possible - total_used) / total_possible) * 100 if total_possible > 0 else 0
-        
-        return {
-            "patterns": patterns,
-            "waste_percentage": round(waste_percentage, 2),
-            "rolls_used": total_rolls
-        }
+    print("\n✅ Jumbo Rolls Used:")
+    for jumbo in result['jumbo_rolls_used']:
+        widths = [roll['width'] for roll in jumbo['rolls']]
+        print(f"Jumbo #{jumbo['jumbo_number']}: {tuple(widths)} → Trim Left: {jumbo['trim_left']}\"")
     
-    def _fill_with_standard_sizes(self, pattern: List[int], remaining_width: int):
-        """Try to fill remaining width with standard sizes."""
-        for std_width in sorted([w for w in self.standard_widths if w <= remaining_width], reverse=True):
-            if std_width <= remaining_width:
-                pattern.append(std_width)
-                remaining_width -= std_width
-                
-                # If we can't fit any more standard sizes, break
-                if remaining_width < min(self.standard_widths, default=0):
-                    break
+    if result['pending_orders']:
+        print("\n⏳ Pending Rolls:")
+        for pending in result['pending_orders']:
+            print(f"• {pending['quantity']} roll(s) of size {pending['width']}\"")
+    else:
+        print("\n🎯 All rolls fulfilled!")
     
-    def validate_cutting_plan(
-        self,
-        plan: Dict,
-        requirements: List[Dict],
-        available_inventory: List[Dict] = None
-    ) -> Dict:
-        """
-        Comprehensive validation of a cutting plan.
-        
-        Args:
-            plan: The cutting plan to validate
-            requirements: Original order requirements
-            available_inventory: Optional inventory to check against
-            
-        Returns:
-            Dict with validation results
-        """
-        errors = []
-        warnings = []
-        
-        # Check required fields
-        required_fields = ['patterns', 'waste_percentage', 'rolls_used']
-        for field in required_fields:
-            if field not in plan:
-                errors.append(f"Missing required field: {field}")
-        
-        # Validate patterns
-        if 'patterns' in plan:
-            for i, pattern in enumerate(plan['patterns']):
-                if not isinstance(pattern, list):
-                    errors.append(f"Pattern {i} is not a list")
-                    continue
-                    
-                pattern_width = sum(pattern)
-                if pattern_width > self.jumbo_roll_width:
-                    errors.append(f"Pattern {i} exceeds jumbo roll width: {pattern_width} > {self.jumbo_roll_width}")
-        
-        # Check if all requirements are met
-        if requirements:
-            req_map = {(r['width'], r['gsm'], r['bf'], r['shade']): r['quantity'] for r in requirements}
-            fulfilled = plan.get('fulfilled_orders', [])
-            
-            for item in fulfilled:
-                key = (item['width'], item['gsm'], item['bf'], item['shade'])
-                if key in req_map:
-                    req_map[key] -= item['quantity']
-            
-            for (width, gsm, bf, shade), remaining in req_map.items():
-                if remaining > 0:
-                    warnings.append(f"{remaining} rolls of {width}x{gsm}/{bf}/{shade} not fulfilled")
-        
-        # Validate against inventory if provided
-        if available_inventory is not None and 'fulfilled_orders' in plan:
-            inv_map = {inv['id']: inv for inv in available_inventory}
-            for item in plan['fulfilled_orders']:
-                if 'inventory_id' in item and item['inventory_id'] not in inv_map:
-                    errors.append(f"Referenced inventory ID {item['inventory_id']} not found")
-        
-        return {
-            'is_valid': len(errors) == 0,
-            'errors': errors,
-            'warnings': warnings
-        }
+    if result['high_trim_approved']:
+        print("\n📋 Approved High Trim Combos (6–20\"): ")
+        for high_trim in result['high_trim_approved']:
+            print(f"• {high_trim['combo']} → Trim: {high_trim['trim']}\"")
     
-    def get_standard_sizes(self) -> List[int]:
-        """Get the list of standard roll widths."""
-        return sorted(self.standard_widths)
+    print(f"\n📊 Summary:")
+    print(f"Total Jumbos Used: {result['summary']['total_jumbos_used']}")
+    print(f"Total Trim: {result['summary']['total_trim_inches']}\"")
+    print(f"Overall Waste: {result['summary']['overall_waste_percentage']}%")
     
-    def set_standard_sizes(self, sizes: List[int]):
-        """Update the list of standard roll widths."""
-        if not all(isinstance(s, (int, float)) and s > 0 for s in sizes):
-            raise ValueError("All standard sizes must be positive numbers")
-        self.standard_widths = sorted(set(int(s) for s in sizes))
-    
-    def _get_remaining_requirements(
-        self,
-        original_requirements: List[Dict],
-        fulfilled_orders: List[Dict]
-    ) -> List[Dict]:
-        """Calculate remaining requirements after fulfillment."""
-        if not fulfilled_orders:
-            return original_requirements.copy()
-            
-        # Create a map of requirements
-        req_map = {}
-        for req in original_requirements:
-            key = (req['width'], req['gsm'], req['bf'], req['shade'])
-            req_map[key] = req.get('quantity', 0)
-        
-        # Subtract fulfilled quantities
-        for item in fulfilled_orders:
-            key = (item['width'], item['gsm'], item['bf'], item['shade'])
-            if key in req_map:
-                req_map[key] -= item.get('quantity', 0)
-        
-        # Convert back to requirement format
-        remaining = []
-        for (width, gsm, bf, shade), quantity in req_map.items():
-            if quantity > 0:
-                remaining.append({
-                    'width': width,
-                    'gsm': gsm,
-                    'bf': bf,
-                    'shade': shade,
-                    'quantity': quantity
-                })
-        
-        return remaining
+    return result
+
+if __name__ == "__main__":
+    test_optimizer()
