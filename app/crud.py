@@ -512,9 +512,11 @@ def get_available_inventory(db: Session, paper_id: uuid.UUID, width_inches: int 
 
 def create_plan(db: Session, plan: schemas.PlanMasterCreate) -> models.PlanMaster:
     """Create a new cutting plan"""
+    import json
+    
     db_plan = models.PlanMaster(
         name=plan.name,
-        cut_pattern=plan.cut_pattern,
+        cut_pattern=json.dumps(plan.cut_pattern),  # Serialize list to JSON string
         expected_waste_percentage=plan.expected_waste_percentage,
         created_by_id=plan.created_by_id
     )

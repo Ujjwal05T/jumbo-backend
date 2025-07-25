@@ -272,7 +272,7 @@ class PlanMasterBase(BaseModel):
 class PlanMasterCreate(PlanMasterBase):
     created_by_id: UUID
     order_ids: List[UUID] = Field(..., min_items=1)
-    inventory_ids: List[UUID] = Field(..., min_items=1)
+    inventory_ids: Optional[List[UUID]] = Field(default_factory=list, description="Optional inventory IDs for plan")
 
 class PlanMasterUpdate(BaseModel):
     status: Optional[PlanStatus] = None
@@ -286,6 +286,17 @@ class PlanMaster(PlanMasterBase):
     created_at: datetime
     executed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    @validator('cut_pattern', pre=True)
+    def parse_cut_pattern(cls, v):
+        """Parse cut_pattern from JSON string if needed"""
+        if isinstance(v, str):
+            import json
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return []
+        return v
 
     class Config:
         from_attributes = True
@@ -326,6 +337,12 @@ class CuttingOptimizationRequest(BaseModel):
     order_ids: List[UUID] = Field(..., min_items=1)
     include_pending: bool = Field(default=True, description="Include pending orders in optimization")
     interactive: bool = Field(default=False, description="Enable interactive trim decisions")
+
+class CreatePlanRequest(BaseModel):
+    """Request to create a cutting plan from order IDs"""
+    order_ids: List[str] = Field(..., min_items=1, description="List of order IDs to include in plan")
+    created_by_id: str = Field(..., description="ID of user creating the plan")
+    plan_name: Optional[str] = Field(None, description="Optional name for the plan")
 
 class CuttingPattern(BaseModel):
     """A single cutting pattern result"""

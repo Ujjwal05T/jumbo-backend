@@ -567,41 +567,44 @@ def test_cutting_optimizer():
 
 @router.post("/optimizer/test-with-orders", tags=["Cutting Optimizer"])
 def test_optimizer_with_orders(
-    request_data: Dict[str, Any],
+    request: schemas.CreatePlanRequest,
     db: Session = Depends(get_db)
 ):
-    """Test the cutting optimizer with actual order IDs from the database"""
+    """Test the cutting optimizer with real order data without saving to database
+    
+    Fetches order details from database using the provided order IDs,
+    runs the cutting optimization algorithm, and returns the result.
+    Does not create any database records - for testing/preview purposes only.
+    """
     try:
         from .services.cutting_optimizer import CuttingOptimizer
         import uuid
         
-        # Extract order_ids from request body
-        order_ids = request_data.get('order_ids', [])
-        if not order_ids:
-            raise HTTPException(status_code=400, detail="order_ids is required")
-        
         # Convert string IDs to UUIDs
         uuid_order_ids = []
-        for order_id in order_ids:
+        for order_id in request.order_ids:
             try:
                 uuid_order_ids.append(uuid.UUID(order_id))
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
         
+        # Use the existing method to get order requirements from database
         optimizer = CuttingOptimizer()
         order_requirements = optimizer.get_order_requirements_from_db(db, uuid_order_ids)
         
         if not order_requirements:
             raise HTTPException(status_code=404, detail="No valid orders found with provided IDs")
         
-        result = optimizer.optimize_with_new_algorithm(order_requirements, interactive=False)
+        # Run optimization without saving
+        optimization_result = optimizer.optimize_with_new_algorithm(order_requirements, interactive=False)
         
+        # Return result in the same format as the test method
         return {
-            "message": "Cutting optimizer test with database orders completed successfully",
-            "orders_processed": len(order_requirements),
-            "order_details": order_requirements,
-            "optimization_result": result
+            "message": "Cutting optimizer test completed successfully",
+            "test_data": f"Real orders from database - {len(order_requirements)} orders processed",
+            "optimization_result": optimization_result
         }
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -610,43 +613,38 @@ def test_optimizer_with_orders(
 
 @router.post("/optimizer/create-plan", response_model=schemas.PlanMaster, tags=["Cutting Optimizer"])
 def create_cutting_plan(
-    request_data: Dict[str, Any],
+    request: schemas.CreatePlanRequest,
     db: Session = Depends(get_db)
 ):
-    """Create a cutting plan from order IDs using the optimizer"""
+    """Create a cutting plan from order IDs using the optimizer
+    
+    Fetches order details from database using the provided order IDs,
+    runs the cutting optimization algorithm, and creates a plan.
+    """
     try:
         from .services.cutting_optimizer import CuttingOptimizer
         import uuid
         
-        # Extract data from request body
-        order_ids = request_data.get('order_ids', [])
-        created_by_id = request_data.get('created_by_id')
-        plan_name = request_data.get('plan_name')
-        
-        if not order_ids:
-            raise HTTPException(status_code=400, detail="order_ids is required")
-        if not created_by_id:
-            raise HTTPException(status_code=400, detail="created_by_id is required")
-        
         # Convert string IDs to UUIDs
         uuid_order_ids = []
-        for order_id in order_ids:
+        for order_id in request.order_ids:
             try:
                 uuid_order_ids.append(uuid.UUID(order_id))
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
         
         try:
-            created_by_uuid = uuid.UUID(created_by_id)
+            created_by_uuid = uuid.UUID(request.created_by_id)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID format for created_by_id: {created_by_id}")
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format for created_by_id: {request.created_by_id}")
         
+        # Initialize optimizer and create plan
         optimizer = CuttingOptimizer()
         plan = optimizer.create_plan_from_orders(
             db=db,
             order_ids=uuid_order_ids,
             created_by_id=created_by_uuid,
-            plan_name=plan_name,
+            plan_name=request.plan_name,
             interactive=False
         )
         
@@ -731,6 +729,8 @@ def test_optimizer_frontend(
     except Exception as e:
         logger.error(f"Error testing cutting optimizer with frontend data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # ============================================================================
 # WORKFLOW MANAGEMENT ROUTES

@@ -337,14 +337,14 @@ class CuttingOptimizer:
                 continue
             
             order_requirements.append({
-                'width': float(order.width),
-                'quantity': order.quantity,
+                'width': float(order.width_inches),
+                'quantity': order.quantity_rolls,
                 'gsm': paper.gsm,
                 'bf': paper.bf,
                 'shade': paper.shade,
-                'min_length': order.min_length or 0,
+                'min_length': 1600,  # Default min length since OrderMaster doesn't have this field
                 'order_id': str(order.id),
-                'client_name': order.client.name if order.client else 'Unknown'
+                'client_name': order.client.company_name if order.client else 'Unknown'
             })
         
         return order_requirements
