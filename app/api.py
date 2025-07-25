@@ -257,7 +257,8 @@ def delete_paper(paper_id: UUID, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"Error deleting paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))# 
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # ORDER MASTER ENDPOINTS
 # ============================================================================
@@ -394,8 +395,9 @@ def get_pending_by_specification(paper_id: UUID, db: Session = Depends(get_db)):
         return crud.get_pending_by_specification(db=db, paper_id=paper_id)
     except Exception as e:
         logger.error(f"Error getting pending orders by specification: {e}")
-        raise HTTPException(status_code=500, detail=str(e))# =
-# ===========================================================================
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
 # INVENTORY MASTER ENDPOINTS
 # ============================================================================
 
@@ -565,13 +567,18 @@ def test_cutting_optimizer():
 
 @router.post("/optimizer/test-with-orders", tags=["Cutting Optimizer"])
 def test_optimizer_with_orders(
-    order_ids: List[str],
+    request_data: Dict[str, Any],
     db: Session = Depends(get_db)
 ):
     """Test the cutting optimizer with actual order IDs from the database"""
     try:
         from .services.cutting_optimizer import CuttingOptimizer
         import uuid
+        
+        # Extract order_ids from request body
+        order_ids = request_data.get('order_ids', [])
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required")
         
         # Convert string IDs to UUIDs
         uuid_order_ids = []
@@ -603,15 +610,23 @@ def test_optimizer_with_orders(
 
 @router.post("/optimizer/create-plan", response_model=schemas.PlanMaster, tags=["Cutting Optimizer"])
 def create_cutting_plan(
-    order_ids: List[str],
-    created_by_id: str,
-    plan_name: Optional[str] = None,
+    request_data: Dict[str, Any],
     db: Session = Depends(get_db)
 ):
     """Create a cutting plan from order IDs using the optimizer"""
     try:
         from .services.cutting_optimizer import CuttingOptimizer
         import uuid
+        
+        # Extract data from request body
+        order_ids = request_data.get('order_ids', [])
+        created_by_id = request_data.get('created_by_id')
+        plan_name = request_data.get('plan_name')
+        
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required")
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
         
         # Convert string IDs to UUIDs
         uuid_order_ids = []
@@ -640,7 +655,7 @@ def create_cutting_plan(
         raise
     except Exception as e:
         logger.error(f"Error creating cutting plan: {e}")
-        raise HTTPException(status_code=500, detail=str(e))@r
+        raise HTTPException(status_code=500, detail=str(e))
 @router.post("/optimizer/test-frontend", tags=["Cutting Optimizer"])
 def test_optimizer_frontend(
     request_data: Dict[str, Any]
@@ -723,15 +738,23 @@ def test_optimizer_frontend(
 
 @router.post("/workflow/generate-plan", response_model=schemas.PlanMaster, tags=["Workflow Management"])
 def generate_cutting_plan_from_workflow(
-    order_ids: List[str],
-    created_by_id: str,
-    plan_name: Optional[str] = None,
+    request_data: Dict[str, Any],
     db: Session = Depends(get_db)
 ):
     """Generate a cutting plan from multiple orders using workflow manager"""
     try:
         from .services.workflow_manager import WorkflowManager
         import uuid
+        
+        # Extract data from request body
+        order_ids = request_data.get('order_ids', [])
+        created_by_id = request_data.get('created_by_id')
+        plan_name = request_data.get('plan_name')
+        
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required")
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
         
         # Convert string IDs to UUIDs
         uuid_order_ids = []
@@ -765,14 +788,22 @@ def generate_cutting_plan_from_workflow(
 
 @router.post("/workflow/process-orders", tags=["Workflow Management"])
 def process_multiple_orders(
-    order_ids: List[str],
-    user_id: str,
+    request_data: Dict[str, Any],
     db: Session = Depends(get_db)
 ):
     """Process multiple orders together for optimal cutting plans"""
     try:
         from .services.workflow_manager import WorkflowManager
         import uuid
+        
+        # Extract data from request body
+        order_ids = request_data.get('order_ids', [])
+        user_id = request_data.get('user_id')
+        
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
         
         # Convert string IDs to UUIDs
         uuid_order_ids = []
@@ -907,7 +938,7 @@ def update_plan_status(
             raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
         
         # Validate status
-        valid_statuses = ["planned", "in_progress", "completed", "cancelled"]
+        valid_statuses = [status.value for status in schemas.PlanStatus]
         if status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
         
@@ -1181,7 +1212,7 @@ def update_inventory_status(
             raise HTTPException(status_code=400, detail=f"Invalid UUID format: {inventory_id}")
         
         # Validate status
-        valid_statuses = ["available", "reserved", "used", "damaged"]
+        valid_statuses = [status.value for status in schemas.InventoryStatus]
         if status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
         
@@ -1199,3 +1230,453 @@ def update_inventory_status(
     except Exception as e:
         logger.error(f"Error updating inventory status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+        
+# ============================================================================
+# AUTHENTICATION ROUTES
+# ============================================================================
+
+@router.post("/auth/register", response_model=schemas.UserMaster, tags=["Authentication"])
+def register_user(
+    user_data: schemas.UserMasterCreate,
+    db: Session = Depends(get_db)
+):
+    """Register a new user in UserMaster"""
+    try:
+        from .auth import register_user
+        
+        # Register user with hashed password
+        user = register_user(db, user_data)
+        
+        return user
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering user: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/auth/login", tags=["Authentication"])
+def login_user(
+    credentials: schemas.UserMasterLogin,
+    db: Session = Depends(get_db)
+):
+    """Authenticate user and return user information"""
+    try:
+        from .auth import authenticate_user
+        
+        # Authenticate user
+        user = authenticate_user(db, credentials.username, credentials.password)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+        
+        return {
+            "message": "Login successful",
+            "user": {
+                "id": str(user.id),
+                "name": user.name,
+                "username": user.username,
+                "role": user.role,
+                "department": user.department,
+                "status": user.status
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during login: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
+# ============================================================================
+# CUTTING OPTIMIZER ENDPOINTS (Migrated from old cutting_optimizer.py)
+# ============================================================================
+
+@router.post("/optimizer/from-orders", tags=["Cutting Optimizer"])
+def generate_cutting_plan_from_orders_advanced(
+    order_ids: List[str],
+    consider_inventory: bool = True,
+    created_by_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate an optimized cutting plan for specified orders using master-based architecture.
+    
+    This endpoint creates a cutting plan by considering existing inventory and optimizing
+    for minimum waste, speed, or material usage.
+    """
+    try:
+        from .services.cutting_optimizer import CuttingOptimizer
+        import uuid
+        
+        # Convert string IDs to UUIDs
+        uuid_order_ids = []
+        for order_id in order_ids:
+            try:
+                uuid_order_ids.append(uuid.UUID(order_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
+        
+        # Get orders using master-based architecture
+        orders = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client),
+            joinedload(models.OrderMaster.paper),
+            joinedload(models.OrderMaster.created_by)
+        ).filter(
+            models.OrderMaster.id.in_(uuid_order_ids),
+            models.OrderMaster.status.in_(["pending", "processing"])
+        ).all()
+        
+        if not orders:
+            raise HTTPException(
+                status_code=404,
+                detail="No valid orders found with the provided IDs"
+            )
+        
+        # Convert orders to optimizer format using master relationships
+        order_requirements = []
+        for order in orders:
+            if not order.paper:
+                continue
+                
+            order_requirements.append({
+                'order_id': str(order.id),
+                'width': float(order.width),
+                'quantity': order.quantity - (order.quantity_fulfilled or 0),
+                'gsm': order.paper.gsm,
+                'bf': float(order.paper.bf),
+                'shade': order.paper.shade,
+                'min_length': order.min_length or 1000,
+                'client_name': order.client.name if order.client else 'Unknown'
+            })
+        
+        if not order_requirements:
+            raise HTTPException(status_code=400, detail="No valid order requirements found")
+        
+        # Get available inventory if requested
+        available_inventory = []
+        if consider_inventory:
+            inventory_items = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper)
+            ).filter(
+                models.InventoryMaster.status == "available",
+                models.InventoryMaster.roll_type == "jumbo"
+            ).all()
+            
+            for item in inventory_items:
+                if item.paper:
+                    available_inventory.append({
+                        'id': str(item.id),
+                        'width': float(item.width),
+                        'length': float(item.length) if item.length else 1000,
+                        'gsm': item.paper.gsm,
+                        'bf': float(item.paper.bf),
+                        'shade': item.paper.shade,
+                        'status': item.status,
+                        'weight': float(item.weight) if item.weight else 0
+                    })
+        
+        # Generate the optimized plan
+        optimizer = CuttingOptimizer()
+        plan = optimizer.optimize_with_new_algorithm(
+            order_requirements=order_requirements,
+            interactive=False
+        )
+        
+        # Create plan in database if created_by_id is provided
+        plan_created = None
+        if created_by_id:
+            try:
+                created_by_uuid = uuid.UUID(created_by_id)
+                plan_data = schemas.PlanMasterCreate(
+                    name=f"Auto Plan from Orders {datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    cut_pattern=plan['jumbo_rolls_used'],
+                    expected_waste_percentage=plan['summary']['overall_waste_percentage'],
+                    created_by_id=created_by_uuid,
+                    order_ids=uuid_order_ids,
+                    inventory_ids=[]
+                )
+                plan_created = crud.create_plan(db, plan_data)
+            except Exception as e:
+                logger.warning(f"Could not create plan in database: {e}")
+        
+        # Convert to response format
+        return {
+            'patterns': [
+                {
+                    'rolls': jumbo['rolls'],
+                    'waste_percentage': jumbo['waste_percentage'],
+                    'waste_inches': jumbo['trim_left'],
+                    'jumbo_number': jumbo['jumbo_number'],
+                    'paper_spec': jumbo['paper_spec']
+                }
+                for jumbo in plan['jumbo_rolls_used']
+            ],
+            'total_rolls_needed': plan['summary']['total_jumbos_used'],
+            'total_waste_percentage': plan['summary']['overall_waste_percentage'],
+            'total_waste_inches': plan['summary']['total_trim_inches'],
+            'fulfilled_orders': len(order_requirements) - len(plan['pending_orders']),
+            'unfulfilled_orders': [
+                {
+                    'width': order['width'],
+                    'quantity': order['quantity'],
+                    'gsm': order['gsm'],
+                    'bf': order['bf'],
+                    'shade': order['shade']
+                }
+                for order in plan['pending_orders']
+            ],
+            'plan_created': str(plan_created.id) if plan_created else None,
+            'available_inventory_considered': len(available_inventory),
+            'specification_groups_processed': plan['summary']['specification_groups_processed']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating cutting plan from orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/optimizer/from-specs", tags=["Cutting Optimizer"])
+def generate_cutting_plan_from_specs(
+    rolls: List[Dict[str, Any]],
+    jumbo_roll_width: int = 118,
+    consider_standard_sizes: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate an optimized cutting plan from custom roll specifications.
+    
+    This endpoint allows generating a cutting plan without requiring orders to exist in the system.
+    It's useful for planning and what-if scenarios.
+    """
+    try:
+        from .services.cutting_optimizer import CuttingOptimizer
+        
+        # Validate input
+        if not rolls:
+            raise HTTPException(status_code=400, detail="No roll specifications provided")
+        
+        # Convert request to optimizer format
+        order_requirements = []
+        for i, roll in enumerate(rolls):
+            try:
+                order_requirements.append({
+                    'width': float(roll.get('width', 0)),
+                    'quantity': int(roll.get('quantity', 1)),
+                    'gsm': int(roll.get('gsm', 90)),
+                    'bf': float(roll.get('bf', 18.0)),
+                    'shade': roll.get('shade', 'white'),
+                    'min_length': roll.get('min_length', 1000),
+                    'order_id': f"spec_{i}"
+                })
+            except (ValueError, TypeError) as e:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid roll specification at index {i}: {e}"
+                )
+        
+        # Initialize optimizer with custom width
+        optimizer = CuttingOptimizer(jumbo_roll_width=jumbo_roll_width)
+        
+        # Generate the optimized plan
+        plan = optimizer.optimize_with_new_algorithm(
+            order_requirements=order_requirements,
+            interactive=False
+        )
+        
+        # Convert to response format
+        return {
+            'patterns': [
+                {
+                    'rolls': jumbo['rolls'],
+                    'waste_percentage': jumbo['waste_percentage'],
+                    'waste_inches': jumbo['trim_left'],
+                    'jumbo_number': jumbo['jumbo_number'],
+                    'paper_spec': jumbo['paper_spec']
+                }
+                for jumbo in plan['jumbo_rolls_used']
+            ],
+            'total_rolls_needed': plan['summary']['total_jumbos_used'],
+            'total_waste_percentage': plan['summary']['overall_waste_percentage'],
+            'total_waste_inches': plan['summary']['total_trim_inches'],
+            'jumbo_roll_width_used': jumbo_roll_width,
+            'unfulfilled_orders': [
+                {
+                    'width': order['width'],
+                    'quantity': order['quantity'],
+                    'gsm': order['gsm'],
+                    'bf': order['bf'],
+                    'shade': order['shade']
+                }
+                for order in plan['pending_orders']
+            ],
+            'specification_groups_processed': plan['summary']['specification_groups_processed'],
+            'all_orders_fulfilled': plan['summary']['all_orders_fulfilled']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating cutting plan from specs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/optimizer/validate-plan", tags=["Cutting Optimizer"])
+def validate_cutting_plan(
+    plan_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Validate a cutting plan against business rules and constraints.
+    
+    This endpoint checks if a cutting plan is valid and provides feedback
+    on any issues or potential improvements.
+    """
+    try:
+        from .services.cutting_optimizer import CuttingOptimizer
+        
+        # Initialize validation result
+        validation_result = {
+            "valid": True,
+            "issues": [],
+            "recommendations": [],
+            "summary": {
+                "total_patterns": 0,
+                "total_requirements": 0,
+                "validation_passed": True,
+                "average_waste_percentage": 0,
+                "total_jumbo_rolls": 0
+            }
+        }
+        
+        # Extract patterns and requirements
+        patterns = plan_data.get('patterns', [])
+        requirements = plan_data.get('requirements', [])
+        jumbo_roll_width = plan_data.get('jumbo_roll_width', 118)
+        
+        # Basic validation checks
+        if not patterns:
+            validation_result["valid"] = False
+            validation_result["issues"].append("No cutting patterns found in plan")
+            return validation_result
+        
+        # Validate each pattern
+        total_waste = 0
+        total_patterns = len(patterns)
+        
+        for i, pattern in enumerate(patterns):
+            pattern_issues = []
+            
+            # Check if pattern has rolls
+            rolls = pattern.get('rolls', [])
+            if not rolls:
+                pattern_issues.append(f"Pattern {i+1}: No rolls specified")
+                continue
+            
+            # Calculate pattern width and validate
+            pattern_width = sum(roll.get('width', 0) for roll in rolls)
+            waste_inches = pattern.get('waste_inches', jumbo_roll_width - pattern_width)
+            waste_percentage = (waste_inches / jumbo_roll_width) * 100 if jumbo_roll_width > 0 else 0
+            
+            total_waste += waste_percentage
+            
+            # Validate pattern constraints
+            if pattern_width > jumbo_roll_width:
+                pattern_issues.append(f"Pattern {i+1}: Total width ({pattern_width}) exceeds jumbo roll width ({jumbo_roll_width})")
+            
+            if waste_percentage > 20:
+                pattern_issues.append(f"Pattern {i+1}: High waste percentage ({waste_percentage:.1f}%)")
+            elif waste_percentage < 0:
+                pattern_issues.append(f"Pattern {i+1}: Invalid negative waste ({waste_percentage:.1f}%)")
+            
+            # Check roll count
+            if len(rolls) > 5:  # MAX_ROLLS_PER_JUMBO
+                pattern_issues.append(f"Pattern {i+1}: Too many rolls ({len(rolls)}) per jumbo (max 5)")
+            
+            # Check for mixed specifications
+            if rolls:
+                first_spec = (rolls[0].get('gsm'), rolls[0].get('shade'), rolls[0].get('bf'))
+                for j, roll in enumerate(rolls[1:], 1):
+                    roll_spec = (roll.get('gsm'), roll.get('shade'), roll.get('bf'))
+                    if roll_spec != first_spec:
+                        pattern_issues.append(f"Pattern {i+1}: Mixed paper specifications in same jumbo roll")
+                        break
+            
+            if pattern_issues:
+                validation_result["issues"].extend(pattern_issues)
+                validation_result["valid"] = False
+        
+        # Calculate summary statistics
+        avg_waste = total_waste / total_patterns if total_patterns > 0 else 0
+        validation_result["summary"].update({
+            "total_patterns": total_patterns,
+            "total_requirements": len(requirements),
+            "average_waste_percentage": round(avg_waste, 2),
+            "total_jumbo_rolls": total_patterns,
+            "validation_passed": validation_result["valid"]
+        })
+        
+        # Generate recommendations
+        if avg_waste > 15:
+            validation_result["recommendations"].append("Consider reoptimizing patterns to reduce average waste")
+        elif avg_waste < 5:
+            validation_result["recommendations"].append("Excellent waste optimization achieved")
+        
+        if total_patterns > 10:
+            validation_result["recommendations"].append("Large number of patterns - consider batching for efficiency")
+        
+        # Check for optimization opportunities
+        if validation_result["valid"]:
+            validation_result["recommendations"].append("Plan passes all validation checks")
+        
+        return validation_result
+        
+    except Exception as e:
+        logger.error(f"Error validating cutting plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Error validating cutting plan: {str(e)}")
+
+@router.get("/optimizer/algorithms", tags=["Cutting Optimizer"])
+def get_optimizer_algorithms():
+    """Get information about available optimization algorithms and their parameters."""
+    return {
+        "algorithms": [
+            {
+                "name": "specification_grouping",
+                "description": "Groups orders by paper specifications (GSM, Shade, BF) to prevent mixing",
+                "default": True,
+                "parameters": {
+                    "jumbo_width": 118,
+                    "min_trim": 1,
+                    "max_trim": 6,
+                    "max_trim_with_confirmation": 20,
+                    "max_rolls_per_jumbo": 5
+                }
+            }
+        ],
+        "constraints": {
+            "jumbo_roll_width": {
+                "default": 118,
+                "min": 50,
+                "max": 200,
+                "unit": "inches"
+            },
+            "trim_limits": {
+                "min_acceptable": 1,
+                "max_acceptable": 6,
+                "max_with_confirmation": 20,
+                "unit": "inches"
+            },
+            "rolls_per_jumbo": {
+                "max": 5,
+                "recommended_max": 3
+            }
+        },
+        "optimization_objectives": [
+            "minimize_waste",
+            "minimize_jumbo_rolls",
+            "maximize_roll_utilization"
+        ]
+    }

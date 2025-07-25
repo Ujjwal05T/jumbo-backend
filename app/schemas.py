@@ -1,8 +1,76 @@
 from typing import List, Optional, Dict, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from datetime import datetime
 from enum import Enum
 from uuid import UUID
+
+# ============================================================================
+# STATUS ENUMS - Validation for status fields
+# ============================================================================
+
+class OrderStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    PARTIALLY_FULFILLED = "partially_fulfilled"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+class InventoryStatus(str, Enum):
+    AVAILABLE = "available"
+    ALLOCATED = "allocated"
+    CUTTING = "cutting"
+    USED = "used"
+    DAMAGED = "damaged"
+
+class ProductionOrderStatus(str, Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+class PlanStatus(str, Enum):
+    PLANNED = "planned"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class PendingOrderStatus(str, Enum):
+    PENDING = "pending"
+    IN_PRODUCTION = "in_production"
+    RESOLVED = "resolved"
+    CANCELLED = "cancelled"
+
+class RollType(str, Enum):
+    JUMBO = "jumbo"
+    CUT = "cut"
+
+class ClientStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+
+class UserStatus(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+
+class UserRole(str, Enum):
+    SALES = "sales"
+    PLANNER = "planner"
+    SUPERVISOR = "supervisor"
+    ADMIN = "admin"
+
+class PaperType(str, Enum):
+    STANDARD = "standard"
+    PREMIUM = "premium"
+    RECYCLED = "recycled"
+    SPECIALTY = "specialty"
+
+class Priority(str, Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
 
 # ============================================================================
 # MASTER SCHEMAS - Core reference data
@@ -15,7 +83,7 @@ class ClientMasterBase(BaseModel):
     address: Optional[str] = None
     contact_person: Optional[str] = Field(None, max_length=255)
     phone: Optional[str] = Field(None, max_length=50)
-    status: str = Field(default="active", max_length=20)
+    status: ClientStatus = Field(default=ClientStatus.ACTIVE)
 
 class ClientMasterCreate(ClientMasterBase):
     created_by_id: UUID
@@ -26,7 +94,7 @@ class ClientMasterUpdate(BaseModel):
     address: Optional[str] = None
     contact_person: Optional[str] = Field(None, max_length=255)
     phone: Optional[str] = Field(None, max_length=50)
-    status: Optional[str] = Field(None, max_length=20)
+    status: Optional[ClientStatus] = None
 
 class ClientMaster(ClientMasterBase):
     id: UUID
@@ -40,10 +108,10 @@ class ClientMaster(ClientMasterBase):
 class UserMasterBase(BaseModel):
     name: str = Field(..., max_length=255)
     username: str = Field(..., max_length=50)
-    role: str = Field(..., max_length=50)  # sales, planner, supervisor, admin
+    role: UserRole = Field(..., description="User role: sales, planner, supervisor, admin")
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
-    status: str = Field(default="active", max_length=20)
+    status: UserStatus = Field(default=UserStatus.ACTIVE)
 
 class UserMasterCreate(UserMasterBase):
     password: str = Field(..., min_length=6)  # Plain password for hashing
@@ -54,10 +122,10 @@ class UserMasterLogin(BaseModel):
 
 class UserMasterUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=255)
-    role: Optional[str] = Field(None, max_length=50)
+    role: Optional[UserRole] = None
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
-    status: Optional[str] = Field(None, max_length=20)
+    status: Optional[UserStatus] = None
 
 class UserMaster(UserMasterBase):
     id: UUID
@@ -74,8 +142,8 @@ class PaperMasterBase(BaseModel):
     bf: float = Field(..., gt=0)
     shade: str = Field(..., max_length=50)
     thickness: Optional[float] = Field(None, gt=0)
-    type: Optional[str] = Field(None, max_length=100)
-    status: str = Field(default="active", max_length=20)
+    type: PaperType = Field(default=PaperType.STANDARD)
+    status: ClientStatus = Field(default=ClientStatus.ACTIVE)  # Reusing ClientStatus for consistency
 
 class PaperMasterCreate(PaperMasterBase):
     created_by_id: UUID
@@ -86,8 +154,8 @@ class PaperMasterUpdate(BaseModel):
     bf: Optional[float] = Field(None, gt=0)
     shade: Optional[str] = Field(None, max_length=50)
     thickness: Optional[float] = Field(None, gt=0)
-    type: Optional[str] = Field(None, max_length=100)
-    status: Optional[str] = Field(None, max_length=20)
+    type: Optional[PaperType] = None
+    status: Optional[ClientStatus] = None
 
 class PaperMaster(PaperMasterBase):
     id: UUID
@@ -107,7 +175,7 @@ class OrderMasterBase(BaseModel):
     paper_id: UUID
     width_inches: int = Field(..., gt=0)
     quantity_rolls: int = Field(..., gt=0)
-    priority: str = Field(default="normal", max_length=20)
+    priority: Priority = Field(default=Priority.NORMAL)
     delivery_date: Optional[datetime] = None
     notes: Optional[str] = None
 
@@ -115,15 +183,15 @@ class OrderMasterCreate(OrderMasterBase):
     created_by_id: UUID
 
 class OrderMasterUpdate(BaseModel):
-    priority: Optional[str] = Field(None, max_length=20)
+    priority: Optional[Priority] = None
     delivery_date: Optional[datetime] = None
     notes: Optional[str] = None
-    status: Optional[str] = Field(None, max_length=50)
+    status: Optional[OrderStatus] = None
 
 class OrderMaster(OrderMasterBase):
     id: UUID
     quantity_fulfilled: int
-    status: str
+    status: OrderStatus
     created_by_id: UUID
     created_at: datetime
     updated_at: datetime
@@ -147,12 +215,12 @@ class PendingOrderMasterCreate(PendingOrderMasterBase):
     pass
 
 class PendingOrderMasterUpdate(BaseModel):
-    status: Optional[str] = Field(None, max_length=50)
+    status: Optional[PendingOrderStatus] = None
     production_order_id: Optional[UUID] = None
 
 class PendingOrderMaster(PendingOrderMasterBase):
     id: UUID
-    status: str
+    status: PendingOrderStatus
     production_order_id: Optional[UUID] = None
     created_at: datetime
     resolved_at: Optional[datetime] = None
@@ -169,7 +237,7 @@ class InventoryMasterBase(BaseModel):
     paper_id: UUID
     width_inches: int = Field(..., gt=0)
     weight_kg: float = Field(..., gt=0)
-    roll_type: str = Field(..., max_length=20)  # jumbo, cut
+    roll_type: RollType = Field(..., description="Roll type: jumbo or cut")
     location: Optional[str] = Field(None, max_length=100)
     qr_code: Optional[str] = Field(None, max_length=255)
     production_date: datetime = Field(default_factory=datetime.utcnow)
@@ -179,12 +247,12 @@ class InventoryMasterCreate(InventoryMasterBase):
 
 class InventoryMasterUpdate(BaseModel):
     location: Optional[str] = Field(None, max_length=100)
-    status: Optional[str] = Field(None, max_length=50)
+    status: Optional[InventoryStatus] = None
     allocated_to_order_id: Optional[UUID] = None
 
 class InventoryMaster(InventoryMasterBase):
     id: UUID
-    status: str
+    status: InventoryStatus
     allocated_to_order_id: Optional[UUID] = None
     created_by_id: UUID
     created_at: datetime
@@ -207,12 +275,12 @@ class PlanMasterCreate(PlanMasterBase):
     inventory_ids: List[UUID] = Field(..., min_items=1)
 
 class PlanMasterUpdate(BaseModel):
-    status: Optional[str] = Field(None, max_length=50)
+    status: Optional[PlanStatus] = None
     actual_waste_percentage: Optional[float] = Field(None, ge=0, le=100)
 
 class PlanMaster(PlanMasterBase):
     id: UUID
-    status: str
+    status: PlanStatus
     actual_waste_percentage: Optional[float] = None
     created_by_id: UUID
     created_at: datetime
@@ -226,18 +294,18 @@ class PlanMaster(PlanMasterBase):
 class ProductionOrderMasterBase(BaseModel):
     paper_id: UUID
     quantity: int = Field(default=1, gt=0)
-    priority: str = Field(default="normal", max_length=20)
+    priority: Priority = Field(default=Priority.NORMAL)
 
 class ProductionOrderMasterCreate(ProductionOrderMasterBase):
     created_by_id: UUID
 
 class ProductionOrderMasterUpdate(BaseModel):
-    priority: Optional[str] = Field(None, max_length=20)
-    status: Optional[str] = Field(None, max_length=50)
+    priority: Optional[Priority] = None
+    status: Optional[ProductionOrderStatus] = None
 
 class ProductionOrderMaster(ProductionOrderMasterBase):
     id: UUID
-    status: str
+    status: ProductionOrderStatus
     created_by_id: UUID
     created_at: datetime
     started_at: Optional[datetime] = None

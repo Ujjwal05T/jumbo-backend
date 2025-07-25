@@ -1,0 +1,1133 @@
+{
+	"info": {
+		"_postman_id": "paper-roll-api-collection",
+		"name": "Paper Roll Management API",
+		"description": "Complete API collection for Paper Roll Management System with Master-Based Architecture",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "basic",
+		"basic": [
+			{
+				"key": "username",
+				"value": "admin",
+				"type": "string"
+			},
+			{
+				"key": "password",
+				"value": "admin123",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8000/api",
+			"type": "string"
+		},
+		{
+			"key": "client_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "user_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "paper_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "order_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "inventory_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "plan_id",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [		{
+	
+		"name": "🏢 Client Master",
+			"item": [
+				{
+					"name": "Create Client",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('client_id', response.id);",
+									"    pm.test('Client created successfully', () => {",
+									"        pm.expect(response.company_name).to.eql('Test Company Ltd');",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"company_name\": \"Test Company Ltd\",\n  \"email\": \"contact@testcompany.com\",\n  \"address\": \"123 Business Street, City, State 12345\",\n  \"contact_person\": \"John Smith\",\n  \"phone\": \"+1-555-0123\",\n  \"status\": \"active\",\n  \"created_by_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/clients",
+							"host": ["{{baseUrl}}"],
+							"path": ["clients"]
+						}
+					}
+				},
+				{
+					"name": "Get All Clients",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/clients?skip=0&limit=10&status=active",
+							"host": ["{{baseUrl}}"],
+							"path": ["clients"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "active"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Client by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/clients/{{client_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["clients", "{{client_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Update Client",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"company_name\": \"Updated Test Company Ltd\",\n  \"email\": \"updated@testcompany.com\",\n  \"phone\": \"+1-555-0124\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/clients/{{client_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["clients", "{{client_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Delete Client",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/clients/{{client_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["clients", "{{client_id}}"]
+						}
+					}
+				}
+			]
+		},	
+	{
+			"name": "👥 User Master",
+			"item": [
+				{
+					"name": "Register User",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('user_id', response.id);",
+									"    pm.test('User registered successfully', () => {",
+									"        pm.expect(response.username).to.eql('testuser');",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Test User\",\n  \"username\": \"testuser\",\n  \"password\": \"testpass123\",\n  \"role\": \"planner\",\n  \"contact\": \"testuser@company.com\",\n  \"department\": \"Production\",\n  \"status\": \"active\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users/register",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "register"]
+						}
+					}
+				},
+				{
+					"name": "User Login",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"testpass123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "login"]
+						}
+					}
+				},
+				{
+					"name": "Get All Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/users?skip=0&limit=10&role=planner",
+							"host": ["{{baseUrl}}"],
+							"path": ["users"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "role", "value": "planner"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get User by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/users/{{user_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "{{user_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Update User",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Updated Test User\",\n  \"role\": \"supervisor\",\n  \"department\": \"Quality Control\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/users/{{user_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["users", "{{user_id}}"]
+						}
+					}
+				}
+			]
+		},		{
+
+			"name": "📄 Paper Master",
+			"item": [
+				{
+					"name": "Create Paper",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('paper_id', response.id);",
+									"    pm.test('Paper created successfully', () => {",
+									"        pm.expect(response.gsm).to.eql(90);",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"gsm\": 90,\n  \"bf\": 18.5,\n  \"shade\": \"white\",\n  \"type\": \"standard\",\n  \"created_by_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/papers",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers"]
+						}
+					}
+				},
+				{
+					"name": "Get All Papers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/papers?skip=0&limit=10&status=active",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "active"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Paper by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/papers/{{paper_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers", "{{paper_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Search Paper by Specs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/papers/search?gsm=90&bf=18.5&shade=white&type=standard",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers", "search"],
+							"query": [
+								{"key": "gsm", "value": "90"},
+								{"key": "bf", "value": "18.5"},
+								{"key": "shade", "value": "white"},
+								{"key": "type", "value": "standard"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Paper",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"gsm\": 95,\n  \"bf\": 19.0,\n  \"type\": \"premium\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/papers/{{paper_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers", "{{paper_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Delete Paper",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/papers/{{paper_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["papers", "{{paper_id}}"]
+						}
+					}
+				}
+			]
+		},		
+{
+			"name": "📋 Order Master",
+			"item": [
+				{
+					"name": "Create Order",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('order_id', response.id);",
+									"    pm.test('Order created successfully', () => {",
+									"        pm.expect(response.width).to.eql(32.5);",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"client_id\": \"{{client_id}}\",\n  \"paper_id\": \"{{paper_id}}\",\n  \"width\": 32.5,\n  \"quantity\": 100,\n  \"min_length\": 1500,\n  \"priority\": \"normal\",\n  \"created_by_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/orders",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders"]
+						}
+					}
+				},
+				{
+					"name": "Get All Orders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/orders?skip=0&limit=10&status=pending&client_id={{client_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "pending"},
+								{"key": "client_id", "value": "{{client_id}}"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Order by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/orders/{{order_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "{{order_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Update Order",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"quantity\": 150,\n  \"priority\": \"high\",\n  \"status\": \"processing\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/orders/{{order_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "{{order_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Get Pending Orders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/orders/pending?paper_id={{paper_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "pending"],
+							"query": [
+								{"key": "paper_id", "value": "{{paper_id}}"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Create Order (Legacy)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"customer_name\": \"Legacy Customer\",\n  \"width_inches\": 29.5,\n  \"quantity_rolls\": 50,\n  \"gsm\": 90,\n  \"bf\": 18.5,\n  \"shade\": \"white\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/orders/legacy",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "legacy"]
+						}
+					}
+				}
+			]
+		},		{
+
+			"name": "📦 Inventory Master",
+			"item": [
+				{
+					"name": "Create Inventory Item",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('inventory_id', response.id);",
+									"    pm.test('Inventory item created successfully', () => {",
+									"        pm.expect(response.roll_type).to.eql('jumbo');",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"paper_id\": \"{{paper_id}}\",\n  \"roll_type\": \"jumbo\",\n  \"width\": 118,\n  \"length\": 5000,\n  \"weight\": 4500,\n  \"status\": \"available\",\n  \"created_by_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/inventory",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory"]
+						}
+					}
+				},
+				{
+					"name": "Get All Inventory",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/inventory?skip=0&limit=10&roll_type=jumbo&status=available",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "roll_type", "value": "jumbo"},
+								{"key": "status", "value": "available"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Inventory Item by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/inventory/{{inventory_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "{{inventory_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Update Inventory Item",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"allocated\",\n  \"weight\": 4400\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/inventory/{{inventory_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "{{inventory_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Get Jumbo Rolls",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/inventory/jumbo-rolls?skip=0&limit=10&status=available",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "jumbo-rolls"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "available"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Cut Rolls",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/inventory/cut-rolls?skip=0&limit=10&status=available",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "cut-rolls"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "available"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Available Inventory by Paper",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/inventory/available/{{paper_id}}?width_inches=32.5&roll_type=jumbo",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "available", "{{paper_id}}"],
+							"query": [
+								{"key": "width_inches", "value": "32.5"},
+								{"key": "roll_type", "value": "jumbo"}
+							]
+						}
+					}
+				}
+			]
+		},		{
+
+			"name": "📋 Plan Master",
+			"item": [
+				{
+					"name": "Create Plan",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('plan_id', response.id);",
+									"    pm.test('Plan created successfully', () => {",
+									"        pm.expect(response.status).to.eql('planned');",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Test Cutting Plan\",\n  \"cut_pattern\": [{\"width\": 32.5, \"quantity\": 2}, {\"width\": 29.5, \"quantity\": 1}],\n  \"expected_waste_percentage\": 5.2,\n  \"created_by_id\": \"{{user_id}}\",\n  \"order_ids\": [\"{{order_id}}\"],\n  \"inventory_ids\": [\"{{inventory_id}}\"]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans"]
+						}
+					}
+				},
+				{
+					"name": "Get All Plans",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans?skip=0&limit=10&status=planned",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "planned"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Plan by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}"]
+						}
+					}
+				},
+				{
+					"name": "Update Plan",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"in_progress\",\n  \"actual_waste_percentage\": 4.8\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}"]
+						}
+					}
+				}
+			]
+		},		{
+	
+		"name": "🔧 Cutting Optimizer",
+			"item": [
+				{
+					"name": "Test Optimizer (Sample Data)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/test",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "test"]
+						}
+					}
+				},
+				{
+					"name": "Test Optimizer with Orders",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"user_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/test-with-orders",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "test-with-orders"]
+						}
+					}
+				},
+				{
+					"name": "Create Plan from Optimizer",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\",\n  \"plan_name\": \"Optimizer Generated Plan\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/create-plan",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "create-plan"]
+						}
+					}
+				},
+				{
+					"name": "Test Frontend Optimizer",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"rolls\": [\n    {\n      \"width\": 32.5,\n      \"quantity\": 3,\n      \"gsm\": 90,\n      \"bf\": 18.5,\n      \"shade\": \"white\",\n      \"min_length\": 1500\n    },\n    {\n      \"width\": 29.5,\n      \"quantity\": 2,\n      \"gsm\": 90,\n      \"bf\": 18.5,\n      \"shade\": \"white\",\n      \"min_length\": 1600\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/test-frontend",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "test-frontend"]
+						}
+					}
+				}
+			]
+		},		{
+
+			"name": "🔄 Workflow Management",
+			"item": [
+				{
+					"name": "Generate Plan from Workflow",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\",\n  \"plan_name\": \"Workflow Generated Plan\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/workflow/generate-plan",
+							"host": ["{{baseUrl}}"],
+							"path": ["workflow", "generate-plan"]
+						}
+					}
+				},
+				{
+					"name": "Process Multiple Orders",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"user_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/workflow/process-orders",
+							"host": ["{{baseUrl}}"],
+							"path": ["workflow", "process-orders"]
+						}
+					}
+				},
+				{
+					"name": "Get Workflow Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/workflow/status",
+							"host": ["{{baseUrl}}"],
+							"path": ["workflow", "status"]
+						}
+					}
+				},
+				{
+					"name": "Get Orders with Relationships",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/workflow/orders-with-relationships?order_ids={{order_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["workflow", "orders-with-relationships"],
+							"query": [
+								{"key": "order_ids", "value": "{{order_id}}"}
+							]
+						}
+					}
+				}
+			]
+		},	
+	{
+			"name": "📊 Plan Management",
+			"item": [
+				{
+					"name": "Update Plan Status",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"in_progress\",\n  \"actual_waste_percentage\": 4.5\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}/status?status=in_progress&actual_waste_percentage=4.5",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}", "status"],
+							"query": [
+								{"key": "status", "value": "in_progress"},
+								{"key": "actual_waste_percentage", "value": "4.5"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Execute Cutting Plan",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}/execute",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}", "execute"]
+						}
+					}
+				},
+				{
+					"name": "Complete Cutting Plan",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"actual_waste_percentage\": 5.1\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}/complete?actual_waste_percentage=5.1",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}", "complete"],
+							"query": [
+								{"key": "actual_waste_percentage", "value": "5.1"}
+							]
+						}
+					}
+				}
+			]
+		},		{
+			
+"name": "🔗 Inventory Linking",
+			"item": [
+				{
+					"name": "Link Inventory to Plan",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "[\n  {\n    \"inventory_id\": \"{{inventory_id}}\",\n    \"quantity_used\": 100.5\n  }\n]"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}/link-inventory",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}", "link-inventory"]
+						}
+					}
+				},
+				{
+					"name": "Get Plan Inventory Links",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/plans/{{plan_id}}/inventory",
+							"host": ["{{baseUrl}}"],
+							"path": ["plans", "{{plan_id}}", "inventory"]
+						}
+					}
+				},
+				{
+					"name": "Update Inventory Status",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"used\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/inventory/{{inventory_id}}/status?status=used",
+							"host": ["{{baseUrl}}"],
+							"path": ["inventory", "{{inventory_id}}", "status"],
+							"query": [
+								{"key": "status", "value": "used"}
+							]
+						}
+					}
+				}
+			]
+		},		{
+
+			"name": "⏳ Pending Orders",
+			"item": [
+				{
+					"name": "Create Pending Order",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"original_order_id\": \"{{order_id}}\",\n  \"paper_id\": \"{{paper_id}}\",\n  \"width\": 32.5,\n  \"quantity\": 25,\n  \"min_length\": 1500,\n  \"reason\": \"insufficient_inventory\",\n  \"created_by_id\": \"{{user_id}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/pending-orders",
+							"host": ["{{baseUrl}}"],
+							"path": ["pending-orders"]
+						}
+					}
+				},
+				{
+					"name": "Get All Pending Orders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/pending-orders?skip=0&limit=10&status=pending",
+							"host": ["{{baseUrl}}"],
+							"path": ["pending-orders"],
+							"query": [
+								{"key": "skip", "value": "0"},
+								{"key": "limit", "value": "10"},
+								{"key": "status", "value": "pending"}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Pending Orders by Paper",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/pending-orders/by-paper/{{paper_id}}",
+							"host": ["{{baseUrl}}"],
+							"path": ["pending-orders", "by-paper", "{{paper_id}}"]
+						}
+					}
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Set default user_id if not set",
+					"if (!pm.collectionVariables.get('user_id')) {",
+					"    pm.collectionVariables.set('user_id', '00000000-0000-0000-0000-000000000001');",
+					"}"
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Global test to check response time",
+					"pm.test('Response time is less than 5000ms', function () {",
+					"    pm.expect(pm.response.responseTime).to.be.below(5000);",
+					"});",
+					"",
+					"// Global test to check status code",
+					"pm.test('Status code is success', function () {",
+					"    pm.expect(pm.response.code).to.be.oneOf([200, 201, 204]);",
+					"});"
+				]
+			}
+		}
+	]
+}

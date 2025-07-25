@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException
 import logging
 
-from .. import models, crud
+from .. import models, crud, schemas
 from .cutting_optimizer import CuttingOptimizer
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class WorkflowManager:
                 joinedload(models.OrderMaster.created_by)
             ).filter(
                 models.OrderMaster.id.in_(order_ids),
-                models.OrderMaster.status.in_(["pending", "partially_fulfilled"])
+                models.OrderMaster.status.in_([schemas.OrderStatus.PENDING.value, schemas.OrderStatus.PARTIALLY_FULFILLED.value])
             ).all()
             
             if not orders:
@@ -58,7 +58,7 @@ class WorkflowManager:
                         
                     order_requirements.append({
                         'order_id': str(order.id),
-                        'width': float(order.width),
+                        'width': float(order.width_inches),
                         'quantity': remaining_qty,
                         'gsm': paper.gsm,
                         'bf': float(paper.bf),
@@ -107,7 +107,7 @@ class WorkflowManager:
             joinedload(models.OrderMaster.client),
             joinedload(models.OrderMaster.created_by)
         ).filter(
-            models.OrderMaster.status.in_(["pending", "partially_fulfilled"]),
+            models.OrderMaster.status.in_([schemas.OrderStatus.PENDING.value, schemas.OrderStatus.PARTIALLY_FULFILLED.value]),
             models.OrderMaster.id.notin_([o.id for o in current_orders])  # Exclude current orders
         ).all()
         
@@ -130,7 +130,7 @@ class WorkflowManager:
             
             # Update status of added orders to processing
             for order in added_orders:
-                order.status = "processing"
+                order.status = schemas.OrderStatus.PROCESSING.value
                 order.updated_at = datetime.utcnow()
         
         return consolidated_orders
@@ -182,7 +182,7 @@ class WorkflowManager:
                 production_order = models.ProductionOrderMaster(
                     paper_id=paper.id,
                     quantity=1,  # One jumbo roll
-                    status="pending",
+                    status=schemas.ProductionOrderStatus.PENDING.value,
                     created_by_id=self.user_id
                 )
                 self.db.add(production_order)
@@ -208,10 +208,10 @@ class WorkflowManager:
             for order in orders:
                 fulfilled_qty = order.quantity_fulfilled or 0
                 if fulfilled_qty >= order.quantity:
-                    order.status = "completed"
+                    order.status = schemas.OrderStatus.COMPLETED.value
                     orders_updated.append(order)
                 elif fulfilled_qty > 0:
-                    order.status = "partially_fulfilled"
+                    order.status = schemas.OrderStatus.PARTIALLY_FULFILLED.value
                     orders_updated.append(order)
             
             self.db.commit()
@@ -220,8 +220,8 @@ class WorkflowManager:
                 "status": "success",
                 "summary": {
                     "orders_processed": len(orders),
-                    "orders_completed": len([o for o in orders if o.status == "completed"]),
-                    "orders_partially_fulfilled": len([o for o in orders if o.status == "partially_fulfilled"]),
+                    "orders_completed": len([o for o in orders if o.status == schemas.OrderStatus.COMPLETED.value]),
+                    "orders_partially_fulfilled": len([o for o in orders if o.status == schemas.OrderStatus.PARTIALLY_FULFILLED.value]),
                     "plans_created": len(plans_created),
                     "production_orders_created": len(production_orders_created),
                     "total_jumbos_used": plan['summary']['total_jumbos_used'],
@@ -272,7 +272,7 @@ class WorkflowManager:
             return False
             
         for roll in rolls:
-            if (float(order.width) == roll.get('width') and
+            if (float(order.width_inches) == roll.get('width') and
                 order.paper.gsm == roll.get('gsm') and
                 order.paper.shade == roll.get('shade')):
                 return True
@@ -282,7 +282,7 @@ class WorkflowManager:
         """Find the order that corresponds to a pending requirement using master relationships."""
         for order in orders:
             if (order.paper and
-                float(order.width) == pending.get('width') and
+                float(order.width_inches) == pending.get('width') and
                 order.paper.gsm == pending.get('gsm') and
                 order.paper.shade == pending.get('shade')):
                 return order
@@ -299,9 +299,9 @@ class WorkflowManager:
         # Update corresponding orders using paper master relationship
         for order in orders:
             if order.paper:
-                key = (float(order.width), order.paper.gsm, order.paper.shade)
+                key = (float(order.width_inches), order.paper.gsm, order.paper.shade)
                 if key in roll_counts:
-                    remaining_qty = order.quantity - (order.quantity_fulfilled or 0)
+                    remaining_qty = order.quantity_rolls - (order.quantity_fulfilled or 0)
                     fulfilled = min(roll_counts[key], remaining_qty)
                     order.quantity_fulfilled = (order.quantity_fulfilled or 0) + fulfilled
                     roll_counts[key] -= fulfilled
@@ -363,24 +363,24 @@ class WorkflowManager:
         """Get overall workflow status and metrics using master-based architecture."""
         # Get counts of various statuses using master tables
         pending_orders = self.db.query(models.OrderMaster).filter(
-            models.OrderMaster.status == "pending"
+            models.OrderMaster.status == schemas.OrderStatus.PENDING.value
         ).count()
         
         partial_orders = self.db.query(models.OrderMaster).filter(
-            models.OrderMaster.status == "partially_fulfilled"
+            models.OrderMaster.status == schemas.OrderStatus.PARTIALLY_FULFILLED.value
         ).count()
         
         planned_cuts = self.db.query(models.PlanMaster).filter(
-            models.PlanMaster.status == "planned"
+            models.PlanMaster.status == schemas.PlanStatus.PLANNED.value
         ).count()
         
         pending_production = self.db.query(models.ProductionOrderMaster).filter(
-            models.ProductionOrderMaster.status == "pending"
+            models.ProductionOrderMaster.status == schemas.ProductionOrderStatus.PENDING.value
         ).count()
         
         available_inventory = self.db.query(models.InventoryMaster).filter(
-            models.InventoryMaster.status == "available",
-            models.InventoryMaster.roll_type == "jumbo"
+            models.InventoryMaster.status == schemas.InventoryStatus.AVAILABLE.value,
+            models.InventoryMaster.roll_type == schemas.RollType.JUMBO.value
         ).count()
         
         return {

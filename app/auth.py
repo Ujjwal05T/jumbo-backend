@@ -1,24 +1,42 @@
-from fastapi import Depends, HTTPException, status, Request, Header
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-import uuid
-import secrets
-import base64
-from typing import Optional, Tuple, Union
+from typing import Optional
+import hashlib
 
 from . import crud, models, schemas, database
 
 # Set up HTTP Basic Auth
 security = HTTPBasic()
 
-# Session expiration time (24 hours)
-SESSION_EXPIRATION = timedelta(hours=24)
-
-def authenticate_user(db: Session, username: str, password: str) -> Union[models.User, bool]:
+def hash_password(password: str) -> str:
     """
-    Authenticate a user with username and password.
-    For internal use only, using plain text password comparison as per requirements.
+    Simple password hashing for user registration.
+    
+    Args:
+        password: Plain text password
+        
+    Returns:
+        Hashed password string
+    """
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a password against its hash.
+    
+    Args:
+        plain_password: Plain text password to verify
+        hashed_password: Stored hashed password
+        
+    Returns:
+        True if password matches, False otherwise
+    """
+    return hash_password(plain_password) == hashed_password
+
+def authenticate_user(db: Session, username: str, password: str) -> Optional[models.UserMaster]:
+    """
+    Authenticate a user with username and password using UserMaster.
     
     Args:
         db: Database session
@@ -26,260 +44,145 @@ def authenticate_user(db: Session, username: str, password: str) -> Union[models
         password: Password to authenticate (plain text)
         
     Returns:
-        User object if authentication successful, False otherwise
+        UserMaster object if authentication successful, None otherwise
     """
     user = crud.get_user_by_username(db, username)
     if not user:
-        return False
+        return None
     
-    # Simple plain text password check (as per requirements for internal use)
-    if user.password != password:
-        return False
+    # Verify password
+    if not verify_password(password, user.password_hash):
+        return None
     
-    # Update last login time
-    crud.update_user_last_login(db, user.id)
+    # Check if user is active
+    if user.status != "active":
+        return None
+    
     return user
 
-def create_user_session(db: Session, user_id: uuid.UUID) -> models.UserSession:
+def register_user(db: Session, user_data: schemas.UserMasterCreate) -> models.UserMaster:
     """
-    Create a new session for the user and store it in the database.
+    Register a new user in UserMaster with hashed password.
     
     Args:
         db: Database session
-        user_id: User ID to create session for
+        user_data: User registration data
         
     Returns:
-        Created UserSession object
-    """
-    # Generate a secure random token
-    token = secrets.token_hex(32)
-    
-    # Create session with expiration
-    expires_at = datetime.utcnow() + SESSION_EXPIRATION
-    
-    # Create session in database
-    db_session = models.UserSession(
-        user_id=user_id,
-        session_token=token,
-        expires_at=expires_at,
-        is_active=True
-    )
-    
-    db.add(db_session)
-    db.commit()
-    db.refresh(db_session)
-    
-    return db_session
-
-def get_session_by_token(db: Session, token: str) -> Optional[models.UserSession]:
-    """
-    Get a session by token if it's valid and not expired.
-    
-    Args:
-        db: Database session
-        token: Session token to look up
-        
-    Returns:
-        UserSession object if found and valid, None otherwise
-    """
-    session = db.query(models.UserSession).filter(
-        models.UserSession.session_token == token,
-        models.UserSession.is_active == True,
-        models.UserSession.expires_at > datetime.utcnow()
-    ).first()
-    
-    return session
-
-def invalidate_session(db: Session, token: str) -> bool:
-    """
-    Invalidate a session by setting is_active to False.
-    
-    Args:
-        db: Database session
-        token: Session token to invalidate
-        
-    Returns:
-        True if session was found and invalidated, False otherwise
-    """
-    session = db.query(models.UserSession).filter(
-        models.UserSession.session_token == token
-    ).first()
-    
-    if session:
-        session.is_active = False
-        db.commit()
-        return True
-    
-    return False
-
-def invalidate_all_user_sessions(db: Session, user_id: uuid.UUID) -> int:
-    """
-    Invalidate all active sessions for a user.
-    
-    Args:
-        db: Database session
-        user_id: User ID to invalidate sessions for
-        
-    Returns:
-        Number of sessions invalidated
-    """
-    sessions = db.query(models.UserSession).filter(
-        models.UserSession.user_id == user_id,
-        models.UserSession.is_active == True
-    ).all()
-    
-    count = 0
-    for session in sessions:
-        session.is_active = False
-        count += 1
-    
-    db.commit()
-    return count
-
-def parse_basic_auth_header(auth_header: str) -> Tuple[str, str]:
-    """
-    Parse HTTP Basic Authentication header.
-    
-    Args:
-        auth_header: Authorization header value
-        
-    Returns:
-        Tuple of (username, password)
+        Created UserMaster object
         
     Raises:
-        ValueError: If header is invalid
+        HTTPException: If username already exists or other validation errors
     """
-    if not auth_header or not auth_header.startswith("Basic "):
-        raise ValueError("Invalid Authorization header")
+    # Check if username already exists
+    existing_user = crud.get_user_by_username(db, user_data.username)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
     
-    try:
-        auth_decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-        username, password = auth_decoded.split(":", 1)
-        return username, password
-    except Exception as e:
-        raise ValueError(f"Invalid Authorization header: {str(e)}")
+    # Hash the password
+    hashed_password = hash_password(user_data.password)
+    
+    # Create user data with hashed password
+    user_create_data = schemas.UserMasterCreate(
+        name=user_data.name,
+        username=user_data.username,
+        password=hashed_password,  # Store hashed password
+        role=user_data.role,
+        contact=user_data.contact,
+        department=user_data.department,
+        status=user_data.status
+    )
+    
+    # Create user using CRUD
+    return crud.create_user(db, user_create_data)
 
-def get_current_user(credentials: HTTPBasicCredentials = Depends(security), db: Session = Depends(database.get_db)):
+def get_current_user(
+    credentials: HTTPBasicCredentials = Depends(security),
+    db: Session = Depends(database.get_db)
+) -> models.UserMaster:
     """
-    Dependency to get the current authenticated user from HTTP Basic Auth.
+    Get the current authenticated user using HTTP Basic Auth with UserMaster.
     
     Args:
         credentials: HTTP Basic Auth credentials
         db: Database session
         
     Returns:
-        User object if authentication successful
+        UserMaster object if authentication successful
         
     Raises:
         HTTPException: If authentication fails
     """
     user = authenticate_user(db, credentials.username, credentials.password)
+    
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+            detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Basic"},
         )
+    
     return user
 
-def get_current_active_user(current_user: models.User = Depends(get_current_user)):
+def get_current_active_user(current_user: models.UserMaster = Depends(get_current_user)) -> models.UserMaster:
     """
     Dependency to ensure the user is active.
     
     Args:
-        current_user: User object from get_current_user dependency
+        current_user: Current authenticated user
         
     Returns:
-        User object if user is active
+        UserMaster object if active
         
     Raises:
         HTTPException: If user is not active
     """
-    # In the future, we could add user status checks here
-    # For example, check if user.is_active is True
+    if current_user.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Inactive user"
+        )
     return current_user
 
-def get_user_from_session_token(
-    db: Session = Depends(database.get_db),
-    authorization: Optional[str] = Header(None)
-) -> Optional[models.User]:
+def require_role(required_role: str):
     """
-    Get user from session token in Authorization header.
+    Dependency factory to require specific user role.
     
     Args:
-        db: Database session
-        authorization: Authorization header value
+        required_role: Required role (e.g., 'admin', 'planner', 'supervisor')
         
     Returns:
-        User object if session is valid, None otherwise
+        Dependency function that checks user role
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
+    def role_checker(current_user: models.UserMaster = Depends(get_current_active_user)) -> models.UserMaster:
+        if current_user.role != required_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Operation requires {required_role} role"
+            )
+        return current_user
     
-    token = authorization[7:]  # Remove "Bearer " prefix
-    session = get_session_by_token(db, token)
-    
-    if not session:
-        return None
-    
-    return crud.get_user(db, session.user_id)
+    return role_checker
 
-def get_current_user_from_session(
-    db: Session = Depends(database.get_db),
-    authorization: Optional[str] = Header(None)
-) -> models.User:
+def require_roles(allowed_roles: list):
     """
-    Dependency to get the current authenticated user from session token.
+    Dependency factory to require one of multiple user roles.
     
     Args:
-        db: Database session
-        authorization: Authorization header value
+        allowed_roles: List of allowed roles
         
     Returns:
-        User object if session is valid
-        
-    Raises:
-        HTTPException: If session is invalid or expired
+        Dependency function that checks if user has one of the allowed roles
     """
-    user = get_user_from_session_token(db, authorization)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired session",
-            headers={"WWW-Authenticate": 'Bearer realm="session"'},
-        )
-    return user
-
-def get_current_user_optional(
-    request: Request,
-    db: Session = Depends(database.get_db)
-) -> Optional[models.User]:
-    """
-    Dependency to get the current user if authenticated, or None if not.
-    Tries both Basic Auth and session token.
+    def roles_checker(current_user: models.UserMaster = Depends(get_current_active_user)) -> models.UserMaster:
+        if current_user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Operation requires one of these roles: {', '.join(allowed_roles)}"
+            )
+        return current_user
     
-    Args:
-        request: FastAPI request object
-        db: Database session
-        
-    Returns:
-        User object if authenticated, None otherwise
-    """
-    # Try session token first
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        user = get_user_from_session_token(db, auth_header)
-        if user:
-            return user
-    
-    # Try Basic Auth
-    if auth_header and auth_header.startswith("Basic "):
-        try:
-            username, password = parse_basic_auth_header(auth_header)
-            user = authenticate_user(db, username, password)
-            if user:
-                return user
-        except ValueError:
-            pass
-    
-    return None
+    return roles_checker

@@ -97,7 +97,7 @@ class OrderFulfillmentService:
         # Find matching inventory items
         matching_inventory = self.db.query(models.InventoryMaster).filter(
             models.InventoryMaster.paper_id == order.paper_id,
-            models.InventoryMaster.width_inches == order.width,
+            models.InventoryMaster.width_inches == order.width_inches,
             models.InventoryMaster.status == "available",
             models.InventoryMaster.roll_type == "cut",
             models.InventoryMaster.allocated_order_id.is_(None)
@@ -158,7 +158,7 @@ class OrderFulfillmentService:
         pending_order = models.PendingOrderMaster(
             original_order_id=order.id,
             paper_id=order.paper_id,
-            width=order.width,
+            width=order.width_inches,
             quantity=remaining_qty,
             min_length=order.min_length,
             reason="insufficient_inventory",
@@ -380,104 +380,7 @@ class OrderFulfillmentService:
             models.PendingOrderMaster.status == "pending"
         ).order_by(models.PendingOrderMaster.created_at).all()
     
-    def _handle_remaining_quantity_legacy(self, order: models.Order, remaining: int) -> Dict:
-        """Handle remaining quantity using the new cutting optimizer"""
-        # Create order requirements for the optimizer
-        order_requirements = [{
-            'width': order.width_inches,
-            'quantity': remaining,
-            'gsm': order.gsm,
-            'bf': float(order.bf),
-            'shade': order.shade,
-            'min_length': 1000
-        }]
-        
-        # Use the new cutting optimizer
-        plan = self.optimizer.generate_optimized_plan(
-            order_requirements=order_requirements,
-            interactive=False
-        )
-        
-        # Check if we can fulfill from the plan
-        if plan['jumbo_rolls_used']:
-            # We can cut from available jumbo rolls
-            cutting_plans_created = []
-            
-            for jumbo_plan in plan['jumbo_rolls_used']:
-                # Find or create jumbo roll
-                jumbo_roll = self._find_or_create_jumbo_roll(jumbo_plan['paper_spec'])
-                
-                # Create cutting plan
-                cutting_plan = models.CuttingPlan(
-                    order_id=order.id,
-                    jumbo_roll_id=jumbo_roll.id,
-                    cut_pattern=jumbo_plan['rolls'],
-                    expected_waste_percentage=jumbo_plan['waste_percentage'],
-                    status="planned"
-                )
-                self.db.add(cutting_plan)
-                cutting_plans_created.append(cutting_plan)
-                
-                # Update jumbo roll status
-                jumbo_roll.status = models.JumboRollStatus.CUTTING
-            
-            # Update order fulfillment
-            fulfilled_quantity = sum(len(jp['rolls']) for jp in plan['jumbo_rolls_used'])
-            order.quantity_fulfilled += min(fulfilled_quantity, remaining)
-            
-            self.status_service.update_status(
-                order,
-                "completed" if order.is_fully_fulfilled else "partially_fulfilled",
-                f"Created {len(cutting_plans_created)} cutting plans"
-            )
-            
-            return {
-                "status": "completed" if order.is_fully_fulfilled else "partially_fulfilled",
-                "order_id": str(order.id),
-                "cutting_plans_created": len(cutting_plans_created),
-                "message": f"Created cutting plans for {fulfilled_quantity} rolls"
-            }
-        
-        # Handle pending orders - create production orders
-        if plan['pending_orders']:
-            production_orders = []
-            total_pending = 0
-            
-            for pending in plan['pending_orders']:
-                production_order = models.ProductionOrder(
-                    gsm=pending['gsm'],
-                    bf=pending['bf'],
-                    shade=pending['shade'],
-                    quantity=1,  # One jumbo roll per production order
-                    status="pending",
-                    order_id=order.id
-                )
-                self.db.add(production_order)
-                production_orders.append(production_order)
-                total_pending += pending['quantity']
-            
-            # Create backorder for pending quantity
-            if total_pending > 0:
-                backorder = self.status_service.create_backorder(
-                    order,
-                    total_pending,
-                    f"Created {len(production_orders)} production orders for pending rolls"
-                )
-                
-                return {
-                    "status": "waiting_for_production",
-                    "order_id": str(order.id),
-                    "backorder_id": str(backorder.id),
-                    "production_orders_created": len(production_orders),
-                    "message": f"Created production orders for {total_pending} pending rolls"
-                }
-        
-        # Fallback - no solution found
-        return {
-            "status": "cannot_fulfill",
-            "order_id": str(order.id),
-            "message": "No suitable cutting plan or production option available"
-        }
+
     
     def get_order_fulfillment_status(self, order_id: uuid.UUID) -> Dict:
         """

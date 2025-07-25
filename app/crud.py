@@ -718,6 +718,7 @@ def create_order_legacy(db: Session, order: schemas.OrderCreate) -> models.Order
         quantity_rolls=order.quantity_rolls,
         created_by_id=client.created_by_id
     ))
+
 # ============================================================================
 # BULK OPERATIONS - Helper methods for linking orders/inventory to plans
 # ============================================================================
@@ -1004,11 +1005,11 @@ def bulk_update_order_fulfillment(
         
         # Update status based on fulfillment
         if quantity_fulfilled >= order.quantity:
-            order.status = "completed"
+            order.status = schemas.OrderStatus.COMPLETED.value
         elif quantity_fulfilled > 0:
-            order.status = "partially_fulfilled"
+            order.status = schemas.OrderStatus.PARTIALLY_FULFILLED.value
         else:
-            order.status = "pending"
+            order.status = schemas.OrderStatus.PENDING.value
         
         order.updated_at = datetime.utcnow()
         updated_orders.append(order)
@@ -1041,7 +1042,7 @@ def bulk_update_inventory_status(
             {'inventory_id': uuid2, 'status': 'reserved'}
         ]
     """
-    valid_statuses = ["available", "allocated", "cutting", "used", "damaged"]
+    valid_statuses = [status.value for status in schemas.InventoryStatus]
     updated_items = []
     
     for update_data in inventory_updates:

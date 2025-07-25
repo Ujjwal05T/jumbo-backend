@@ -286,12 +286,11 @@ class CuttingOptimizer:
                 raise ValueError(f"Paper not found for order {order.id}")
             
             order_requirements.append({
-                'width': float(order.width),
-                'quantity': order.quantity,
+                'width': float(order.width_inches),
+                'quantity': order.quantity_rolls,
                 'gsm': paper.gsm,
                 'bf': paper.bf,
                 'shade': paper.shade,
-                'min_length': order.min_length or 0,
                 'order_id': str(order.id)
             })
         
