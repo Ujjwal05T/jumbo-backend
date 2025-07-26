@@ -22,41 +22,61 @@ class OrderFulfillmentService:
         self.optimizer = CuttingOptimizer()
         self.min_jumbo_roll_width = 36  # Minimum useful width for a jumbo roll
 
-    def fulfill_order(self, order_id: uuid.UUID) -> Dict:
+    def fulfill_order(self, order_id: uuid.UUID, quantity_to_fulfill: int = None) -> Dict:
         """
-        Fulfill an order using master-based architecture.
-        Flow: OrderMaster → PendingOrderMaster → PlanMaster
+        NEW FLOW: Manual order fulfillment - ONLY updates quantity_fulfilled.
+        No automatic plan generation - purely user-controlled fulfillment tracking.
+        
+        Args:
+            order_id: ID of order to fulfill
+            quantity_to_fulfill: Quantity to mark as fulfilled (optional, defaults to remaining)
+            
+        Returns:
+            Updated order status
         """
         try:
             # Get order with related data via foreign keys
             order = self._get_order_with_relationships(order_id)
             
-            # Update order status to processing
-            order.status = "processing"
+            # Calculate remaining quantity
+            remaining_qty = order.quantity_rolls - (order.quantity_fulfilled or 0)
+            
+            if remaining_qty <= 0:
+                return {
+                    "status": "already_fulfilled",
+                    "order_id": str(order.id),
+                    "message": "Order is already fully fulfilled"
+                }
+            
+            # Determine quantity to fulfill
+            if quantity_to_fulfill is None:
+                quantity_to_fulfill = remaining_qty
+            else:
+                quantity_to_fulfill = min(quantity_to_fulfill, remaining_qty)
+            
+            # NEW FLOW: Simply update quantity_fulfilled (no inventory allocation)
+            order.quantity_fulfilled = (order.quantity_fulfilled or 0) + quantity_to_fulfill
             order.updated_at = datetime.utcnow()
             
-            # Try to fulfill from existing inventory first
-            fulfilled_from_inventory = self._fulfill_from_inventory(order)
-            
-            if fulfilled_from_inventory:
-                remaining_qty = order.quantity - (order.quantity_fulfilled or 0)
-                if remaining_qty <= 0:
-                    order.status = "completed"
-                    self.db.commit()
-                    return {
-                        "status": "completed",
-                        "order_id": str(order.id),
-                        "message": "Order fully fulfilled from existing inventory"
-                    }
-            
-            # Move unfulfilled quantity to PendingOrderMaster
-            pending_order = self._create_pending_order_from_order(order)
-            
-            # Try to create cutting plan from pending orders
-            plan_result = self._create_plan_from_pending_orders([pending_order])
+            # Update order status based on fulfillment
+            if order.quantity_fulfilled >= order.quantity_rolls:
+                order.status = "completed"
+                status_message = "Order fully fulfilled"
+            else:
+                order.status = "partially_fulfilled"
+                status_message = f"Order partially fulfilled: {order.quantity_fulfilled}/{order.quantity_rolls}"
             
             self.db.commit()
-            return plan_result
+            
+            return {
+                "status": "success",
+                "order_id": str(order.id),
+                "quantity_fulfilled": quantity_to_fulfill,
+                "total_fulfilled": order.quantity_fulfilled,
+                "remaining_quantity": order.quantity_rolls - order.quantity_fulfilled,
+                "order_status": order.status,
+                "message": status_message
+            }
                 
         except Exception as e:
             self.db.rollback()
@@ -130,6 +150,46 @@ class OrderFulfillmentService:
             return True
         
         return False
+
+    def bulk_fulfill_orders(self, fulfillment_requests: List[Dict]) -> Dict:
+        """
+        NEW FLOW: Bulk fulfill multiple orders manually.
+        
+        Args:
+            fulfillment_requests: List of dicts with 'order_id' and 'quantity' 
+            
+        Returns:
+            Summary of bulk fulfillment results
+        """
+        try:
+            results = []
+            total_fulfilled = 0
+            
+            for request in fulfillment_requests:
+                order_id = uuid.UUID(request['order_id'])
+                quantity = request.get('quantity')
+                
+                # Fulfill individual order
+                result = self.fulfill_order(order_id, quantity)
+                results.append(result)
+                
+                if result['status'] == 'success':
+                    total_fulfilled += result['quantity_fulfilled']
+            
+            return {
+                "status": "bulk_fulfillment_completed",
+                "orders_processed": len(fulfillment_requests),
+                "total_quantity_fulfilled": total_fulfilled,
+                "results": results,
+                "message": f"Bulk fulfilled {len(fulfillment_requests)} orders with {total_fulfilled} total rolls"
+            }
+            
+        except Exception as e:
+            logger.error(f"Bulk fulfillment failed: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Bulk fulfillment failed: {str(e)}"
+            )
     
     def _create_pending_order_from_order(self, order: models.OrderMaster) -> models.PendingOrderMaster:
         """

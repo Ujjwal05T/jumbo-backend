@@ -788,7 +788,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"user_id\": \"{{user_id}}\"\n}"
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\"\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/optimizer/test-with-orders",
@@ -809,7 +809,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\",\n  \"plan_name\": \"Optimizer Generated Plan\"\n}"
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\",\n  \"plan_name\": \"NEW FLOW Optimizer Generated Plan\"\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/optimizer/create-plan",
@@ -856,7 +856,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\",\n  \"plan_name\": \"Workflow Generated Plan\"\n}"
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\"\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/workflow/generate-plan",
@@ -877,7 +877,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"user_id\": \"{{user_id}}\"\n}"
+							"raw": "{\n  \"order_ids\": [\"{{order_id}}\"],\n  \"created_by_id\": \"{{user_id}}\"\n}"
 						},
 						"url": {
 							"raw": "{{baseUrl}}/workflow/process-orders",
@@ -1093,6 +1093,82 @@
 							"raw": "{{baseUrl}}/pending-orders/by-paper/{{paper_id}}",
 							"host": ["{{baseUrl}}"],
 							"path": ["pending-orders", "by-paper", "{{paper_id}}"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "📦 NEW FLOW - Order Fulfillment",
+			"item": [
+				{
+					"name": "Fulfill Order (Manual)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"quantity\": 5\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/orders/{{order_id}}/fulfill",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "{{order_id}}", "fulfill"]
+						}
+					}
+				},
+				{
+					"name": "Bulk Fulfill Orders",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fulfillment_requests\": [\n    {\"order_id\": \"{{order_id}}\", \"quantity\": 3},\n    {\"order_id\": \"{{order_id}}\", \"quantity\": 2}\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/orders/bulk-fulfill",
+							"host": ["{{baseUrl}}"],
+							"path": ["orders", "bulk-fulfill"]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "🚀 NEW FLOW - Testing",
+			"item": [
+				{
+					"name": "Test NEW FLOW Algorithm",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/test",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "test"]
+						}
+					}
+				},
+				{
+					"name": "Test Full Cycle (NEW FLOW)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/optimizer/test-full-cycle",
+							"host": ["{{baseUrl}}"],
+							"path": ["optimizer", "test-full-cycle"]
 						}
 					}
 				}

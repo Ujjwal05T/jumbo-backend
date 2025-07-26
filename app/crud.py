@@ -295,45 +295,77 @@ def delete_paper(db: Session, paper_id: uuid.UUID) -> bool:
 # ============================================================================
 
 def create_order(db: Session, order: schemas.OrderMasterCreate) -> models.OrderMaster:
-    """Create a new order in Order Master"""
+    """Create a new order in Order Master with multiple order items"""
     # Validate client exists
     client = get_client(db, order.client_id)
     if not client or client.status != "active":
         raise HTTPException(status_code=400, detail="Invalid or inactive client")
     
-    # Validate paper exists
-    paper = get_paper(db, order.paper_id)
-    if not paper or paper.status != "active":
-        raise HTTPException(status_code=400, detail="Invalid or inactive paper specification")
+    # Validate order items
+    if not order.order_items or len(order.order_items) == 0:
+        raise HTTPException(status_code=400, detail="Order must have at least one order item")
     
+    # Validate each order item's paper exists
+    for item in order.order_items:
+        paper = get_paper(db, item.paper_id)
+        if not paper or paper.status != "active":
+            raise HTTPException(status_code=400, detail=f"Invalid or inactive paper specification for item with paper_id {item.paper_id}")
+    
+    # Create the order header
     db_order = models.OrderMaster(
         client_id=order.client_id,
-        paper_id=order.paper_id,
-        width_inches=order.width_inches,
-        quantity_rolls=order.quantity_rolls,
         priority=order.priority,
+        payment_type=order.payment_type,
         delivery_date=order.delivery_date,
         notes=order.notes,
         created_by_id=order.created_by_id
     )
     
     db.add(db_order)
+    db.flush()  # Get the order ID before committing
+    
+    # Create order items
+    for item in order.order_items:
+        # Calculate missing values
+        quantity_kg = item.quantity_kg
+        quantity_rolls = item.quantity_rolls
+        amount = item.amount
+        
+        if quantity_kg is None and quantity_rolls is not None:
+            quantity_kg = models.OrderItem.calculate_quantity_kg(item.width_inches, quantity_rolls)
+        elif quantity_rolls is None and quantity_kg is not None:
+            quantity_rolls = models.OrderItem.calculate_quantity_rolls(item.width_inches, quantity_kg)
+            
+        if amount is None and quantity_kg is not None:
+            amount = quantity_kg * item.rate
+        
+        db_order_item = models.OrderItem(
+            order_id=db_order.id,
+            paper_id=item.paper_id,
+            width_inches=item.width_inches,
+            quantity_rolls=quantity_rolls,
+            quantity_kg=quantity_kg,
+            rate=item.rate,
+            amount=amount
+        )
+        db.add(db_order_item)
+    
     db.commit()
     db.refresh(db_order)
     return db_order
 
 def get_order(db: Session, order_id: uuid.UUID) -> Optional[models.OrderMaster]:
-    """Get order by ID with related data"""
+    """Get order by ID with related data including order items"""
     return db.query(models.OrderMaster).options(
         joinedload(models.OrderMaster.client),
-        joinedload(models.OrderMaster.paper)
+        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
     ).filter(models.OrderMaster.id == order_id).first()
 
 def get_orders(db: Session, skip: int = 0, limit: int = 100, status: str = None, client_id: uuid.UUID = None) -> List[models.OrderMaster]:
-    """Get all orders with pagination and filters"""
+    """Get all orders with pagination and filters including order items"""
     query = db.query(models.OrderMaster).options(
         joinedload(models.OrderMaster.client),
-        joinedload(models.OrderMaster.paper)
+        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
     )
     
     if status:
@@ -359,16 +391,63 @@ def update_order(db: Session, order_id: uuid.UUID, order_update: schemas.OrderMa
     return db_order
 
 def get_pending_orders(db: Session, paper_id: uuid.UUID = None) -> List[models.OrderMaster]:
-    """Get orders that need fulfillment"""
-    query = db.query(models.OrderMaster).filter(
+    """Get orders that need fulfillment - Updated for order items"""
+    query = db.query(models.OrderMaster).options(
+        joinedload(models.OrderMaster.order_items)
+    ).join(models.OrderItem).filter(
         models.OrderMaster.status.in_(["pending", "partially_fulfilled"]),
-        models.OrderMaster.quantity_fulfilled < models.OrderMaster.quantity_rolls
+        models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls
     )
     
     if paper_id:
         query = query.filter(models.OrderMaster.paper_id == paper_id)
     
     return query.order_by(models.OrderMaster.priority.desc(), models.OrderMaster.created_at).all()
+
+# ============================================================================
+# ORDER ITEM CRUD
+# ============================================================================
+
+def create_order_item(db: Session, order_id: uuid.UUID, order_item: schemas.OrderItemCreate) -> models.OrderItem:
+    """Create a new order item"""
+    db_order_item = models.OrderItem(
+        order_id=order_id,
+        width_inches=order_item.width_inches,
+        quantity_rolls=order_item.quantity_rolls
+    )
+    
+    db.add(db_order_item)
+    db.commit()
+    db.refresh(db_order_item)
+    return db_order_item
+
+def get_order_item(db: Session, order_item_id: uuid.UUID) -> Optional[models.OrderItem]:
+    """Get order item by ID"""
+    return db.query(models.OrderItem).filter(models.OrderItem.id == order_item_id).first()
+
+def update_order_item(db: Session, order_item_id: uuid.UUID, order_item_update: schemas.OrderItemUpdate) -> Optional[models.OrderItem]:
+    """Update order item"""
+    db_order_item = get_order_item(db, order_item_id)
+    if not db_order_item:
+        return None
+    
+    update_data = order_item_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_order_item, field, value)
+    
+    db.commit()
+    db.refresh(db_order_item)
+    return db_order_item
+
+def delete_order_item(db: Session, order_item_id: uuid.UUID) -> bool:
+    """Delete order item"""
+    db_order_item = get_order_item(db, order_item_id)
+    if not db_order_item:
+        return False
+    
+    db.delete(db_order_item)
+    db.commit()
+    return True
 
 # ============================================================================
 # PENDING ORDER MASTER CRUD
@@ -680,46 +759,261 @@ def complete_production_order(db: Session, production_id: uuid.UUID, created_by_
 # LEGACY COMPATIBILITY FUNCTIONS
 # ============================================================================
 
-def create_order_legacy(db: Session, order: schemas.OrderCreate) -> models.OrderMaster:
-    """Legacy order creation - converts to master-based format"""
-    # Try to find or create client
-    client = get_client_by_name(db, order.customer_name)
-    if not client:
-        # Create a default user for system operations
-        system_user = get_user_by_username(db, "system")
-        if not system_user:
-            system_user = create_user(db, schemas.UserMasterCreate(
-                name="System User",
-                username="system",
-                password="system123",
-                role="admin"
-            ))
+
+# ============================================================================
+# NEW FLOW CRUD OPERATIONS - Support for 3-input/4-output optimization
+# ============================================================================
+
+def get_pending_orders_by_paper_specs(db: Session, paper_specs: List[Dict]) -> List[models.PendingOrderMaster]:
+    """
+    NEW FLOW: Get pending orders matching specific paper specifications.
+    Used to gather pending orders for 3-input optimization.
+    
+    Args:
+        db: Database session
+        paper_specs: List of paper specifications (GSM, BF, Shade)
         
-        # Create new client
-        client = create_client(db, schemas.ClientMasterCreate(
-            company_name=order.customer_name,
-            created_by_id=system_user.id
-        ))
+    Returns:
+        List of pending orders matching the specifications
+    """
+    spec_conditions = []
+    for spec in paper_specs:
+        condition = and_(
+            models.PaperMaster.gsm == spec.get('gsm'),
+            models.PaperMaster.bf == spec.get('bf'),
+            models.PaperMaster.shade == spec.get('shade')
+        )
+        spec_conditions.append(condition)
     
-    # Try to find or create paper specification
-    paper = get_paper_by_specs(db, order.gsm, order.bf, order.shade)
-    if not paper:
-        paper = create_paper(db, schemas.PaperMasterCreate(
-            name=f"{order.shade} {order.gsm}GSM BF{order.bf}",
-            gsm=order.gsm,
-            bf=order.bf,
-            shade=order.shade,
-            created_by_id=client.created_by_id
-        ))
+    if not spec_conditions:
+        return []
     
-    # Create order using master-based format
-    return create_order(db, schemas.OrderMasterCreate(
-        client_id=client.id,
-        paper_id=paper.id,
-        width_inches=order.width_inches,
-        quantity_rolls=order.quantity_rolls,
-        created_by_id=client.created_by_id
-    ))
+    return db.query(models.PendingOrderMaster).join(
+        models.PaperMaster
+    ).filter(
+        models.PendingOrderMaster.status == "pending",
+        or_(*spec_conditions)
+    ).options(
+        joinedload(models.PendingOrderMaster.paper),
+        joinedload(models.PendingOrderMaster.original_order)
+    ).all()
+
+def get_available_inventory_by_paper_specs(
+    db: Session, 
+    paper_specs: List[Dict],
+    width_range: tuple = (20, 25)
+) -> List[models.InventoryMaster]:
+    """
+    NEW FLOW: Get available inventory (20-25" waste rolls) matching paper specifications.
+    Used to gather available inventory for 3-input optimization.
+    
+    Args:
+        db: Database session
+        paper_specs: List of paper specifications (GSM, BF, Shade)
+        width_range: Width range for waste rolls (default: 20-25")
+        
+    Returns:
+        List of available inventory items in the specified width range
+    """
+    spec_conditions = []
+    for spec in paper_specs:
+        condition = and_(
+            models.PaperMaster.gsm == spec.get('gsm'),
+            models.PaperMaster.bf == spec.get('bf'),
+            models.PaperMaster.shade == spec.get('shade')
+        )
+        spec_conditions.append(condition)
+    
+    if not spec_conditions:
+        return []
+    
+    min_width, max_width = width_range
+    
+    return db.query(models.InventoryMaster).join(
+        models.PaperMaster
+    ).filter(
+        models.InventoryMaster.status == "available",
+        models.InventoryMaster.roll_type == "cut",
+        models.InventoryMaster.width_inches >= min_width,
+        models.InventoryMaster.width_inches <= max_width,
+        or_(*spec_conditions)
+    ).options(
+        joinedload(models.InventoryMaster.paper)
+    ).all()
+
+def create_inventory_from_waste(
+    db: Session, 
+    waste_items: List[Dict], 
+    created_by_id: uuid.UUID
+) -> List[models.InventoryMaster]:
+    """
+    NEW FLOW: Create inventory items from waste rolls (20-25" range).
+    Used to convert optimization output waste into reusable inventory.
+    
+    Args:
+        db: Database session
+        waste_items: List of waste item dictionaries from optimization
+        created_by_id: ID of user creating the inventory
+        
+    Returns:
+        List of created inventory items
+    """
+    created_items = []
+    
+    for waste_item in waste_items:
+        # Find or create paper master
+        paper = get_paper_by_specs(
+            db,
+            gsm=waste_item['gsm'],
+            bf=waste_item['bf'],
+            shade=waste_item['shade']
+        )
+        
+        if not paper:
+            # Create paper master if it doesn't exist
+            paper_data = type('PaperCreate', (), {
+                'name': f"{waste_item['shade']} {waste_item['gsm']}GSM BF{waste_item['bf']}",
+                'gsm': waste_item['gsm'],
+                'bf': waste_item['bf'],
+                'shade': waste_item['shade'],
+                'type': 'standard',
+                'created_by_id': created_by_id
+            })()
+            paper = create_paper(db, paper_data)
+        
+        # Create inventory item
+        inventory_item = models.InventoryMaster(
+            paper_id=paper.id,
+            width_inches=int(waste_item['width']),
+            weight_kg=100.0,  # Estimated weight for waste rolls
+            roll_type="cut",
+            location="waste_storage",
+            status="available",
+            qr_code=generate_qr_code(uuid.uuid4()),
+            created_by_id=created_by_id
+        )
+        
+        db.add(inventory_item)
+        created_items.append(inventory_item)
+    
+    db.flush()  # Get IDs
+    return created_items
+
+def bulk_create_pending_orders(
+    db: Session, 
+    pending_items: List[Dict], 
+    original_order_ids: List[uuid.UUID]
+) -> List[models.PendingOrderMaster]:
+    """
+    NEW FLOW: Create multiple pending orders from optimization output.
+    Used to convert optimization pending orders into database records.
+    
+    Args:
+        db: Database session
+        pending_items: List of pending order dictionaries from optimization
+        original_order_ids: List of original order IDs that generated these pending orders
+        
+    Returns:
+        List of created pending order records
+    """
+    created_pending = []
+    
+    for pending_item in pending_items:
+        # Find paper master
+        paper = get_paper_by_specs(
+            db,
+            gsm=pending_item['gsm'],
+            bf=pending_item['bf'],
+            shade=pending_item['shade']
+        )
+        
+        if not paper:
+            continue  # Skip if paper doesn't exist
+        
+        # Find matching original order (simplified - takes first match)
+        original_order_id = original_order_ids[0] if original_order_ids else None
+        
+        pending_order = models.PendingOrderMaster(
+            order_id=original_order_id,
+            paper_id=paper.id,
+            width_inches=int(pending_item['width']),
+            quantity_pending=pending_item['quantity'],
+            reason=pending_item.get('reason', 'optimization_pending'),
+            status="pending"
+        )
+        
+        db.add(pending_order)
+        created_pending.append(pending_order)
+    
+    db.flush()  # Get IDs
+    
+    # Reload with relationships
+    if created_pending:
+        pending_ids = [po.id for po in created_pending]
+        return db.query(models.PendingOrderMaster).options(
+            joinedload(models.PendingOrderMaster.paper)
+        ).filter(models.PendingOrderMaster.id.in_(pending_ids)).all()
+    
+    return created_pending
+
+def cleanup_fulfilled_pending_orders(db: Session, order_ids: List[uuid.UUID]) -> int:
+    """
+    NEW FLOW: Clean up pending orders when original orders are fulfilled.
+    Used to maintain data consistency when orders are completed.
+    
+    Args:
+        db: Database session
+        order_ids: List of order IDs that have been fulfilled
+        
+    Returns:
+        Number of pending orders cleaned up
+    """
+    cleanup_count = db.query(models.PendingOrderMaster).filter(
+        models.PendingOrderMaster.order_id.in_(order_ids),
+        models.PendingOrderMaster.status == "pending"
+    ).update(
+        {"status": "resolved", "resolved_at": datetime.utcnow()},
+        synchronize_session=False
+    )
+    
+    return cleanup_count
+
+def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List[Dict]:
+    """
+    NEW FLOW: Get orders with their paper specifications for optimization input.
+    Used to prepare order data for 3-input optimization.
+    
+    Args:
+        db: Database session
+        order_ids: List of order IDs to fetch
+        
+    Returns:
+        List of orders formatted for optimization input
+    """
+    orders = db.query(models.OrderMaster).options(
+        joinedload(models.OrderMaster.paper),
+        joinedload(models.OrderMaster.client)
+    ).filter(
+        models.OrderMaster.id.in_(order_ids),
+        models.OrderMaster.status.in_(["pending", "partially_fulfilled"])
+    ).all()
+    
+    order_requirements = []
+    for order in orders:
+        if order.paper:
+            remaining_qty = order.quantity_rolls - (order.quantity_fulfilled or 0)
+            if remaining_qty > 0:
+                order_requirements.append({
+                    'order_id': str(order.id),
+                    'width': float(order.width_inches),
+                    'quantity': remaining_qty,
+                    'gsm': order.paper.gsm,
+                    'bf': float(order.paper.bf),
+                    'shade': order.paper.shade,
+                    'client_name': order.client.company_name if order.client else 'Unknown'
+                })
+    
+    return order_requirements
 
 # ============================================================================
 # BULK OPERATIONS - Helper methods for linking orders/inventory to plans

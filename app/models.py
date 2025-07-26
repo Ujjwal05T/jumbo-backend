@@ -16,6 +16,10 @@ class OrderStatus(str, PyEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
+class PaymentType(str, PyEnum):
+    BILL = "bill"
+    CASH = "cash"
+
 class InventoryStatus(str, PyEnum):
     AVAILABLE = "available"
     ALLOCATED = "allocated"
@@ -107,7 +111,7 @@ class PaperMaster(Base):
     
     # Relationships
     created_by = relationship("UserMaster", back_populates="papers_created")
-    orders = relationship("OrderMaster", back_populates="paper")
+    order_items = relationship("OrderItem", back_populates="paper")
     inventory_items = relationship("InventoryMaster", back_populates="paper")
     pending_orders = relationship("PendingOrderMaster", back_populates="paper")
     production_orders = relationship("ProductionOrderMaster", back_populates="paper")
@@ -116,18 +120,15 @@ class PaperMaster(Base):
 # TRANSACTION TABLES - Business operations
 # ============================================================================
 
-# Order Master - Customer orders linked to Client and Paper masters
+# Order Master - Customer orders (header) linked to Client and Paper masters
 class OrderMaster(Base):
     __tablename__ = "order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
-    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
-    width_inches = Column(Integer, nullable=False)
-    quantity_rolls = Column(Integer, nullable=False)
-    quantity_fulfilled = Column(Integer, default=0, nullable=False)
     status = Column(String(50), default=OrderStatus.PENDING, nullable=False, index=True)
     priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
+    payment_type = Column(String(20), default=PaymentType.BILL, nullable=False)  # bill, cash
     delivery_date = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
@@ -136,10 +137,46 @@ class OrderMaster(Base):
     
     # Relationships
     client = relationship("ClientMaster", back_populates="orders")
-    paper = relationship("PaperMaster", back_populates="orders")
     created_by = relationship("UserMaster", back_populates="orders_created")
+    order_items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     pending_orders = relationship("PendingOrderMaster", back_populates="original_order")
     plan_orders = relationship("PlanOrderLink", back_populates="order")
+    
+    @property
+    def total_quantity_ordered(self) -> int:
+        return sum(item.quantity_rolls for item in self.order_items)
+    
+    @property
+    def total_quantity_fulfilled(self) -> int:
+        return sum(item.quantity_fulfilled for item in self.order_items)
+    
+    @property
+    def remaining_quantity(self) -> int:
+        return self.total_quantity_ordered - self.total_quantity_fulfilled
+    
+    @property
+    def is_fully_fulfilled(self) -> bool:
+        return self.total_quantity_fulfilled >= self.total_quantity_ordered
+
+# Order Item - Individual line items for different widths within an order
+class OrderItem(Base):
+    __tablename__ = "order_item"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    width_inches = Column(Integer, nullable=False)
+    quantity_rolls = Column(Integer, nullable=False)
+    quantity_kg = Column(Numeric(10, 2), nullable=False)  # Weight in kg
+    rate = Column(Numeric(10, 2), nullable=False)  # Rate per unit
+    amount = Column(Numeric(12, 2), nullable=False)  # Total amount (quantity_kg * rate)
+    quantity_fulfilled = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    order = relationship("OrderMaster", back_populates="order_items")
+    paper = relationship("PaperMaster", back_populates="order_items")
     
     @property
     def remaining_quantity(self) -> int:
@@ -148,13 +185,26 @@ class OrderMaster(Base):
     @property
     def is_fully_fulfilled(self) -> bool:
         return self.quantity_fulfilled >= self.quantity_rolls
+    
+    @staticmethod
+    def calculate_quantity_kg(width_inches: int, quantity_rolls: int) -> float:
+        """Calculate weight in kg based on width and number of rolls (1 inch roll = 13kg)"""
+        return float(width_inches * quantity_rolls * 13)
+    
+    @staticmethod
+    def calculate_quantity_rolls(width_inches: int, quantity_kg: float) -> int:
+        """Calculate number of rolls based on width and weight"""
+        if width_inches <= 0:
+            return 0
+        return int(round(quantity_kg / (width_inches * 13)))
 
-# Pending Order Master - Tracks unfulfilled orders for batch processing
+# Pending Order Master - Tracks unfulfilled order items for batch processing
 class PendingOrderMaster(Base):
     __tablename__ = "pending_order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    order_item_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_item.id"), nullable=False, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     width_inches = Column(Integer, nullable=False)
     quantity_pending = Column(Integer, nullable=False)
@@ -166,6 +216,7 @@ class PendingOrderMaster(Base):
     
     # Relationships
     original_order = relationship("OrderMaster", back_populates="pending_orders")
+    order_item = relationship("OrderItem")
     paper = relationship("PaperMaster", back_populates="pending_orders")
     production_order = relationship("ProductionOrderMaster", back_populates="pending_orders")
 
@@ -235,18 +286,20 @@ class ProductionOrderMaster(Base):
 # LINKING TABLES - Many-to-many relationships
 # ============================================================================
 
-# Plan-Order Link - Links plans to multiple orders
+# Plan-Order Link - Links plans to multiple order items
 class PlanOrderLink(Base):
     __tablename__ = "plan_order_link"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
-    quantity_allocated = Column(Integer, nullable=False)  # How many rolls from this order
+    order_item_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_item.id"), nullable=False, index=True)
+    quantity_allocated = Column(Integer, nullable=False)  # How many rolls from this order item
     
     # Relationships
     plan = relationship("PlanMaster", back_populates="plan_orders")
     order = relationship("OrderMaster", back_populates="plan_orders")
+    order_item = relationship("OrderItem")
 
 # Plan-Inventory Link - Links plans to inventory items used
 class PlanInventoryLink(Base):

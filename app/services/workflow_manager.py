@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional, Tuple
 import uuid
+import json
 from datetime import datetime
 from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException
@@ -24,61 +25,74 @@ class WorkflowManager:
     
     def process_multiple_orders(self, order_ids: List[uuid.UUID]) -> Dict:
         """
-        Process multiple orders together for optimal cutting plans.
-        This is the main entry point for batch order processing.
-        Uses master-based relationships to fetch User, Client, Paper via foreign keys.
+        NEW FLOW: Process multiple orders together for optimal cutting plans.
+        SKIP INVENTORY CHECK - Always go directly to plan generation.
+        Uses 3-input/4-output optimization algorithm.
         """
         try:
-            # Get all orders with related data via foreign keys
-            orders = self.db.query(models.OrderMaster).options(
-                joinedload(models.OrderMaster.client),
-                joinedload(models.OrderMaster.paper),
-                joinedload(models.OrderMaster.created_by)
-            ).filter(
-                models.OrderMaster.id.in_(order_ids),
-                models.OrderMaster.status.in_([schemas.OrderStatus.PENDING.value, schemas.OrderStatus.PARTIALLY_FULFILLED.value])
-            ).all()
-            
-            if not orders:
-                raise ValueError("No valid orders found")
-            
-            # Check for matching pending orders and consolidate
-            consolidated_orders = self._consolidate_with_pending_orders(orders)
-            
-            # Convert to optimizer format using master relationships
-            order_requirements = []
-            for order in consolidated_orders:
-                remaining_qty = order.quantity - (order.quantity_fulfilled or 0)
-                if remaining_qty > 0:
-                    # Access paper specifications via foreign key relationship
-                    paper = order.paper
-                    if not paper:
-                        logger.warning(f"Order {order.id} has no associated paper, skipping")
-                        continue
-                        
-                    order_requirements.append({
-                        'order_id': str(order.id),
-                        'width': float(order.width_inches),
-                        'quantity': remaining_qty,
-                        'gsm': paper.gsm,
-                        'bf': float(paper.bf),
-                        'shade': paper.shade,
-                        'min_length': order.min_length or 1000,
-                        'client_name': order.client.name if order.client else 'Unknown',
-                        'created_by': order.created_by.name if order.created_by else 'Unknown'
-                    })
+            # NEW FLOW: Get order requirements directly (no inventory check)
+            order_requirements = crud.get_orders_with_paper_specs(self.db, order_ids)
             
             if not order_requirements:
-                return {"message": "All orders are already fulfilled"}
+                return {
+                    "status": "no_orders",
+                    "cut_rolls_generated": [],
+                    "jumbo_rolls_needed": 0,
+                    "pending_orders_created": [],
+                    "inventory_created": [],
+                    "orders_updated": [],
+                    "plans_created": [],
+                    "production_orders_created": []
+                }
             
-            # Generate optimized cutting plan
-            plan = self.optimizer.optimize_with_new_algorithm(
+            # NEW FLOW: Get paper specifications from orders
+            paper_specs = []
+            for req in order_requirements:
+                spec = {'gsm': req['gsm'], 'bf': req['bf'], 'shade': req['shade']}
+                if spec not in paper_specs:
+                    paper_specs.append(spec)
+            
+            # NEW FLOW: Fetch pending orders for same paper specifications
+            pending_orders = crud.get_pending_orders_by_paper_specs(self.db, paper_specs)
+            pending_requirements = []
+            for pending in pending_orders:
+                if pending.paper:
+                    pending_requirements.append({
+                        'order_id': str(pending.order_id),
+                        'width': float(pending.width_inches),
+                        'quantity': pending.quantity_pending,
+                        'gsm': pending.paper.gsm,
+                        'bf': float(pending.paper.bf),
+                        'shade': pending.paper.shade,
+                        'pending_id': str(pending.id)
+                    })
+            
+            # NEW FLOW: Fetch available inventory (20-25" waste rolls)
+            available_inventory_items = crud.get_available_inventory_by_paper_specs(self.db, paper_specs)
+            available_inventory = []
+            for inv_item in available_inventory_items:
+                if inv_item.paper:
+                    available_inventory.append({
+                        'id': str(inv_item.id),
+                        'width': float(inv_item.width_inches),
+                        'gsm': inv_item.paper.gsm,
+                        'bf': float(inv_item.paper.bf),
+                        'shade': inv_item.paper.shade,
+                        'weight': float(inv_item.weight_kg) if inv_item.weight_kg else 0
+                    })
+            
+            logger.info(f"NEW FLOW Processing: {len(order_requirements)} orders, {len(pending_requirements)} pending, {len(available_inventory)} inventory")
+            
+            # NEW FLOW: Run 3-input optimization
+            optimization_result = self.optimizer.optimize_with_new_algorithm(
                 order_requirements=order_requirements,
+                pending_orders=pending_requirements,
+                available_inventory=available_inventory,
                 interactive=False
             )
             
-            # Execute the plan with consolidated orders
-            result = self._execute_comprehensive_plan(consolidated_orders, plan)
+            # NEW FLOW: Process 4 outputs
+            result = self._process_optimizer_outputs(optimization_result, order_ids)
             
             return result
             
@@ -134,6 +148,149 @@ class WorkflowManager:
                 order.updated_at = datetime.utcnow()
         
         return consolidated_orders
+    
+    def _process_optimizer_outputs(self, optimization_result: Dict, order_ids: List[uuid.UUID]) -> Dict:
+        """
+        NEW FLOW: Process the 4 outputs from optimization algorithm.
+        Creates database records for each output type.
+        
+        Args:
+            optimization_result: Result from 3-input/4-output optimization
+            order_ids: Original order IDs being processed
+            
+        Returns:
+            Summary of processing results
+        """
+        try:
+            created_plans = []
+            created_pending = []
+            created_inventory = []
+            created_production = []
+            updated_orders = []
+            
+            # OUTPUT 1: Create Plan Master from cut_rolls_generated
+            if optimization_result.get('cut_rolls_generated'):
+                plan_name = f"NEW FLOW Plan {datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                plan = models.PlanMaster(
+                    name=plan_name,
+                    cut_pattern=json.dumps(optimization_result['cut_rolls_generated']),
+                    expected_waste_percentage=optimization_result['summary'].get('average_waste', 0),
+                    status=schemas.PlanStatus.PLANNED.value,
+                    created_by_id=self.user_id
+                )
+                
+                self.db.add(plan)
+                self.db.flush()  # Get ID
+                created_plans.append(plan)
+                
+                # Link orders to plan
+                for order_id in order_ids:
+                    plan_order_link = models.PlanOrderLink(
+                        plan_id=plan.id,
+                        order_id=order_id,
+                        quantity_allocated=1  # Will be calculated properly later
+                    )
+                    self.db.add(plan_order_link)
+            
+            # OUTPUT 2: Create Production Orders for jumbo_rolls_needed
+            if optimization_result.get('jumbo_rolls_needed', 0) > 0:
+                # Group by paper specifications for production orders
+                paper_specs_for_production = set()
+                for cut_roll in optimization_result.get('cut_rolls_generated', []):
+                    if cut_roll.get('source') == 'cutting':
+                        spec_key = (cut_roll['gsm'], cut_roll['bf'], cut_roll['shade'])
+                        paper_specs_for_production.add(spec_key)
+                
+                for gsm, bf, shade in paper_specs_for_production:
+                    # Find or create paper master
+                    paper = crud.get_paper_by_specs(self.db, gsm=gsm, bf=bf, shade=shade)
+                    if not paper and self.user_id:
+                        paper_data = type('PaperCreate', (), {
+                            'name': f"{shade} {gsm}GSM BF{bf}",
+                            'gsm': gsm,
+                            'bf': bf,
+                            'shade': shade,
+                            'type': 'standard',
+                            'created_by_id': self.user_id
+                        })()
+                        paper = crud.create_paper(self.db, paper_data)
+                    
+                    if paper:
+                        production_order = models.ProductionOrderMaster(
+                            paper_id=paper.id,
+                            quantity=1,  # One jumbo roll per production order
+                            priority="normal",
+                            status=schemas.ProductionOrderStatus.PENDING.value,
+                            created_by_id=self.user_id
+                        )
+                        self.db.add(production_order)
+                        created_production.append(production_order)
+            
+            # OUTPUT 3: Create Pending Orders from pending_orders
+            if optimization_result.get('pending_orders'):
+                created_pending_records = crud.bulk_create_pending_orders(
+                    self.db,
+                    optimization_result['pending_orders'],
+                    order_ids
+                )
+                created_pending.extend(created_pending_records)
+            
+            # OUTPUT 4: Create Inventory from inventory_remaining (waste)
+            if optimization_result.get('inventory_remaining'):
+                waste_items = [
+                    inv for inv in optimization_result['inventory_remaining'] 
+                    if inv.get('source') == 'waste'
+                ]
+                if waste_items and self.user_id:
+                    created_inventory_records = crud.create_inventory_from_waste(
+                        self.db,
+                        waste_items,
+                        self.user_id
+                    )
+                    created_inventory.extend(created_inventory_records)
+            
+            # Update order statuses to "processing" (ready for fulfillment)
+            for order_id in order_ids:
+                order = crud.get_order(self.db, order_id)
+                if order:
+                    order.status = schemas.OrderStatus.PROCESSING.value
+                    order.updated_at = datetime.utcnow()
+                    updated_orders.append(str(order_id))
+            
+            self.db.commit()
+            
+            return {
+                "status": "success",
+                "cut_rolls_generated": optimization_result.get('cut_rolls_generated', []),
+                "jumbo_rolls_needed": optimization_result.get('jumbo_rolls_needed', 0),
+                "pending_orders_created": [
+                    {
+                        "width": float(po.width_inches),
+                        "quantity": po.quantity_pending,
+                        "gsm": po.paper.gsm if po.paper else 90,
+                        "bf": float(po.paper.bf) if po.paper else 18.0,
+                        "shade": po.paper.shade if po.paper else "white",
+                        "reason": po.reason
+                    } for po in created_pending
+                ],
+                "inventory_created": [
+                    {
+                        "id": str(inv.id),
+                        "width": float(inv.width_inches),
+                        "weight": float(inv.weight_kg),
+                        "source": "waste"
+                    } for inv in created_inventory
+                ],
+                "orders_updated": updated_orders,
+                "plans_created": [str(p.id) for p in created_plans],
+                "production_orders_created": [str(po.id) for po in created_production]
+            }
+            
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Error processing optimizer outputs: {str(e)}")
+            raise
     
     def _execute_comprehensive_plan(self, orders: List[models.OrderMaster], plan: Dict) -> Dict:
         """Execute the comprehensive cutting plan with proper database transactions using master-based architecture."""

@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from enum import Enum
 from uuid import UUID
@@ -14,6 +14,10 @@ class OrderStatus(str, Enum):
     PARTIALLY_FULFILLED = "partially_fulfilled"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+class PaymentType(str, Enum):
+    BILL = "bill"
+    CASH = "cash"
 
 class InventoryStatus(str, Enum):
     AVAILABLE = "available"
@@ -169,36 +173,71 @@ class PaperMaster(PaperMasterBase):
 # TRANSACTION SCHEMAS - Business operations
 # ============================================================================
 
-# Order Master Schemas
-class OrderMasterBase(BaseModel):
-    client_id: UUID
+# Order Item Schemas
+class OrderItemBase(BaseModel):
     paper_id: UUID
     width_inches: int = Field(..., gt=0)
-    quantity_rolls: int = Field(..., gt=0)
+    quantity_rolls: Optional[int] = Field(None, gt=0)
+    quantity_kg: Optional[float] = Field(None, gt=0)
+    rate: float = Field(..., gt=0)
+    amount: Optional[float] = Field(None, gt=0)
+    
+    # Note: Auto-calculation is handled in CRUD layer to avoid Pydantic V2 issues
+
+class OrderItemCreate(OrderItemBase):
+    pass
+
+class OrderItemUpdate(BaseModel):
+    paper_id: Optional[UUID] = None
+    width_inches: Optional[int] = Field(None, gt=0)
+    quantity_rolls: Optional[int] = Field(None, gt=0)
+    quantity_kg: Optional[float] = Field(None, gt=0)
+    rate: Optional[float] = Field(None, gt=0)
+    amount: Optional[float] = Field(None, gt=0)
+    quantity_fulfilled: Optional[int] = Field(None, ge=0)
+
+class OrderItem(OrderItemBase):
+    id: UUID
+    order_id: UUID
+    quantity_fulfilled: int
+    created_at: datetime
+    updated_at: datetime
+    
+    # Include related data
+    paper: Optional['PaperMaster'] = None
+
+    class Config:
+        from_attributes = True
+
+# Order Master Schemas - Updated for multiple order items
+class OrderMasterBase(BaseModel):
+    client_id: UUID
     priority: Priority = Field(default=Priority.NORMAL)
+    payment_type: PaymentType = Field(default=PaymentType.BILL)
     delivery_date: Optional[datetime] = None
     notes: Optional[str] = None
 
 class OrderMasterCreate(OrderMasterBase):
     created_by_id: UUID
+    order_items: List[OrderItemCreate] = Field(..., min_items=1, description="List of order items with different papers, widths and quantities")
 
 class OrderMasterUpdate(BaseModel):
     priority: Optional[Priority] = None
+    payment_type: Optional[PaymentType] = None
     delivery_date: Optional[datetime] = None
     notes: Optional[str] = None
     status: Optional[OrderStatus] = None
 
 class OrderMaster(OrderMasterBase):
     id: UUID
-    quantity_fulfilled: int
     status: OrderStatus
     created_by_id: UUID
     created_at: datetime
     updated_at: datetime
     
     # Include related data
-    client: Optional[ClientMaster] = None
-    paper: Optional[PaperMaster] = None
+    client: Optional['ClientMaster'] = None
+    order_items: List[OrderItem] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -206,6 +245,7 @@ class OrderMaster(OrderMasterBase):
 # Pending Order Master Schemas
 class PendingOrderMasterBase(BaseModel):
     order_id: UUID
+    order_item_id: UUID
     paper_id: UUID
     width_inches: int = Field(..., gt=0)
     quantity_pending: int = Field(..., gt=0)
@@ -227,6 +267,7 @@ class PendingOrderMaster(PendingOrderMasterBase):
     
     # Include related data
     original_order: Optional[OrderMaster] = None
+    order_item: Optional[OrderItem] = None
     paper: Optional[PaperMaster] = None
 
     class Config:
@@ -287,7 +328,8 @@ class PlanMaster(PlanMasterBase):
     executed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    @validator('cut_pattern', pre=True)
+    @field_validator('cut_pattern', mode='before')
+    @classmethod
     def parse_cut_pattern(cls, v):
         """Parse cut_pattern from JSON string if needed"""
         if isinstance(v, str):
@@ -329,13 +371,70 @@ class ProductionOrderMaster(ProductionOrderMasterBase):
         from_attributes = True
 
 # ============================================================================
-# CUTTING OPTIMIZER SCHEMAS - For cutting optimization
+# CUTTING OPTIMIZER SCHEMAS - NEW FLOW: 3-input/4-output
 # ============================================================================
 
+class OptimizerInventoryItem(BaseModel):
+    """Individual inventory item for optimization input"""
+    id: Optional[str] = None
+    width: float = Field(..., gt=0, description="Width in inches")
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    weight: Optional[float] = Field(None, ge=0)
+    location: Optional[str] = None
+
+class OptimizerInput(BaseModel):
+    """NEW FLOW: Complete input for 3-input optimization"""
+    orders: List[Dict[str, Any]] = Field(..., min_items=1, description="New orders to process")
+    pending_orders: List[Dict[str, Any]] = Field(default_factory=list, description="Pending orders from previous cycles")
+    available_inventory: List[OptimizerInventoryItem] = Field(default_factory=list, description="Available 20-25\" waste rolls")
+
+class CutRollGenerated(BaseModel):
+    """Individual cut roll that was generated"""
+    width: float = Field(..., gt=0)
+    quantity: int = Field(..., gt=0)
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    source: str = Field(..., description="'inventory' or 'cutting'")
+    inventory_id: Optional[str] = None
+    jumbo_number: Optional[int] = None
+    trim_left: Optional[float] = None
+
+class PendingOrderOutput(BaseModel):
+    """Pending order that couldn't be fulfilled"""
+    width: float = Field(..., gt=0)
+    quantity: int = Field(..., gt=0)
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    reason: str = Field(..., description="Reason why it's pending")
+
+class InventoryRemaining(BaseModel):
+    """Inventory item remaining after optimization"""
+    width: float = Field(..., gt=0)
+    quantity: int = Field(..., gt=0)
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    source: str = Field(..., description="'waste', 'unused_inventory'")
+    inventory_id: Optional[str] = None
+    from_jumbo: Optional[int] = None
+
+class OptimizerOutput(BaseModel):
+    """NEW FLOW: Complete output for 4-output optimization"""
+    cut_rolls_generated: List[CutRollGenerated] = Field(..., description="Rolls that can be fulfilled")
+    jumbo_rolls_needed: int = Field(..., ge=0, description="Number of jumbo rolls to procure")
+    pending_orders: List[PendingOrderOutput] = Field(..., description="Orders that cannot be fulfilled")
+    inventory_remaining: List[InventoryRemaining] = Field(..., description="20-25\" waste rolls for future use")
+    summary: Dict[str, Any] = Field(..., description="Summary statistics")
+
 class CuttingOptimizationRequest(BaseModel):
-    """Request for cutting optimization with order IDs"""
+    """Request for cutting optimization with order IDs - UPDATED for new flow"""
     order_ids: List[UUID] = Field(..., min_items=1)
     include_pending: bool = Field(default=True, description="Include pending orders in optimization")
+    include_inventory: bool = Field(default=True, description="Include available waste inventory")
     interactive: bool = Field(default=False, description="Enable interactive trim decisions")
 
 class CreatePlanRequest(BaseModel):
@@ -363,9 +462,21 @@ class CuttingOptimizationResult(BaseModel):
 # ============================================================================
 
 class WorkflowProcessRequest(BaseModel):
-    """Request to process multiple orders through workflow"""
+    """NEW FLOW: Request to process multiple orders through workflow"""
     order_ids: List[UUID] = Field(..., min_items=1)
     auto_approve_high_trim: bool = Field(default=False, description="Auto-approve high trim patterns")
+    skip_inventory_check: bool = Field(default=True, description="NEW FLOW: Skip inventory checking, go directly to planning")
+
+class WorkflowResult(BaseModel):
+    """NEW FLOW: Result of workflow processing with 4 outputs"""
+    status: str = Field(..., description="Overall workflow status")
+    cut_rolls_generated: List[CutRollGenerated] = Field(..., description="Rolls ready for fulfillment")
+    jumbo_rolls_needed: int = Field(..., ge=0, description="Jumbo rolls to procure")
+    pending_orders_created: List[PendingOrderOutput] = Field(..., description="New pending orders created")
+    inventory_created: List[InventoryRemaining] = Field(..., description="Waste inventory created")
+    orders_updated: List[str] = Field(..., description="Order IDs that were updated")
+    plans_created: List[str] = Field(..., description="Plan IDs that were created")
+    production_orders_created: List[str] = Field(..., description="Production order IDs created")
 
 class WorkflowStatus(BaseModel):
     """Current workflow status"""
@@ -398,33 +509,3 @@ class PaginatedResponse(BaseModel):
     size: int
     pages: int
 
-# ============================================================================
-# LEGACY COMPATIBILITY - For backward compatibility
-# ============================================================================
-
-# Keep some old schemas for backward compatibility during transition
-class OrderCreate(BaseModel):
-    """Legacy order creation - will be deprecated"""
-    customer_name: str  # Will map to client lookup/creation
-    width_inches: int
-    gsm: int
-    bf: float
-    shade: str
-    quantity_rolls: int
-
-class Order(BaseModel):
-    """Legacy order response - will be deprecated"""
-    id: UUID
-    customer_name: str
-    width_inches: int
-    gsm: int
-    bf: float
-    shade: str
-    quantity_rolls: int
-    quantity_fulfilled: int
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True

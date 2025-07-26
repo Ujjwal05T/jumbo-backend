@@ -116,28 +116,46 @@ class CuttingOptimizer:
     def optimize_with_new_algorithm(
         self,
         order_requirements: List[Dict],
+        pending_orders: List[Dict] = None,
+        available_inventory: List[Dict] = None,
         interactive: bool = False
     ) -> Dict:
         """
-        Use the new algorithm logic with existing input format.
+        NEW FLOW: 3-input/4-output optimization algorithm.
         Groups orders by complete specification (GSM + Shade + BF) to ensure
         different paper types are not mixed in the same jumbo roll.
         
         Args:
-            order_requirements: List of order dicts with width, quantity, etc.
+            order_requirements: List of new order dicts with width, quantity, etc.
+            pending_orders: List of pending orders from previous cycles
+            available_inventory: List of 20-25" waste rolls available for reuse
             interactive: Whether to prompt user for high trim decisions
             
         Returns:
-            Optimized cutting plan with jumbo rolls used and pending orders
+            Dict with 4 outputs:
+            - cut_rolls_generated: Rolls that can be fulfilled
+            - jumbo_rolls_needed: Number of jumbo rolls to procure
+            - pending_orders: Orders that cannot be fulfilled
+            - inventory_remaining: 20-25" waste rolls for future use
         """
-        # Group orders by complete specification (GSM + Shade + BF)
+        # Initialize default values for optional inputs
+        if pending_orders is None:
+            pending_orders = []
+        if available_inventory is None:
+            available_inventory = []
+        
+        # Combine all requirements (new orders + pending orders)
+        all_requirements = order_requirements + pending_orders
+        
+        # Group all requirements by complete specification (GSM + Shade + BF)
         spec_groups = {}
-        for req in order_requirements:
+        for req in all_requirements:
             # Create unique key for paper specification
             spec_key = (req['gsm'], req['shade'], req['bf'])
             if spec_key not in spec_groups:
                 spec_groups[spec_key] = {
                     'orders': {},
+                    'inventory': [],
                     'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']}
                 }
             
@@ -148,86 +166,139 @@ class CuttingOptimizer:
             else:
                 spec_groups[spec_key]['orders'][width] = req['quantity']
         
+        # Add available inventory to matching specification groups
+        for inv_item in available_inventory:
+            inv_spec_key = (inv_item['gsm'], inv_item['shade'], inv_item['bf'])
+            if inv_spec_key in spec_groups:
+                spec_groups[inv_spec_key]['inventory'].append(inv_item)
+        
         # Process each specification group separately
-        all_jumbo_rolls = []
-        all_pending_orders = []
+        cut_rolls_generated = []
+        new_pending_orders = []
+        inventory_remaining = []
+        jumbo_rolls_needed = 0
         all_high_trims = []
-        jumbo_counter = 1
         
         for spec_key, group_data in spec_groups.items():
             orders = group_data['orders']
+            inventory = group_data['inventory']
             spec = group_data['spec']
             
             print(f"\n🔧 Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
             print(f"   Orders: {orders}")
+            print(f"   Available Inventory: {len(inventory)} items")
             
-            # Run the matching algorithm for this specification group
-            used, pending, high_trims = self.match_combos(orders, interactive)
+            # First, try to fulfill orders using available inventory
+            orders_copy = orders.copy()
+            inventory_used = []
             
-            # Convert results back to detailed format for this group
-            for combo, trim in used:
-                roll_details = []
-                for width in combo:
-                    roll_details.append({
-                        'width': width,
+            for inv_item in inventory:
+                inv_width = float(inv_item['width'])
+                if inv_width in orders_copy and orders_copy[inv_width] > 0:
+                    # Use this inventory item
+                    cut_rolls_generated.append({
+                        'width': inv_width,
+                        'quantity': 1,
                         'gsm': spec['gsm'],
                         'bf': spec['bf'],
                         'shade': spec['shade'],
-                        'min_length': next((req.get('min_length', 0) for req in order_requirements 
-                                          if float(req['width']) == width and req['gsm'] == spec['gsm'] 
-                                          and req['shade'] == spec['shade'] and req['bf'] == spec['bf']), 0)
+                        'source': 'inventory',
+                        'inventory_id': inv_item.get('id')
+                    })
+                    orders_copy[inv_width] -= 1
+                    if orders_copy[inv_width] <= 0:
+                        del orders_copy[inv_width]
+                    inventory_used.append(inv_item)
+            
+            # Remove used inventory from available list
+            remaining_inventory = [inv for inv in inventory if inv not in inventory_used]
+            
+            # Run the matching algorithm for remaining orders
+            if orders_copy:
+                used, pending, high_trims = self.match_combos(orders_copy, interactive)
+                
+                # Process successful cutting patterns
+                for combo, trim in used:
+                    jumbo_rolls_needed += 1
+                    
+                    # Add cut rolls from this pattern
+                    for width in combo:
+                        cut_rolls_generated.append({
+                            'width': width,
+                            'quantity': 1,
+                            'gsm': spec['gsm'],
+                            'bf': spec['bf'],
+                            'shade': spec['shade'],
+                            'source': 'cutting',
+                            'jumbo_number': jumbo_rolls_needed,
+                            'trim_left': trim
+                        })
+                    
+                    # Handle waste: 20-25" becomes inventory, >25" discarded
+                    if 20 <= trim <= 25:
+                        inventory_remaining.append({
+                            'width': trim,
+                            'quantity': 1,
+                            'gsm': spec['gsm'],
+                            'bf': spec['bf'],
+                            'shade': spec['shade'],
+                            'source': 'waste',
+                            'from_jumbo': jumbo_rolls_needed
+                        })
+                
+                # Add orders that couldn't be fulfilled to pending
+                for width, qty in pending.items():
+                    new_pending_orders.append({
+                        'width': width,
+                        'quantity': qty,
+                        'gsm': spec['gsm'],
+                        'bf': spec['bf'],
+                        'shade': spec['shade'],
+                        'reason': 'waste_too_high'
                     })
                 
-                all_jumbo_rolls.append({
-                    'jumbo_number': jumbo_counter,
-                    'rolls': roll_details,
-                    'trim_left': trim,
-                    'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
-                    'paper_spec': spec
-                })
-                jumbo_counter += 1
+                # Track high trim approvals
+                for combo, trim in high_trims:
+                    all_high_trims.append({
+                        'combo': combo,
+                        'trim': trim,
+                        'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
+                        'paper_spec': spec
+                    })
             
-            # Add pending orders for this specification
-            for width, qty in pending.items():
-                all_pending_orders.append({
-                    'width': width,
-                    'quantity': qty,
+            # Add remaining unused inventory back to inventory_remaining
+            for inv_item in remaining_inventory:
+                inventory_remaining.append({
+                    'width': float(inv_item['width']),
+                    'quantity': 1,
                     'gsm': spec['gsm'],
                     'bf': spec['bf'],
                     'shade': spec['shade'],
-                    'min_length': next((req.get('min_length', 0) for req in order_requirements 
-                                      if float(req['width']) == width and req['gsm'] == spec['gsm'] 
-                                      and req['shade'] == spec['shade'] and req['bf'] == spec['bf']), 0)
-                })
-            
-            # Add high trim combos for this specification
-            for combo, trim in high_trims:
-                all_high_trims.append({
-                    'combo': combo,
-                    'trim': trim,
-                    'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
-                    'paper_spec': spec
+                    'source': 'unused_inventory',
+                    'inventory_id': inv_item.get('id')
                 })
         
         # Calculate summary statistics
-        total_trim = sum(jumbo['trim_left'] for jumbo in all_jumbo_rolls)
-        total_jumbo_width = len(all_jumbo_rolls) * JUMBO_WIDTH
-        overall_waste_percentage = (total_trim / total_jumbo_width * 100) if total_jumbo_width > 0 else 0
+        total_cut_rolls = len(cut_rolls_generated)
+        total_inventory_created = len([inv for inv in inventory_remaining if inv['source'] == 'waste'])
+        total_pending = sum(order['quantity'] for order in new_pending_orders)
         
-        all_fulfilled = len(all_pending_orders) == 0
-        
+        # NEW FLOW: Return 4 distinct outputs
         return {
-            'jumbo_rolls_used': all_jumbo_rolls,
-            'pending_orders': all_pending_orders,
-            'high_trim_approved': all_high_trims,
+            'cut_rolls_generated': cut_rolls_generated,
+            'jumbo_rolls_needed': jumbo_rolls_needed,
+            'pending_orders': new_pending_orders,
+            'inventory_remaining': inventory_remaining,
             'summary': {
-                'total_jumbos_used': len(all_jumbo_rolls),
-                'total_trim_inches': round(total_trim, 2),
-                'overall_waste_percentage': round(overall_waste_percentage, 2),
-                'all_orders_fulfilled': all_fulfilled,
-                'pending_rolls_count': sum(order['quantity'] for order in all_pending_orders),
-                'specification_groups_processed': len(spec_groups)
-            }
+                'total_cut_rolls': total_cut_rolls,
+                'total_jumbos_needed': jumbo_rolls_needed,
+                'total_pending_orders': len(new_pending_orders),
+                'total_pending_quantity': total_pending,
+                'total_inventory_created': total_inventory_created,
+                'specification_groups_processed': len(spec_groups),
+                'high_trim_patterns': len(all_high_trims)
+            },
+            'high_trim_approved': all_high_trims
         }
 
     def generate_optimized_plan(
@@ -246,7 +317,63 @@ class CuttingOptimizer:
         Returns:
             Optimized cutting plan with jumbo rolls used and pending orders
         """
-        return self.optimize_with_new_algorithm(order_requirements, interactive)
+        return self.optimize_with_new_algorithm(
+            order_requirements=order_requirements,
+            pending_orders=[],
+            available_inventory=[],
+            interactive=interactive
+        )
+
+    def process_inventory_input(self, inventory_items: List[Dict]) -> List[Dict]:
+        """
+        Process available inventory input to standardize format.
+        Filters for 20-25" waste rolls only.
+        
+        Args:
+            inventory_items: Raw inventory data
+            
+        Returns:
+            Processed inventory items suitable for optimization
+        """
+        processed_items = []
+        for item in inventory_items:
+            width = float(item.get('width', 0))
+            # Only include 20-25" rolls as per new flow
+            if 20 <= width <= 25:
+                processed_items.append({
+                    'id': item.get('id', str(uuid.uuid4())),
+                    'width': width,
+                    'gsm': item.get('gsm', 90),
+                    'bf': float(item.get('bf', 18.0)),
+                    'shade': item.get('shade', 'white'),
+                    'weight': item.get('weight', 0),
+                    'location': item.get('location', 'warehouse')
+                })
+        return processed_items
+
+    def generate_inventory_from_waste(self, waste_width: float, paper_spec: Dict, jumbo_number: int) -> Dict:
+        """
+        Generate inventory item from waste that falls in 20-25" range.
+        
+        Args:
+            waste_width: Width of the waste piece
+            paper_spec: Paper specification (GSM, BF, Shade)
+            jumbo_number: Source jumbo roll number
+            
+        Returns:
+            Inventory item dictionary
+        """
+        return {
+            'id': f"waste_{jumbo_number}_{waste_width}",
+            'width': waste_width,
+            'gsm': paper_spec['gsm'],
+            'bf': paper_spec['bf'],
+            'shade': paper_spec['shade'],
+            'source': 'waste',
+            'from_jumbo': jumbo_number,
+            'roll_type': 'cut',
+            'status': 'available'
+        }
 
     def create_plan_from_orders(
         self,
@@ -351,33 +478,43 @@ class CuttingOptimizer:
 
     def test_algorithm_with_sample_data(self) -> Dict:
         """
-        Test the algorithm with sample data without affecting the database.
-        This method is useful for testing the optimization logic.
+        NEW FLOW: Test the algorithm with sample data demonstrating 3-input/4-output.
+        This method is useful for testing the optimization logic with the new flow.
         
         Returns:
-            Optimization result with sample data
+            Optimization result with sample data showing new flow
         """
-        # Sample data for testing
-        sample_orders = [
-            # White paper, GSM 90, BF 18.0 - GROUP 1
+        # Sample new orders
+        new_orders = [
             {"width": 29.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1500},
             {"width": 32.5, "quantity": 3, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-            {"width": 38, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-            
-            # Blue paper, GSM 90, BF 18.0 - GROUP 2 (different shade)
-            {"width": 32.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
-            {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
-            
-            # White paper, GSM 120, BF 18.0 - GROUP 3 (different GSM)
-            {"width": 38, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
-            {"width": 48, "quantity": 3, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
-            
-            # White paper, GSM 90, BF 20.0 - GROUP 4 (different BF)
-            {"width": 51, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600},
-            {"width": 54, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600}
+            {"width": 38, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
         ]
         
-        return self.optimize_with_new_algorithm(sample_orders, interactive=False)
+        # Sample pending orders from previous cycles
+        pending_orders = [
+            {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
+            {"width": 48, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
+        ]
+        
+        # Sample available inventory (20-25" waste rolls)
+        available_inventory = [
+            {"id": "inv_1", "width": 22.5, "gsm": 90, "bf": 18.0, "shade": "white"},
+            {"id": "inv_2", "width": 24, "gsm": 90, "bf": 18.0, "shade": "white"},
+            {"id": "inv_3", "width": 23, "gsm": 120, "bf": 18.0, "shade": "white"},
+        ]
+        
+        print("\n🧪 Testing NEW FLOW Algorithm with 3 inputs:")
+        print(f"📦 New Orders: {len(new_orders)} items")
+        print(f"⏳ Pending Orders: {len(pending_orders)} items")
+        print(f"📋 Available Inventory: {len(available_inventory)} items")
+        
+        return self.optimize_with_new_algorithm(
+            order_requirements=new_orders,
+            pending_orders=pending_orders,
+            available_inventory=available_inventory,
+            interactive=False
+        )
 
 # Example usage and testing
 def test_optimizer():
