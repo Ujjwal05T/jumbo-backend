@@ -991,27 +991,33 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
         List of orders formatted for optimization input
     """
     orders = db.query(models.OrderMaster).options(
-        joinedload(models.OrderMaster.paper),
+        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper),
         joinedload(models.OrderMaster.client)
     ).filter(
         models.OrderMaster.id.in_(order_ids),
-        models.OrderMaster.status.in_(["pending", "partially_fulfilled"])
+        models.OrderMaster.status.in_(["pending", "processing", "partially_fulfilled"])
     ).all()
     
     order_requirements = []
     for order in orders:
-        if order.paper:
-            remaining_qty = order.quantity_rolls - (order.quantity_fulfilled or 0)
-            if remaining_qty > 0:
-                order_requirements.append({
-                    'order_id': str(order.id),
-                    'width': float(order.width_inches),
-                    'quantity': remaining_qty,
-                    'gsm': order.paper.gsm,
-                    'bf': float(order.paper.bf),
-                    'shade': order.paper.shade,
-                    'client_name': order.client.company_name if order.client else 'Unknown'
-                })
+        # Process each order item (different paper specs/widths)
+        for item in order.order_items:
+            if item.paper:
+                remaining_qty = item.quantity_rolls - (item.quantity_fulfilled or 0)
+                if remaining_qty > 0:
+                    order_requirements.append({
+                        'order_id': str(order.id),
+                        'order_item_id': str(item.id),
+                        'width': float(item.width_inches),
+                        'quantity': remaining_qty,
+                        'gsm': item.paper.gsm,
+                        'bf': float(item.paper.bf),
+                        'shade': item.paper.shade,
+                        'min_length': 1600,  # Default since OrderItem doesn't have min_length
+                        'client_name': order.client.company_name if order.client else 'Unknown',
+                        'client_id': str(order.client.id) if order.client else None,
+                        'paper_id': str(item.paper.id)
+                    })
     
     return order_requirements
 
@@ -1524,4 +1530,269 @@ def get_plan_summary(db: Session, plan_id: uuid.UUID) -> Dict[str, Any]:
                 for item in inventory_items
             ]
         }
+    }
+
+# ============================================================================
+# CUT ROLL PRODUCTION CRUD
+# ============================================================================
+
+def generate_cut_roll_qr_code(cut_roll_id: uuid.UUID, width: float, gsm: int) -> str:
+    """Generate unique QR code for cut roll production"""
+    # Format: CR_<width>_<gsm>_<short_id>
+    short_id = str(cut_roll_id).replace('-', '').upper()[:8]
+    return f"CR_{int(width)}_{gsm}_{short_id}"
+
+def create_cut_roll_production(
+    db: Session, 
+    cut_roll: schemas.CutRollProductionCreate
+) -> models.CutRollProduction:
+    """Create a new cut roll production record"""
+    # Generate unique QR code
+    qr_code = generate_cut_roll_qr_code(uuid.uuid4(), cut_roll.width_inches, cut_roll.gsm)
+    
+    # Check if QR code already exists (should be very rare)
+    existing_qr = db.query(models.CutRollProduction).filter(
+        models.CutRollProduction.qr_code == qr_code
+    ).first()
+    
+    if existing_qr:
+        # Add timestamp to make it unique
+        qr_code = f"{qr_code}_{int(datetime.utcnow().timestamp())}"
+    
+    db_cut_roll = models.CutRollProduction(
+        qr_code=qr_code,
+        width_inches=cut_roll.width_inches,
+        length_meters=cut_roll.length_meters,
+        actual_weight_kg=cut_roll.actual_weight_kg,
+        paper_id=cut_roll.paper_id,
+        gsm=cut_roll.gsm,
+        bf=cut_roll.bf,
+        shade=cut_roll.shade,
+        plan_id=cut_roll.plan_id,
+        order_id=cut_roll.order_id,
+        client_id=cut_roll.client_id,
+        status=cut_roll.status,
+        individual_roll_number=cut_roll.individual_roll_number,
+        trim_left=cut_roll.trim_left,
+        created_by_id=cut_roll.created_by_id
+    )
+    
+    db.add(db_cut_roll)
+    db.commit()
+    db.refresh(db_cut_roll)
+    return db_cut_roll
+
+def get_cut_roll_production(db: Session, cut_roll_id: uuid.UUID) -> Optional[models.CutRollProduction]:
+    """Get cut roll production by ID"""
+    return db.query(models.CutRollProduction).filter(
+        models.CutRollProduction.id == cut_roll_id
+    ).first()
+
+def get_cut_roll_production_by_qr(db: Session, qr_code: str) -> Optional[models.CutRollProduction]:
+    """Get cut roll production by QR code"""
+    return db.query(models.CutRollProduction).options(
+        joinedload(models.CutRollProduction.paper),
+        joinedload(models.CutRollProduction.client),
+        joinedload(models.CutRollProduction.order),
+        joinedload(models.CutRollProduction.created_by),
+        joinedload(models.CutRollProduction.weight_recorded_by)
+    ).filter(models.CutRollProduction.qr_code == qr_code).first()
+
+def get_cut_rolls_by_plan(
+    db: Session, 
+    plan_id: uuid.UUID, 
+    status: Optional[str] = None
+) -> List[models.CutRollProduction]:
+    """Get all cut rolls for a specific plan"""
+    query = db.query(models.CutRollProduction).options(
+        joinedload(models.CutRollProduction.paper),
+        joinedload(models.CutRollProduction.client),
+        joinedload(models.CutRollProduction.order)
+    ).filter(models.CutRollProduction.plan_id == plan_id)
+    
+    if status:
+        query = query.filter(models.CutRollProduction.status == status)
+    
+    return query.all()
+
+def update_cut_roll_production(
+    db: Session, 
+    cut_roll_id: uuid.UUID, 
+    cut_roll_update: schemas.CutRollProductionUpdate
+) -> Optional[models.CutRollProduction]:
+    """Update cut roll production record"""
+    db_cut_roll = db.query(models.CutRollProduction).filter(
+        models.CutRollProduction.id == cut_roll_id
+    ).first()
+    
+    if not db_cut_roll:
+        return None
+    
+    update_data = cut_roll_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(db_cut_roll, field, value)
+    
+    db.commit()
+    db.refresh(db_cut_roll)
+    return db_cut_roll
+
+def update_cut_roll_weight_by_qr(
+    db: Session, 
+    qr_code: str, 
+    weight_data: schemas.WeightUpdateRequest
+) -> Optional[models.CutRollProduction]:
+    """Update cut roll weight via QR code scan"""
+    db_cut_roll = db.query(models.CutRollProduction).filter(
+        models.CutRollProduction.qr_code == qr_code
+    ).first()
+    
+    if not db_cut_roll:
+        return None
+    
+    db_cut_roll.actual_weight_kg = weight_data.actual_weight_kg
+    db_cut_roll.weight_recorded_at = datetime.utcnow()
+    db_cut_roll.weight_recorded_by_id = weight_data.updated_by_id
+    
+    # Auto-update status if needed
+    if db_cut_roll.status == "selected":
+        db_cut_roll.status = "in_production"
+        db_cut_roll.production_started_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(db_cut_roll)
+    return db_cut_roll
+
+def select_cut_rolls_for_production(
+    db: Session,
+    selection_request: schemas.CutRollSelectionRequest
+) -> List[models.CutRollProduction]:
+    """Select cut rolls for production from plan generation results"""
+    created_cut_rolls = []
+    
+    # Check if plan exists, if not create a temporary one
+    plan_id_to_use = selection_request.plan_id
+    existing_plan = get_plan(db, selection_request.plan_id)
+    
+    if not existing_plan:
+        # Extract order IDs from cut roll selections to satisfy schema validation
+        order_ids_from_selections = []
+        for cut_roll_data in selection_request.cut_roll_selections:
+            order_id = cut_roll_data.get('order_id')
+            if order_id and order_id not in order_ids_from_selections:
+                if isinstance(order_id, str):
+                    order_ids_from_selections.append(uuid.UUID(order_id))
+                else:
+                    order_ids_from_selections.append(order_id)
+        
+        # If no order IDs found, use a dummy UUID to satisfy validation
+        if not order_ids_from_selections:
+            order_ids_from_selections = [uuid.uuid4()]
+        
+        # Create a temporary plan for production tracking
+        temp_plan_create = schemas.PlanMasterCreate(
+            name=f"Production Plan {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+            cut_pattern=[],  # Empty list instead of dict
+            expected_waste_percentage=5.0,  # Default value
+            created_by_id=selection_request.created_by_id,
+            order_ids=order_ids_from_selections
+        )
+        
+        # Override the plan_id to use our provided one
+        temp_plan = models.PlanMaster(
+            id=selection_request.plan_id,
+            name=temp_plan_create.name,
+            cut_pattern=temp_plan_create.cut_pattern,
+            expected_waste_percentage=temp_plan_create.expected_waste_percentage,
+            status="planned",
+            created_by_id=temp_plan_create.created_by_id,
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(temp_plan)
+        db.commit()
+        db.refresh(temp_plan)
+    
+    for cut_roll_data in selection_request.cut_roll_selections:
+        # Get or find paper_id if not provided
+        paper_id = cut_roll_data.get('paper_id')
+        if not paper_id:
+            # Look up paper by specifications
+            paper = get_paper_by_specs(
+                db=db,
+                gsm=cut_roll_data['gsm'],
+                bf=cut_roll_data['bf'],
+                shade=cut_roll_data['shade']
+            )
+            if paper:
+                paper_id = paper.id
+            else:
+                # Skip this cut roll if paper not found
+                continue
+        else:
+            # Convert string UUID to UUID object if needed
+            if isinstance(paper_id, str):
+                paper_id = uuid.UUID(paper_id)
+        
+        # Create cut roll production record
+        cut_roll_create = schemas.CutRollProductionCreate(
+            width_inches=cut_roll_data['width'],
+            gsm=cut_roll_data['gsm'],
+            bf=cut_roll_data['bf'],
+            shade=cut_roll_data['shade'],
+            paper_id=paper_id,
+            plan_id=plan_id_to_use,
+            order_id=uuid.UUID(cut_roll_data['order_id']) if cut_roll_data.get('order_id') else None,
+            client_id=uuid.UUID(cut_roll_data['client_id']) if cut_roll_data.get('client_id') else None,
+            individual_roll_number=cut_roll_data.get('individual_roll_number'),
+            trim_left=cut_roll_data.get('trim_left'),
+            created_by_id=selection_request.created_by_id
+        )
+        
+        db_cut_roll = create_cut_roll_production(db, cut_roll_create)
+        created_cut_rolls.append(db_cut_roll)
+    
+    # Update plan status to in_progress if cut rolls were created
+    if created_cut_rolls:
+        plan_update = schemas.PlanMasterUpdate(status="in_progress")
+        update_plan(db, selection_request.plan_id, plan_update)
+    
+    return created_cut_rolls
+
+def get_cut_roll_production_summary(db: Session, plan_id: uuid.UUID) -> Dict[str, Any]:
+    """Get summary of cut roll production for a plan"""
+    cut_rolls = get_cut_rolls_by_plan(db, plan_id)
+    
+    status_counts = {}
+    total_weight = 0
+    total_rolls = len(cut_rolls)
+    
+    for roll in cut_rolls:
+        status = roll.status
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if roll.actual_weight_kg:
+            total_weight += float(roll.actual_weight_kg)
+    
+    # Calculate jumbo roll sets needed
+    individual_rolls_count = len([r for r in cut_rolls if r.status in ['selected', 'in_production', 'completed']])
+    jumbo_sets_needed = (individual_rolls_count + 2) // 3  # Round up division
+    
+    return {
+        "plan_id": str(plan_id),
+        "total_cut_rolls": total_rolls,
+        "status_breakdown": status_counts,
+        "total_weight_kg": round(total_weight, 2),
+        "individual_118_rolls": individual_rolls_count,
+        "jumbo_roll_sets_needed": jumbo_sets_needed,
+        "cut_rolls": [
+            {
+                "id": str(roll.id),
+                "qr_code": roll.qr_code,
+                "width_inches": float(roll.width_inches),
+                "status": roll.status,
+                "actual_weight_kg": float(roll.actual_weight_kg) if roll.actual_weight_kg else None,
+                "gsm": roll.gsm,
+                "shade": roll.shade
+            }
+            for roll in cut_rolls
+        ]
     }

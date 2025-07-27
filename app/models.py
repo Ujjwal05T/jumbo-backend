@@ -313,3 +313,56 @@ class PlanInventoryLink(Base):
     # Relationships
     plan = relationship("PlanMaster", back_populates="plan_inventory")
     inventory = relationship("InventoryMaster", back_populates="plan_inventory")
+
+# ============================================================================
+# CUT ROLL PRODUCTION TRACKING
+# ============================================================================
+
+class CutRollProduction(Base):
+    """
+    Individual cut roll production tracking with QR code functionality.
+    Each record represents one cut roll selected for production from a plan.
+    """
+    __tablename__ = "cut_roll_production"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code
+    
+    # Cut roll specifications
+    width_inches = Column(Numeric(6, 2), nullable=False)
+    length_meters = Column(Numeric(8, 2), nullable=True)  # Planned length
+    actual_weight_kg = Column(Numeric(8, 2), nullable=True)  # Actual weight when produced
+    
+    # Paper specifications (denormalized for QR code access)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    gsm = Column(Integer, nullable=False)
+    bf = Column(Numeric(4, 2), nullable=False)
+    shade = Column(String(100), nullable=False)
+    
+    # Links to related entities
+    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
+    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)  # Original order
+    client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=True, index=True)  # For QR code
+    
+    # Production tracking
+    status = Column(String(50), default="selected", nullable=False, index=True)  # selected, in_production, completed, quality_check, delivered
+    individual_roll_number = Column(Integer, nullable=True)  # From cutting algorithm
+    trim_left = Column(Numeric(6, 2), nullable=True)  # Waste from cutting pattern
+    
+    # Timestamps
+    selected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    production_started_at = Column(DateTime, nullable=True)
+    production_completed_at = Column(DateTime, nullable=True)
+    weight_recorded_at = Column(DateTime, nullable=True)
+    
+    # User tracking
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    weight_recorded_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
+    
+    # Relationships
+    paper = relationship("PaperMaster")
+    plan = relationship("PlanMaster")
+    order = relationship("OrderMaster")
+    client = relationship("ClientMaster")
+    created_by = relationship("UserMaster", foreign_keys=[created_by_id])
+    weight_recorded_by = relationship("UserMaster", foreign_keys=[weight_recorded_by_id])

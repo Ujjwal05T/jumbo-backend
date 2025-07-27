@@ -214,12 +214,13 @@ class CuttingOptimizer:
             remaining_inventory = [inv for inv in inventory if inv not in inventory_used]
             
             # Run the matching algorithm for remaining orders
+            individual_118_rolls_needed = 0
             if orders_copy:
                 used, pending, high_trims = self.match_combos(orders_copy, interactive)
                 
-                # Process successful cutting patterns
+                # Process successful cutting patterns (each pattern = 1 individual 118" roll)
                 for combo, trim in used:
-                    jumbo_rolls_needed += 1
+                    individual_118_rolls_needed += 1
                     
                     # Add cut rolls from this pattern
                     for width in combo:
@@ -230,7 +231,7 @@ class CuttingOptimizer:
                             'bf': spec['bf'],
                             'shade': spec['shade'],
                             'source': 'cutting',
-                            'jumbo_number': jumbo_rolls_needed,
+                            'individual_roll_number': individual_118_rolls_needed,
                             'trim_left': trim
                         })
                     
@@ -243,10 +244,15 @@ class CuttingOptimizer:
                             'bf': spec['bf'],
                             'shade': spec['shade'],
                             'source': 'waste',
-                            'from_jumbo': jumbo_rolls_needed
+                            'from_individual_roll': individual_118_rolls_needed
                         })
-                
-                # Add orders that couldn't be fulfilled to pending
+            
+            # Calculate jumbo roll sets needed for this specification (1 jumbo = 3 individual 118" rolls)
+            jumbo_sets_needed_for_spec = (individual_118_rolls_needed + 2) // 3  # Round up division
+            jumbo_rolls_needed += jumbo_sets_needed_for_spec
+            
+            # Add orders that couldn't be fulfilled to pending
+            if orders_copy:
                 for width, qty in pending.items():
                     new_pending_orders.append({
                         'width': width,
@@ -282,16 +288,18 @@ class CuttingOptimizer:
         total_cut_rolls = len(cut_rolls_generated)
         total_inventory_created = len([inv for inv in inventory_remaining if inv['source'] == 'waste'])
         total_pending = sum(order['quantity'] for order in new_pending_orders)
+        total_individual_118_rolls = len([roll for roll in cut_rolls_generated if roll['source'] == 'cutting'])
         
         # NEW FLOW: Return 4 distinct outputs
         return {
             'cut_rolls_generated': cut_rolls_generated,
-            'jumbo_rolls_needed': jumbo_rolls_needed,
+            'jumbo_roll_sets_needed': jumbo_rolls_needed,  # Updated: This is now jumbo roll SETS (1 set = 3×118" rolls)
             'pending_orders': new_pending_orders,
             'inventory_remaining': inventory_remaining,
             'summary': {
                 'total_cut_rolls': total_cut_rolls,
-                'total_jumbos_needed': jumbo_rolls_needed,
+                'total_individual_118_rolls': total_individual_118_rolls,
+                'total_jumbo_roll_sets_needed': jumbo_rolls_needed,  # 1 set = 3×118" rolls
                 'total_pending_orders': len(new_pending_orders),
                 'total_pending_quantity': total_pending,
                 'total_inventory_created': total_inventory_created,

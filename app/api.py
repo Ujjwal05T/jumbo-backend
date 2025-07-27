@@ -1990,3 +1990,279 @@ def get_optimizer_algorithms():
             "maximize_roll_utilization"
         ]
     }
+
+# ============================================================================
+# CUT ROLL PRODUCTION & SELECTION ENDPOINTS
+# ============================================================================
+
+@router.post("/cut-rolls/select-for-production", response_model=List[schemas.CutRollProduction], tags=["Cut Roll Production"])
+def select_cut_rolls_for_production(
+    selection_request: schemas.CutRollSelectionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Select cut rolls from plan generation results for production.
+    Creates CutRollProduction records with QR codes.
+    """
+    try:
+        created_cut_rolls = crud.select_cut_rolls_for_production(db, selection_request)
+        return created_cut_rolls
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error selecting cut rolls for production: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/cut-rolls/plan/{plan_id}", response_model=Dict[str, Any], tags=["Cut Roll Production"])
+def get_cut_roll_production_summary(
+    plan_id: str,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get summary of cut roll production for a specific plan"""
+    try:
+        import uuid
+        
+        try:
+            plan_uuid = uuid.UUID(plan_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format: {plan_id}")
+        
+        summary = crud.get_cut_roll_production_summary(db, plan_uuid)
+        return summary
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting cut roll production summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/qr-scan/{qr_code}", response_model=schemas.QRCodeScanResult, tags=["QR Code Management"])
+def scan_qr_code(
+    qr_code: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Scan QR code and return cut roll details.
+    Used for weight input and production tracking.
+    """
+    try:
+        # Get cut roll by QR code
+        cut_roll = crud.get_cut_roll_production_by_qr(db, qr_code)
+        if not cut_roll:
+            raise HTTPException(status_code=404, detail="QR code not found")
+        
+        # Create QR data
+        qr_data = schemas.QRCodeData(
+            qr_code=qr_code,
+            cut_roll_id=cut_roll.id,
+            width_inches=float(cut_roll.width_inches),
+            gsm=cut_roll.gsm,
+            bf=float(cut_roll.bf),
+            shade=cut_roll.shade,
+            client_name=cut_roll.client.company_name if cut_roll.client else None,
+            order_details=f"Order #{cut_roll.order_id}" if cut_roll.order_id else None,
+            production_date=cut_roll.selected_at
+        )
+        
+        # Check if weight can be updated
+        can_update_weight = cut_roll.status in ["selected", "in_production"]
+        
+        return schemas.QRCodeScanResult(
+            cut_roll=cut_roll,
+            qr_data=qr_data,
+            can_update_weight=can_update_weight,
+            current_status=cut_roll.status
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error scanning QR code: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/qr-scan/update-weight", response_model=schemas.CutRollProduction, tags=["QR Code Management"])
+def update_weight_via_qr_scan(
+    weight_data: schemas.WeightUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Update cut roll weight via QR code scan.
+    Automatically updates production status.
+    """
+    try:
+        updated_cut_roll = crud.update_cut_roll_weight_by_qr(db, weight_data.qr_code, weight_data)
+        if not updated_cut_roll:
+            raise HTTPException(status_code=404, detail="QR code not found")
+        
+        return updated_cut_roll
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating weight via QR scan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/plans/generate-with-selection", tags=["Plan Generation"])
+def generate_plan_with_cut_roll_selection(
+    request_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    NEW FLOW: Generate cutting plan and return cut rolls for user selection.
+    Shows cut rolls, pending orders, and inventory items.
+    User can then select which cut rolls to move to production.
+    """
+    try:
+        from .services.cutting_optimizer import CuttingOptimizer
+        from . import crud
+        import uuid
+        
+        # Extract data from request
+        order_ids = request_data.get('order_ids', [])
+        created_by_id = request_data.get('created_by_id')
+        
+        if not order_ids:
+            raise HTTPException(status_code=400, detail="order_ids is required")
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
+        
+        # Convert string IDs to UUIDs
+        uuid_order_ids = []
+        for order_id in order_ids:
+            try:
+                uuid_order_ids.append(uuid.UUID(order_id))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
+        
+        try:
+            created_by_uuid = uuid.UUID(created_by_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID format for created_by_id: {created_by_id}")
+        
+        # Get order requirements with paper specs
+        order_requirements = crud.get_orders_with_paper_specs(db, uuid_order_ids)
+        
+        if not order_requirements:
+            raise HTTPException(status_code=404, detail="No valid orders found with provided IDs")
+        
+        # Get paper specifications from orders
+        paper_specs = []
+        for req in order_requirements:
+            spec = {'gsm': req['gsm'], 'bf': req['bf'], 'shade': req['shade']}
+            if spec not in paper_specs:
+                paper_specs.append(spec)
+        
+        # Fetch pending orders for same specifications
+        pending_orders_db = crud.get_pending_orders_by_paper_specs(db, paper_specs)
+        pending_requirements = []
+        for pending in pending_orders_db:
+            if pending.paper:
+                pending_requirements.append({
+                    'width': float(pending.width_inches),
+                    'quantity': pending.quantity_pending,
+                    'gsm': pending.paper.gsm,
+                    'bf': float(pending.paper.bf),
+                    'shade': pending.paper.shade,
+                    'pending_id': str(pending.id)
+                })
+        
+        # Fetch available inventory (20-25" waste rolls)
+        available_inventory_db = crud.get_available_inventory_by_paper_specs(db, paper_specs)
+        available_inventory = []
+        for inv_item in available_inventory_db:
+            if inv_item.paper:
+                available_inventory.append({
+                    'id': str(inv_item.id),
+                    'width': float(inv_item.width_inches),
+                    'gsm': inv_item.paper.gsm,
+                    'bf': float(inv_item.paper.bf),
+                    'shade': inv_item.paper.shade,
+                    'weight': float(inv_item.weight_kg) if inv_item.weight_kg else 0
+                })
+        
+        # Run optimization
+        optimizer = CuttingOptimizer()
+        optimization_result = optimizer.optimize_with_new_algorithm(
+            order_requirements=order_requirements,
+            pending_orders=pending_requirements,
+            available_inventory=available_inventory,
+            interactive=False
+        )
+        
+        # Calculate jumbo roll sets needed based on individual 118" rolls
+        total_individual_118_rolls = len([roll for roll in optimization_result['cut_rolls_generated'] 
+                                         if roll['source'] == 'cutting'])
+        jumbo_roll_sets_needed = (total_individual_118_rolls + 2) // 3  # Round up
+        
+        # Update order statuses to "processing" since plan has been generated
+        for order_id in uuid_order_ids:
+            order_update = schemas.OrderMasterUpdate(status="processing")
+            crud.update_order(db, order_id, order_update)
+        
+        # Create pending orders for orders that couldn't be fulfilled
+        logger.info(f"Processing {len(optimization_result['pending_orders'])} pending orders")
+        logger.info(f"Available order requirements: {len(order_requirements)}")
+        
+        for pending_order in optimization_result['pending_orders']:
+            logger.info(f"Looking for match for pending order: {pending_order}")
+            
+            # Find corresponding order and create pending order record with more robust matching
+            order_match = None
+            for req in order_requirements:
+                # Use more tolerant matching for floating point values
+                if (abs(req['width'] - pending_order['width']) < 0.1 and 
+                    req['gsm'] == pending_order['gsm'] and
+                    abs(req['bf'] - pending_order['bf']) < 0.1 and
+                    req['shade'] == pending_order['shade']):
+                    order_match = req
+                    logger.info(f"Found matching order requirement: {order_match}")
+                    break
+            
+            if order_match and order_match.get('order_item_id'):
+                try:
+                    pending_order_create = schemas.PendingOrderMasterCreate(
+                        order_id=uuid.UUID(order_match['order_id']),
+                        order_item_id=uuid.UUID(order_match['order_item_id']),
+                        paper_id=uuid.UUID(order_match['paper_id']),
+                        width_inches=int(pending_order['width']),
+                        quantity_pending=pending_order['quantity'],
+                        reason=pending_order['reason']
+                    )
+                    crud.create_pending_order(db, pending_order_create)
+                    logger.info(f"Successfully created pending order for {pending_order['width']}\" width")
+                except Exception as e:
+                    logger.warning(f"Failed to create pending order: {e}. Order match: {order_match}")
+            else:
+                logger.warning(f"No matching order found or missing order_item_id for pending order: {pending_order}")
+                # Skip creating pending order if we can't find a proper match
+        
+        # Format response for frontend selection
+        return {
+            "optimization_result": optimization_result,
+            "selection_data": {
+                "cut_rolls_available": optimization_result['cut_rolls_generated'],
+                "pending_orders": optimization_result['pending_orders'],
+                "inventory_items_to_add": optimization_result['inventory_remaining'],
+                "summary": {
+                    "total_cut_rolls": len(optimization_result['cut_rolls_generated']),
+                    "total_individual_118_rolls": total_individual_118_rolls,
+                    "jumbo_roll_sets_needed": jumbo_roll_sets_needed,
+                    "pending_orders_count": len(optimization_result['pending_orders']),
+                    "inventory_items_count": len(optimization_result['inventory_remaining'])
+                }
+            },
+            "next_steps": [
+                "1. Review cut rolls available for production",
+                "2. Select which cut rolls to move to production",
+                "3. Use /cut-rolls/select-for-production endpoint to create production records",
+                "4. QR codes will be generated for selected cut rolls",
+                "5. Use QR scanner for weight tracking during production"
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating plan with cut roll selection: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
