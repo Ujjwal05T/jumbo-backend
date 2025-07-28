@@ -103,39 +103,6 @@ def delete_client(client_id: UUID, db: Session = Depends(get_db)):
 # USER MASTER ENDPOINTS
 # ============================================================================
 
-@router.post("/users/register", response_model=schemas.UserMaster, tags=["User Master"])
-def register_user(user: schemas.UserMasterCreate, db: Session = Depends(get_db)):
-    """Register a new user (no authentication, just registration)"""
-    try:
-        return crud.create_user(db=db, user=user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error registering user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/users/login", tags=["User Master"])
-def login_user(credentials: schemas.UserMasterLogin, db: Session = Depends(get_db)):
-    """Simple user login (updates last_login, no token generation)"""
-    user = crud.authenticate_user(
-        db=db,
-        username=credentials.username,
-        password=credentials.password
-    )
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password"
-        )
-    
-    return {
-        "message": "Login successful",
-        "user_id": str(user.id),
-        "username": user.username,
-        "role": user.role
-    }
-
 @router.get("/users", response_model=List[schemas.UserMaster], tags=["User Master"])
 def get_users(
     skip: int = 0,
@@ -432,17 +399,6 @@ def bulk_fulfill_order_items(
         logger.error(f"Error bulk fulfilling orders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/orders/pending", response_model=List[schemas.OrderMaster], tags=["Order Master"])
-def get_pending_orders(
-    paper_id: Optional[UUID] = None,
-    db: Session = Depends(get_db)
-):
-    """Get orders that need fulfillment"""
-    try:
-        return crud.get_pending_orders(db=db, paper_id=paper_id)
-    except Exception as e:
-        logger.error(f"Error getting pending orders: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -525,64 +481,127 @@ def delete_order_item(item_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# PENDING ORDER MASTER ENDPOINTS
+# PENDING ORDER ITEM ENDPOINTS  
 # ============================================================================
 
-@router.post("/pending-orders", response_model=schemas.PendingOrderMaster, tags=["Pending Orders"])
-def create_pending_order(pending: schemas.PendingOrderMasterCreate, db: Session = Depends(get_db)):
-    """Create a new pending order"""
+@router.post("/pending-order-items", response_model=schemas.PendingOrderItem, tags=["Pending Order Items"])
+def create_pending_order_item(pending: schemas.PendingOrderItemCreate, db: Session = Depends(get_db)):
+    """Create a new pending order item"""
     try:
-        return crud.create_pending_order(db=db, pending=pending)
+        from .services.pending_order_service import PendingOrderService
+        service = PendingOrderService(db, pending.created_by_id)
+        
+        # Convert to service format
+        pending_items = [{
+            'width': pending.width_inches,
+            'quantity': pending.quantity_pending,
+            'gsm': pending.gsm,
+            'bf': pending.bf,
+            'shade': pending.shade
+        }]
+        
+        created_items = service.create_pending_items(
+            pending_orders=pending_items,
+            original_order_id=pending.original_order_id,
+            reason=pending.reason
+        )
+        
+        return created_items[0] if created_items else None
     except Exception as e:
-        logger.error(f"Error creating pending order: {e}")
+        logger.error(f"Error creating pending order item: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/pending-orders", response_model=List[schemas.PendingOrderMaster], tags=["Pending Orders"])
-def get_pending_orders_list(
+@router.get("/pending-order-items", response_model=List[schemas.PendingOrderItem], tags=["Pending Order Items"])
+def get_pending_order_items(
     skip: int = 0,
     limit: int = 100,
     status: str = "pending",
     db: Session = Depends(get_db)
 ):
-    """Get all pending orders with pagination"""
+    """Get all pending order items with pagination"""
     try:
-        return crud.get_pending_orders_list(db=db, skip=skip, limit=limit, status=status)
+        from .services.pending_order_service import PendingOrderService
+        service = PendingOrderService(db)
+        
+        # Get pending items from database (SQL Server requires ORDER BY with OFFSET)
+        query = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem.status == status
+        ).order_by(models.PendingOrderItem.created_at.desc()).offset(skip).limit(limit)
+        
+        return query.all()
     except Exception as e:
-        logger.error(f"Error getting pending orders: {e}")
+        logger.error(f"Error getting pending order items: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/pending-orders/{pending_id}", response_model=schemas.PendingOrderMaster, tags=["Pending Orders"])
-def get_pending_order(pending_id: UUID, db: Session = Depends(get_db)):
-    """Get pending order by ID"""
-    pending = crud.get_pending_order(db=db, pending_id=pending_id)
-    if not pending:
-        raise HTTPException(status_code=404, detail="Pending order not found")
-    return pending
+@router.get("/pending-order-items/summary", tags=["Pending Order Items"])
+def get_pending_items_summary(db: Session = Depends(get_db)):
+    """Get summary statistics for pending order items"""
+    try:
+        from .services.pending_order_service import PendingOrderService
+        service = PendingOrderService(db)
+        return service.get_pending_summary()
+    except Exception as e:
+        logger.error(f"Error getting pending items summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/pending-orders/{pending_id}", response_model=schemas.PendingOrderMaster, tags=["Pending Orders"])
-def update_pending_order(
-    pending_id: UUID,
-    pending_update: schemas.PendingOrderMasterUpdate,
+@router.get("/pending-order-items/debug", tags=["Pending Order Items"])
+def debug_pending_items(db: Session = Depends(get_db)):
+    """Debug endpoint to check pending items data"""
+    try:
+        # Check if table exists and has data
+        total_items = db.query(models.PendingOrderItem).count()
+        pending_items = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem.status == "pending"
+        ).limit(5).all()
+        
+        all_statuses = db.query(models.PendingOrderItem.status).distinct().all()
+        
+        return {
+            "total_pending_items_in_db": total_items,
+            "pending_status_count": len(pending_items),
+            "all_statuses_in_db": [status[0] for status in all_statuses],
+            "sample_items": [
+                {
+                    "id": str(item.id),
+                    "width_inches": item.width_inches,
+                    "gsm": item.gsm,
+                    "shade": item.shade,
+                    "quantity_pending": item.quantity_pending,
+                    "status": item.status,
+                    "reason": item.reason,
+                    "created_at": item.created_at.isoformat() if item.created_at else None
+                } for item in pending_items
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}")
+        return {
+            "error": str(e),
+            "table_exists": False,
+            "total_pending_items_in_db": 0
+        }
+
+@router.get("/pending-order-items/consolidation", tags=["Pending Order Items"])
+def get_consolidation_opportunities(db: Session = Depends(get_db)):
+    """Get consolidation opportunities for pending items"""
+    try:
+        from .services.pending_order_service import PendingOrderService
+        service = PendingOrderService(db)
+        return service.get_consolidation_opportunities()
+    except Exception as e:
+        logger.error(f"Error getting consolidation opportunities: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Keep old endpoints for backward compatibility but redirect to new ones
+@router.get("/pending-orders", response_model=List[schemas.PendingOrderItem], tags=["Pending Orders - Legacy"])
+def get_pending_orders_legacy(
+    skip: int = 0,
+    limit: int = 100,
+    status: str = "pending",
     db: Session = Depends(get_db)
 ):
-    """Update pending order status"""
-    try:
-        pending = crud.update_pending_order(db=db, pending_id=pending_id, pending_update=pending_update)
-        if not pending:
-            raise HTTPException(status_code=404, detail="Pending order not found")
-        return pending
-    except Exception as e:
-        logger.error(f"Error updating pending order: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/pending-orders/by-paper/{paper_id}", response_model=List[schemas.PendingOrderMaster], tags=["Pending Orders"])
-def get_pending_by_specification(paper_id: UUID, db: Session = Depends(get_db)):
-    """Get pending orders by paper specification for consolidation"""
-    try:
-        return crud.get_pending_by_specification(db=db, paper_id=paper_id)
-    except Exception as e:
-        logger.error(f"Error getting pending orders by specification: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Legacy endpoint - redirects to pending-order-items"""
+    return get_pending_order_items(skip=skip, limit=limit, status=status, db=db)
 
 # ============================================================================
 # INVENTORY MASTER ENDPOINTS
@@ -731,85 +750,8 @@ def update_plan(
         logger.error(f"Error updating plan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 # ============================================================================
-# CUTTING OPTIMIZER TEST ROUTES
+# CUTTING OPTIMIZER ROUTES
 # ============================================================================
-
-@router.get("/optimizer/test", tags=["Cutting Optimizer"])
-def test_cutting_optimizer():
-    """NEW FLOW: Test the cutting optimizer algorithm with 3-input/4-output sample data"""
-    try:
-        from .services.cutting_optimizer import CuttingOptimizer
-        
-        optimizer = CuttingOptimizer()
-        result = optimizer.test_algorithm_with_sample_data()
-        
-        return {
-            "message": "NEW FLOW: Cutting optimizer test completed successfully",
-            "test_data": "Sample data with 3 inputs: new orders, pending orders, available inventory",
-            "optimization_result": result,
-            "flow_explanation": {
-                "inputs": {
-                    "new_orders": "Fresh customer orders",
-                    "pending_orders": "Orders from previous cycles that couldn't be fulfilled",
-                    "available_inventory": "20-25\" waste rolls available for reuse"
-                },
-                "outputs": {
-                    "cut_rolls_generated": "Rolls that can be fulfilled (from cutting or inventory)",
-                    "jumbo_rolls_needed": "Number of jumbo rolls to procure",
-                    "pending_orders": "Orders that still cannot be fulfilled",
-                    "inventory_remaining": "20-25\" waste rolls for future cycles"
-                }
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error testing cutting optimizer: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/optimizer/test-with-orders", tags=["Cutting Optimizer"])
-def test_optimizer_with_orders(
-    request: schemas.CreatePlanRequest,
-    db: Session = Depends(get_db)
-):
-    """Test the cutting optimizer with real order data without saving to database
-    
-    Fetches order details from database using the provided order IDs,
-    runs the cutting optimization algorithm, and returns the result.
-    Does not create any database records - for testing/preview purposes only.
-    """
-    try:
-        from .services.cutting_optimizer import CuttingOptimizer
-        import uuid
-        
-        # Convert string IDs to UUIDs
-        uuid_order_ids = []
-        for order_id in request.order_ids:
-            try:
-                uuid_order_ids.append(uuid.UUID(order_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
-        
-        # Use the existing method to get order requirements from database
-        optimizer = CuttingOptimizer()
-        order_requirements = optimizer.get_order_requirements_from_db(db, uuid_order_ids)
-        
-        if not order_requirements:
-            raise HTTPException(status_code=404, detail="No valid orders found with provided IDs")
-        
-        # Run optimization without saving
-        optimization_result = optimizer.optimize_with_new_algorithm(order_requirements, interactive=False)
-        
-        # Return result in the same format as the test method
-        return {
-            "message": "Cutting optimizer test completed successfully",
-            "test_data": f"Real orders from database - {len(order_requirements)} orders processed",
-            "optimization_result": optimization_result
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing cutting optimizer with orders: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/optimizer/create-plan", response_model=schemas.OptimizerOutput, tags=["Cutting Optimizer"])
 def create_cutting_plan(
@@ -892,159 +834,6 @@ def create_cutting_plan(
     except Exception as e:
         logger.error(f"Error creating cutting plan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-@router.post("/optimizer/test-frontend", tags=["Cutting Optimizer"])
-def test_optimizer_frontend(
-    request_data: Dict[str, Any]
-):
-    """Test the cutting optimizer with data from the HTML frontend"""
-    try:
-        from .services.cutting_optimizer import CuttingOptimizer
-        
-        # Extract rolls data from frontend format
-        rolls_data = request_data.get('rolls', [])
-        
-        if not rolls_data:
-            raise HTTPException(status_code=400, detail="No rolls data provided")
-        
-        # Convert frontend format to optimizer format
-        order_requirements = []
-        for roll in rolls_data:
-            order_requirements.append({
-                'width': float(roll['width']),
-                'quantity': int(roll['quantity']),
-                'gsm': int(roll['gsm']),
-                'bf': float(roll['bf']),
-                'shade': roll['shade'],
-                'min_length': roll.get('min_length', 1000)
-            })
-        
-        # Run optimization
-        optimizer = CuttingOptimizer()
-        result = optimizer.optimize_with_new_algorithm(order_requirements, interactive=False)
-        
-        # Convert result to frontend-expected format
-        frontend_result = {
-            "success": True,
-            "total_rolls_needed": result['summary']['total_jumbos_used'],
-            "total_waste_percentage": result['summary']['overall_waste_percentage'],
-            "total_waste_inches": result['summary']['total_trim_inches'],
-            "patterns": [],
-            "unfulfilled_orders": []
-        }
-        
-        # Convert jumbo rolls to patterns
-        for jumbo in result['jumbo_rolls_used']:
-            pattern = {
-                "rolls": [
-                    {
-                        "width": roll['width'],
-                        "shade": roll['shade'],
-                        "gsm": roll['gsm'],
-                        "bf": roll['bf']
-                    }
-                    for roll in jumbo['rolls']
-                ],
-                "waste_inches": jumbo['trim_left'],
-                "waste_percentage": jumbo['waste_percentage']
-            }
-            frontend_result["patterns"].append(pattern)
-        
-        # Convert pending orders to unfulfilled orders
-        for pending in result['pending_orders']:
-            unfulfilled = {
-                "width": pending['width'],
-                "quantity": pending['quantity'],
-                "gsm": pending['gsm'],
-                "bf": pending['bf'],
-                "shade": pending['shade']
-            }
-            frontend_result["unfulfilled_orders"].append(unfulfilled)
-        
-        return frontend_result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing cutting optimizer with frontend data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/optimizer/test-full-cycle", tags=["Cutting Optimizer"])
-def test_full_cycle_workflow(
-    request_data: Dict[str, Any],
-    db: Session = Depends(get_db)
-):
-    """NEW FLOW: Test complete cycle - 3-input optimization + 4-output processing"""
-    try:
-        from .services.workflow_manager import WorkflowManager
-        import uuid
-        
-        # Extract data
-        order_ids = request_data.get('order_ids', [])
-        created_by_id = request_data.get('created_by_id')
-        
-        if not order_ids:
-            # Use test order IDs or create sample data
-            return {
-                "message": "NEW FLOW: Full cycle test requires order_ids",
-                "example_request": {
-                    "order_ids": ["uuid1", "uuid2", "uuid3"],
-                    "created_by_id": "user_uuid"
-                },
-                "flow_steps": [
-                    "1. Fetch orders with paper specifications",
-                    "2. Find matching pending orders",
-                    "3. Get available inventory (20-25\" waste)",
-                    "4. Run 3-input optimization",
-                    "5. Process 4 outputs into database",
-                    "6. Update order statuses to 'processing'"
-                ]
-            }
-        
-        # Convert to UUIDs
-        uuid_order_ids = []
-        for order_id in order_ids:
-            try:
-                uuid_order_ids.append(uuid.UUID(order_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
-        
-        user_uuid = uuid.UUID(created_by_id) if created_by_id else None
-        
-        # Initialize workflow manager
-        workflow_manager = WorkflowManager(db=db, user_id=user_uuid)
-        
-        # Run full cycle
-        result = workflow_manager.process_multiple_orders(uuid_order_ids)
-        
-        return {
-            "message": "NEW FLOW: Full cycle test completed",
-            "result": result,
-            "cycle_explanation": {
-                "what_happened": [
-                    "Orders were fetched with paper specifications",
-                    "Matching pending orders were found and included",
-                    "Available waste inventory (20-25\") was retrieved",
-                    "3-input optimization was executed",
-                    "4 outputs were processed into database records",
-                    "Order statuses updated to 'processing'"
-                ],
-                "database_changes": {
-                    "plans_created": len(result.get('details', {}).get('plan_ids', [])),
-                    "production_orders": len(result.get('details', {}).get('production_order_ids', [])),
-                    "pending_orders": len(result.get('details', {}).get('pending_order_ids', [])),
-                    "inventory_items": len(result.get('details', {}).get('inventory_ids', [])),
-                    "orders_updated": len(result.get('details', {}).get('updated_order_ids', []))
-                }
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing full cycle workflow: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 
 # ============================================================================
 # WORKFLOW MANAGEMENT ROUTES
@@ -1605,151 +1394,6 @@ def login_user(
 # CUTTING OPTIMIZER ENDPOINTS (Migrated from old cutting_optimizer.py)
 # ============================================================================
 
-@router.post("/optimizer/from-orders", tags=["Cutting Optimizer"])
-def generate_cutting_plan_from_orders_advanced(
-    order_ids: List[str],
-    consider_inventory: bool = True,
-    created_by_id: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """
-    Generate an optimized cutting plan for specified orders using master-based architecture.
-    
-    This endpoint creates a cutting plan by considering existing inventory and optimizing
-    for minimum waste, speed, or material usage.
-    """
-    try:
-        from .services.cutting_optimizer import CuttingOptimizer
-        import uuid
-        
-        # Convert string IDs to UUIDs
-        uuid_order_ids = []
-        for order_id in order_ids:
-            try:
-                uuid_order_ids.append(uuid.UUID(order_id))
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {order_id}")
-        
-        # Get orders using master-based architecture
-        orders = db.query(models.OrderMaster).options(
-            joinedload(models.OrderMaster.client),
-            joinedload(models.OrderMaster.paper),
-            joinedload(models.OrderMaster.created_by)
-        ).filter(
-            models.OrderMaster.id.in_(uuid_order_ids),
-            models.OrderMaster.status.in_(["pending", "processing"])
-        ).all()
-        
-        if not orders:
-            raise HTTPException(
-                status_code=404,
-                detail="No valid orders found with the provided IDs"
-            )
-        
-        # Convert orders to optimizer format using master relationships
-        order_requirements = []
-        for order in orders:
-            if not order.paper:
-                continue
-                
-            order_requirements.append({
-                'order_id': str(order.id),
-                'width': float(order.width),
-                'quantity': order.quantity - (order.quantity_fulfilled or 0),
-                'gsm': order.paper.gsm,
-                'bf': float(order.paper.bf),
-                'shade': order.paper.shade,
-                'min_length': order.min_length or 1000,
-                'client_name': order.client.name if order.client else 'Unknown'
-            })
-        
-        if not order_requirements:
-            raise HTTPException(status_code=400, detail="No valid order requirements found")
-        
-        # Get available inventory if requested
-        available_inventory = []
-        if consider_inventory:
-            inventory_items = db.query(models.InventoryMaster).options(
-                joinedload(models.InventoryMaster.paper)
-            ).filter(
-                models.InventoryMaster.status == "available",
-                models.InventoryMaster.roll_type == "jumbo"
-            ).all()
-            
-            for item in inventory_items:
-                if item.paper:
-                    available_inventory.append({
-                        'id': str(item.id),
-                        'width': float(item.width),
-                        'length': float(item.length) if item.length else 1000,
-                        'gsm': item.paper.gsm,
-                        'bf': float(item.paper.bf),
-                        'shade': item.paper.shade,
-                        'status': item.status,
-                        'weight': float(item.weight) if item.weight else 0
-                    })
-        
-        # Generate the optimized plan
-        optimizer = CuttingOptimizer()
-        plan = optimizer.optimize_with_new_algorithm(
-            order_requirements=order_requirements,
-            interactive=False
-        )
-        
-        # Create plan in database if created_by_id is provided
-        plan_created = None
-        if created_by_id:
-            try:
-                created_by_uuid = uuid.UUID(created_by_id)
-                plan_data = schemas.PlanMasterCreate(
-                    name=f"Auto Plan from Orders {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    cut_pattern=plan['jumbo_rolls_used'],
-                    expected_waste_percentage=plan['summary']['overall_waste_percentage'],
-                    created_by_id=created_by_uuid,
-                    order_ids=uuid_order_ids,
-                    inventory_ids=[]
-                )
-                plan_created = crud.create_plan(db, plan_data)
-            except Exception as e:
-                logger.warning(f"Could not create plan in database: {e}")
-        
-        # Convert to response format
-        return {
-            'patterns': [
-                {
-                    'rolls': jumbo['rolls'],
-                    'waste_percentage': jumbo['waste_percentage'],
-                    'waste_inches': jumbo['trim_left'],
-                    'jumbo_number': jumbo['jumbo_number'],
-                    'paper_spec': jumbo['paper_spec']
-                }
-                for jumbo in plan['jumbo_rolls_used']
-            ],
-            'total_rolls_needed': plan['summary']['total_jumbos_used'],
-            'total_waste_percentage': plan['summary']['overall_waste_percentage'],
-            'total_waste_inches': plan['summary']['total_trim_inches'],
-            'fulfilled_orders': len(order_requirements) - len(plan['pending_orders']),
-            'unfulfilled_orders': [
-                {
-                    'width': order['width'],
-                    'quantity': order['quantity'],
-                    'gsm': order['gsm'],
-                    'bf': order['bf'],
-                    'shade': order['shade']
-                }
-                for order in plan['pending_orders']
-            ],
-            'plan_created': str(plan_created.id) if plan_created else None,
-            'available_inventory_considered': len(available_inventory),
-            'specification_groups_processed': plan['summary']['specification_groups_processed']
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating cutting plan from orders: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/optimizer/from-specs", tags=["Cutting Optimizer"])
 def generate_cutting_plan_from_specs(
     rolls: List[Dict[str, Any]],
@@ -2219,20 +1863,29 @@ def generate_plan_with_cut_roll_selection(
                     logger.info(f"Found matching order requirement: {order_match}")
                     break
             
-            if order_match and order_match.get('order_item_id'):
+            if order_match:
                 try:
-                    pending_order_create = schemas.PendingOrderMasterCreate(
-                        order_id=uuid.UUID(order_match['order_id']),
-                        order_item_id=uuid.UUID(order_match['order_item_id']),
-                        paper_id=uuid.UUID(order_match['paper_id']),
-                        width_inches=int(pending_order['width']),
-                        quantity_pending=pending_order['quantity'],
+                    # Use PendingOrderService to create PendingOrderItem
+                    from .services.pending_order_service import PendingOrderService
+                    pending_service = PendingOrderService(db, created_by_uuid)
+                    
+                    # Create single pending item in the expected format
+                    pending_items = [{
+                        'width': pending_order['width'],
+                        'quantity': pending_order['quantity'],
+                        'gsm': pending_order['gsm'],
+                        'bf': pending_order['bf'],
+                        'shade': pending_order['shade']
+                    }]
+                    
+                    pending_service.create_pending_items(
+                        pending_orders=pending_items,
+                        original_order_id=uuid.UUID(order_match['order_id']),
                         reason=pending_order['reason']
                     )
-                    crud.create_pending_order(db, pending_order_create)
-                    logger.info(f"Successfully created pending order for {pending_order['width']}\" width")
+                    logger.info(f"Successfully created pending order item for {pending_order['width']}\" width")
                 except Exception as e:
-                    logger.warning(f"Failed to create pending order: {e}. Order match: {order_match}")
+                    logger.warning(f"Failed to create pending order item: {e}. Order match: {order_match}")
             else:
                 logger.warning(f"No matching order found or missing order_item_id for pending order: {pending_order}")
                 # Skip creating pending order if we can't find a proper match

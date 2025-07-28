@@ -220,6 +220,29 @@ class PendingOrderMaster(Base):
     paper = relationship("PaperMaster", back_populates="pending_orders")
     production_order = relationship("ProductionOrderMaster", back_populates="pending_orders")
 
+# Pending Order Item - New model that matches the service expectations
+class PendingOrderItem(Base):
+    __tablename__ = "pending_order_item"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    original_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    width_inches = Column(Integer, nullable=False)
+    gsm = Column(Integer, nullable=False)
+    bf = Column(Numeric(4, 2), nullable=False)
+    shade = Column(String(50), nullable=False)
+    quantity_pending = Column(Integer, nullable=False)
+    reason = Column(String(100), nullable=False, default="no_suitable_jumbo")
+    status = Column(String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
+    production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_order_master.id"), nullable=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    original_order = relationship("OrderMaster", foreign_keys=[original_order_id])
+    production_order = relationship("ProductionOrderMaster", back_populates="pending_order_items")
+    created_by = relationship("UserMaster")
+
 # Inventory Master - Manages both jumbo and cut rolls
 class InventoryMaster(Base):
     __tablename__ = "inventory_master"
@@ -281,6 +304,7 @@ class ProductionOrderMaster(Base):
     paper = relationship("PaperMaster", back_populates="production_orders")
     created_by = relationship("UserMaster", back_populates="production_orders_created")
     pending_orders = relationship("PendingOrderMaster", back_populates="production_order")
+    pending_order_items = relationship("PendingOrderItem", back_populates="production_order")
 
 # ============================================================================
 # LINKING TABLES - Many-to-many relationships

@@ -273,6 +273,39 @@ class PendingOrderMaster(PendingOrderMasterBase):
     class Config:
         from_attributes = True
 
+# Pending Order Item Schemas - New model for service compatibility
+class PendingOrderItemBase(BaseModel):
+    original_order_id: UUID
+    width_inches: int = Field(..., gt=0)
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    quantity_pending: int = Field(..., gt=0)
+    reason: str = Field(default="no_suitable_jumbo", max_length=100)
+
+class PendingOrderItemCreate(PendingOrderItemBase):
+    created_by_id: Optional[UUID] = None
+
+class PendingOrderItemUpdate(BaseModel):
+    status: Optional[PendingOrderStatus] = None
+    production_order_id: Optional[UUID] = None
+    resolved_at: Optional[datetime] = None
+
+class PendingOrderItem(PendingOrderItemBase):
+    id: UUID
+    status: PendingOrderStatus
+    production_order_id: Optional[UUID] = None
+    created_by_id: Optional[UUID] = None
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    
+    # Include related data
+    original_order: Optional[OrderMaster] = None
+    created_by: Optional[UserMaster] = None
+
+    class Config:
+        from_attributes = True
+
 # Inventory Master Schemas
 class InventoryMasterBase(BaseModel):
     paper_id: UUID
