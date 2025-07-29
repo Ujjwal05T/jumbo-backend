@@ -1,11 +1,15 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, and_, func
+from sqlalchemy.exc import SQLAlchemyError
 from . import models, schemas
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
 from fastapi import HTTPException
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -191,36 +195,60 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[mod
 
 def create_paper(db: Session, paper: schemas.PaperMasterCreate) -> models.PaperMaster:
     """Create a new paper specification in Paper Master"""
-    # Check if paper with same specifications already exists
-    existing_paper = db.query(models.PaperMaster).filter(
-        models.PaperMaster.gsm == paper.gsm,
-        models.PaperMaster.bf == paper.bf,
-        models.PaperMaster.shade == paper.shade,
-        models.PaperMaster.type == paper.type,
-        models.PaperMaster.status == "active"
-    ).first()
-    
-    if existing_paper:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Paper specification already exists: {paper.name}"
+    try:
+        # Check if paper with same specifications already exists (commented out to allow duplicates)
+        existing_paper = db.query(models.PaperMaster).filter(
+            models.PaperMaster.gsm == paper.gsm,
+            models.PaperMaster.bf == paper.bf,
+            models.PaperMaster.shade == paper.shade,
+            models.PaperMaster.type == paper.type,
+            models.PaperMaster.status == "active"
+        ).first()
+        
+        if existing_paper:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Paper specification already exists with GSM: {paper.gsm}, BF: {paper.bf}, Shade: {paper.shade}, Type: {paper.type}. Existing paper name: '{existing_paper.name}'"
+            )
+        
+        # Check if paper name already exists
+        existing_name = db.query(models.PaperMaster).filter(
+            models.PaperMaster.name == paper.name,
+            models.PaperMaster.status == "active"
+        ).first()
+        
+        if existing_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Paper with name '{paper.name}' already exists"
+            )
+        
+        db_paper = models.PaperMaster(
+            name=paper.name,
+            gsm=paper.gsm,
+            bf=paper.bf,
+            shade=paper.shade,
+            thickness=paper.thickness,
+            type=paper.type,
+            created_by_id=paper.created_by_id,
+            status=paper.status
         )
-    
-    db_paper = models.PaperMaster(
-        name=paper.name,
-        gsm=paper.gsm,
-        bf=paper.bf,
-        shade=paper.shade,
-        thickness=paper.thickness,
-        type=paper.type,
-        created_by_id=paper.created_by_id,
-        status=paper.status
-    )
-    
-    db.add(db_paper)
-    db.commit()
-    db.refresh(db_paper)
-    return db_paper
+        
+        db.add(db_paper)
+        db.commit()
+        db.refresh(db_paper)
+        return db_paper
+        
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error creating paper: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred while creating paper")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error creating paper: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 def get_paper(db: Session, paper_id: uuid.UUID) -> Optional[models.PaperMaster]:
     """Get paper by ID"""
@@ -251,17 +279,69 @@ def get_papers(db: Session, skip: int = 0, limit: int = 100, status: str = "acti
 
 def update_paper(db: Session, paper_id: uuid.UUID, paper_update: schemas.PaperMasterUpdate) -> Optional[models.PaperMaster]:
     """Update paper specification"""
-    db_paper = get_paper(db, paper_id)
-    if not db_paper:
-        return None
-    
-    update_data = paper_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_paper, field, value)
-    
-    db.commit()
-    db.refresh(db_paper)
-    return db_paper
+    try:
+        db_paper = get_paper(db, paper_id)
+        if not db_paper:
+            return None
+        
+        update_data = paper_update.dict(exclude_unset=True)
+        
+        # Check for duplicate specifications if relevant fields are being updated
+        if any(field in update_data for field in ['gsm', 'bf', 'shade', 'type']):
+            # Get the values that would result after update
+            new_gsm = update_data.get('gsm', db_paper.gsm)
+            new_bf = update_data.get('bf', db_paper.bf)
+            new_shade = update_data.get('shade', db_paper.shade)
+            new_type = update_data.get('type', db_paper.type)
+            
+            # Check if another paper has these specifications
+            existing_paper = db.query(models.PaperMaster).filter(
+                models.PaperMaster.id != paper_id,  # Exclude current paper
+                models.PaperMaster.gsm == new_gsm,
+                models.PaperMaster.bf == new_bf,
+                models.PaperMaster.shade == new_shade,
+                models.PaperMaster.type == new_type,
+                models.PaperMaster.status == "active"
+            ).first()
+            
+            if existing_paper:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Another paper already exists with these specifications (GSM: {new_gsm}, BF: {new_bf}, Shade: {new_shade}, Type: {new_type}). Existing paper: '{existing_paper.name}'"
+                )
+        
+        # Check for duplicate name if name is being updated
+        if 'name' in update_data:
+            existing_name = db.query(models.PaperMaster).filter(
+                models.PaperMaster.id != paper_id,  # Exclude current paper
+                models.PaperMaster.name == update_data['name'],
+                models.PaperMaster.status == "active"
+            ).first()
+            
+            if existing_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Paper with name '{update_data['name']}' already exists"
+                )
+        
+        # Apply updates
+        for field, value in update_data.items():
+            setattr(db_paper, field, value)
+        
+        db.commit()
+        db.refresh(db_paper)
+        return db_paper
+        
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error updating paper: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred while updating paper")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error updating paper: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
 def delete_paper(db: Session, paper_id: uuid.UUID) -> bool:
     """Soft delete paper (set status to inactive)"""
@@ -270,8 +350,9 @@ def delete_paper(db: Session, paper_id: uuid.UUID) -> bool:
         return False
     
     # Check if paper is used in active orders or inventory
-    active_orders = db.query(models.OrderMaster).filter(
-        models.OrderMaster.paper_id == paper_id,
+    # Check through OrderItem since paper_id is in OrderItem, not OrderMaster
+    active_orders = db.query(models.OrderItem).join(models.OrderMaster).filter(
+        models.OrderItem.paper_id == paper_id,
         models.OrderMaster.status.in_(["pending", "processing", "partially_fulfilled"])
     ).count()
     
@@ -400,7 +481,7 @@ def get_pending_orders(db: Session, paper_id: uuid.UUID = None) -> List[models.O
     )
     
     if paper_id:
-        query = query.filter(models.OrderMaster.paper_id == paper_id)
+        query = query.filter(models.OrderItem.paper_id == paper_id)
     
     return query.order_by(models.OrderMaster.priority.desc(), models.OrderMaster.created_at).all()
 
@@ -764,7 +845,7 @@ def complete_production_order(db: Session, production_id: uuid.UUID, created_by_
 # NEW FLOW CRUD OPERATIONS - Support for 3-input/4-output optimization
 # ============================================================================
 
-def get_pending_orders_by_paper_specs(db: Session, paper_specs: List[Dict]) -> List[models.PendingOrderMaster]:
+def get_pending_orders_by_paper_specs(db: Session, paper_specs: List[Dict]) -> List[models.PendingOrderItem]:
     """
     NEW FLOW: Get pending orders matching specific paper specifications.
     Used to gather pending orders for 3-input optimization.
@@ -774,29 +855,41 @@ def get_pending_orders_by_paper_specs(db: Session, paper_specs: List[Dict]) -> L
         paper_specs: List of paper specifications (GSM, BF, Shade)
         
     Returns:
-        List of pending orders matching the specifications
+        List of pending order items matching the specifications
     """
+    print(f"🔍 DEBUG CRUD: get_pending_orders_by_paper_specs called with specs: {paper_specs}")
+    
     spec_conditions = []
     for spec in paper_specs:
         condition = and_(
-            models.PaperMaster.gsm == spec.get('gsm'),
-            models.PaperMaster.bf == spec.get('bf'),
-            models.PaperMaster.shade == spec.get('shade')
+            models.PendingOrderItem.gsm == spec.get('gsm'),
+            models.PendingOrderItem.bf == spec.get('bf'),
+            models.PendingOrderItem.shade == spec.get('shade')
         )
         spec_conditions.append(condition)
+        print(f"  Added condition for spec: GSM={spec.get('gsm')}, BF={spec.get('bf')}, Shade={spec.get('shade')}")
     
     if not spec_conditions:
+        print("❌ DEBUG CRUD: No spec conditions, returning empty list")
         return []
     
-    return db.query(models.PendingOrderMaster).join(
-        models.PaperMaster
-    ).filter(
-        models.PendingOrderMaster.status == "pending",
+    # Query PendingOrderItem directly since it has the paper specs embedded
+    query = db.query(models.PendingOrderItem).filter(
+        models.PendingOrderItem.status == "pending",
         or_(*spec_conditions)
     ).options(
-        joinedload(models.PendingOrderMaster.paper),
-        joinedload(models.PendingOrderMaster.original_order)
-    ).all()
+        joinedload(models.PendingOrderItem.original_order),
+        joinedload(models.PendingOrderItem.production_order)
+    )
+    
+    results = query.all()
+    print(f"📋 DEBUG CRUD: Found {len(results)} pending order items")
+    
+    for i, item in enumerate(results):
+        print(f"  Item {i+1}: ID={item.id}, width={item.width_inches}\", qty={item.quantity_pending}, "
+              f"GSM={item.gsm}, BF={item.bf}, shade={item.shade}, reason={item.reason}")
+    
+    return results
 
 def get_available_inventory_by_paper_specs(
     db: Session, 

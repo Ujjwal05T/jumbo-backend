@@ -138,39 +138,77 @@ class CuttingOptimizer:
             - pending_orders: Orders that cannot be fulfilled
             - inventory_remaining: 20-25" waste rolls for future use
         """
+        print(f"\n🔧 DEBUG: Starting optimize_with_new_algorithm")
+        print(f"📦 Input - Order Requirements: {len(order_requirements)} items")
+        print(f"⏳ Input - Pending Orders: {len(pending_orders) if pending_orders else 0} items")
+        print(f"📋 Input - Available Inventory: {len(available_inventory) if available_inventory else 0} items")
+        
         # Initialize default values for optional inputs
         if pending_orders is None:
             pending_orders = []
+            print("⚠️  DEBUG: pending_orders was None, initialized to empty list")
         if available_inventory is None:
             available_inventory = []
+            print("⚠️  DEBUG: available_inventory was None, initialized to empty list")
+        
+        print(f"\n📋 DEBUG: Detailed Input Analysis:")
+        print(f"Order Requirements: {order_requirements}")
+        print(f"Pending Orders: {pending_orders}")
+        print(f"Available Inventory: {available_inventory}")
         
         # Combine all requirements (new orders + pending orders)
         all_requirements = order_requirements + pending_orders
+        print(f"\n🔄 DEBUG: Combined all_requirements: {len(all_requirements)} total items")
+        print(f"Combined Requirements: {all_requirements}")
         
         # Group all requirements by complete specification (GSM + Shade + BF)
         spec_groups = {}
-        for req in all_requirements:
+        print(f"\n🔍 DEBUG: Grouping requirements by specification...")
+        
+        for i, req in enumerate(all_requirements):
+            print(f"  Processing requirement {i+1}: {req}")
             # Create unique key for paper specification
             spec_key = (req['gsm'], req['shade'], req['bf'])
+            print(f"  Spec key: {spec_key}")
+            
             if spec_key not in spec_groups:
                 spec_groups[spec_key] = {
                     'orders': {},
                     'inventory': [],
                     'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']}
                 }
+                print(f"  Created new spec group for {spec_key}")
             
             # Add width and quantity to this specification group
             width = float(req['width'])
             if width in spec_groups[spec_key]['orders']:
+                old_qty = spec_groups[spec_key]['orders'][width]
                 spec_groups[spec_key]['orders'][width] += req['quantity']
+                print(f"  Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
             else:
                 spec_groups[spec_key]['orders'][width] = req['quantity']
+                print(f"  Added new width {width}\" with quantity {req['quantity']}")
+        
+        print(f"\n📊 DEBUG: Final spec_groups structure:")
+        for spec_key, group_data in spec_groups.items():
+            print(f"  Spec {spec_key}: {group_data['orders']}")
         
         # Add available inventory to matching specification groups
-        for inv_item in available_inventory:
+        print(f"\n📦 DEBUG: Adding available inventory to spec groups...")
+        for i, inv_item in enumerate(available_inventory):
+            print(f"  Processing inventory item {i+1}: {inv_item}")
             inv_spec_key = (inv_item['gsm'], inv_item['shade'], inv_item['bf'])
+            print(f"  Inventory spec key: {inv_spec_key}")
+            
             if inv_spec_key in spec_groups:
                 spec_groups[inv_spec_key]['inventory'].append(inv_item)
+                print(f"  ✅ Added inventory item to matching spec group {inv_spec_key}")
+            else:
+                print(f"  ❌ No matching spec group found for inventory item {inv_spec_key}")
+        
+        print(f"\n📋 DEBUG: Spec groups after adding inventory:")
+        for spec_key, group_data in spec_groups.items():
+            print(f"  Spec {spec_key}: {len(group_data['inventory'])} inventory items")
         
         # Process each specification group separately
         cut_rolls_generated = []
@@ -184,18 +222,29 @@ class CuttingOptimizer:
             inventory = group_data['inventory']
             spec = group_data['spec']
             
-            print(f"\n🔧 Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
-            print(f"   Orders: {orders}")
-            print(f"   Available Inventory: {len(inventory)} items")
+            print(f"\n🔧 DEBUG: Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
+            print(f"   📦 Orders to fulfill: {orders}")
+            print(f"   📋 Available Inventory: {len(inventory)} items")
+            for inv_idx, inv_item in enumerate(inventory):
+                print(f"     Inventory {inv_idx+1}: width={inv_item.get('width', 'N/A')}\", id={inv_item.get('id', 'N/A')}")
+            
+            total_order_quantity = sum(orders.values())
+            print(f"   📊 Total order quantity for this spec: {total_order_quantity} rolls")
             
             # First, try to fulfill orders using available inventory
             orders_copy = orders.copy()
             inventory_used = []
             
-            for inv_item in inventory:
+            print(f"   🔄 DEBUG: Starting inventory fulfillment phase...")
+            print(f"   📦 Orders copy before inventory: {orders_copy}")
+            
+            for inv_idx, inv_item in enumerate(inventory):
                 inv_width = float(inv_item['width'])
+                print(f"     Checking inventory item {inv_idx+1}: width={inv_width}\"")
+                
                 if inv_width in orders_copy and orders_copy[inv_width] > 0:
                     # Use this inventory item
+                    print(f"     ✅ MATCH! Using inventory for {inv_width}\" (had {orders_copy[inv_width]} orders)")
                     cut_rolls_generated.append({
                         'width': inv_width,
                         'quantity': 1,
@@ -207,8 +256,19 @@ class CuttingOptimizer:
                     })
                     orders_copy[inv_width] -= 1
                     if orders_copy[inv_width] <= 0:
+                        print(f"     📝 Fully satisfied {inv_width}\" orders, removing from list")
                         del orders_copy[inv_width]
+                    else:
+                        print(f"     📝 Still need {orders_copy[inv_width]} more {inv_width}\" rolls")
                     inventory_used.append(inv_item)
+                else:
+                    if inv_width not in orders_copy:
+                        print(f"     ❌ No orders for {inv_width}\" width")
+                    else:
+                        print(f"     ❌ Already fulfilled all {inv_width}\" orders")
+            
+            print(f"   📦 Orders remaining after inventory: {orders_copy}")
+            print(f"   📋 Inventory items used: {len(inventory_used)}")
             
             # Remove used inventory from available list
             remaining_inventory = [inv for inv in inventory if inv not in inventory_used]
@@ -216,15 +276,18 @@ class CuttingOptimizer:
             # Run the matching algorithm for remaining orders
             individual_118_rolls_needed = 0
             if orders_copy:
+                print(f"   🔪 DEBUG: Running cutting algorithm for remaining orders: {orders_copy}")
                 used, pending, high_trims = self.match_combos(orders_copy, interactive)
+                print(f"   📊 Cutting results: {len(used)} patterns used, {len(list(pending.keys()))} pending widths")
                 
                 # Process successful cutting patterns (each pattern = 1 individual 118" roll)
-                for combo, trim in used:
+                for pattern_idx, (combo, trim) in enumerate(used):
                     individual_118_rolls_needed += 1
+                    print(f"     Pattern {pattern_idx+1}: {combo} → trim={trim}\" (Roll #{individual_118_rolls_needed})")
                     
                     # Add cut rolls from this pattern
                     for width in combo:
-                        cut_rolls_generated.append({
+                        cut_roll = {
                             'width': width,
                             'quantity': 1,
                             'gsm': spec['gsm'],
@@ -233,10 +296,14 @@ class CuttingOptimizer:
                             'source': 'cutting',
                             'individual_roll_number': individual_118_rolls_needed,
                             'trim_left': trim
-                        })
+                        }
+                        cut_rolls_generated.append(cut_roll)
+                        print(f"       Added cut roll: {width}\" from roll #{individual_118_rolls_needed}")
+            else:
+                print(f"   ✅ DEBUG: All orders fulfilled from inventory, no cutting needed")
                     
                     # Handle waste: 20-25" becomes inventory, >25" discarded
-                    if 20 <= trim <= 25:
+                if 20 <= trim <= 25:
                         inventory_remaining.append({
                             'width': trim,
                             'quantity': 1,

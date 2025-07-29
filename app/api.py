@@ -149,6 +149,26 @@ def update_user(
 def create_paper(paper: schemas.PaperMasterCreate, db: Session = Depends(get_db)):
     """Create a new paper specification in Paper Master"""
     try:
+        logger.info(f"Creating paper with data: {paper.model_dump()}")
+        
+        # Validate required fields
+        if not paper.name or not paper.name.strip():
+            raise HTTPException(status_code=400, detail="Paper name is required and cannot be empty")
+        
+        if paper.gsm <= 0:
+            raise HTTPException(status_code=400, detail="GSM must be greater than 0")
+        
+        if paper.bf <= 0:
+            raise HTTPException(status_code=400, detail="BF must be greater than 0")
+        
+        if not paper.shade or not paper.shade.strip():
+            raise HTTPException(status_code=400, detail="Shade is required and cannot be empty")
+        
+        # Validate enum values
+        valid_types = ["standard", "premium", "recycled", "specialty"]
+        if paper.type not in valid_types:
+            raise HTTPException(status_code=400, detail=f"Invalid paper type. Must be one of: {valid_types}")
+        
         return crud.create_paper(db=db, paper=paper)
     except HTTPException:
         raise
@@ -202,6 +222,35 @@ def update_paper(
 ):
     """Update paper specification"""
     try:
+        logger.info(f"Updating paper {paper_id} with data: {paper_update.model_dump(exclude_unset=True)}")
+        
+        # Validate fields if provided
+        if paper_update.name is not None and (not paper_update.name or not paper_update.name.strip()):
+            raise HTTPException(status_code=400, detail="Paper name cannot be empty")
+        
+        if paper_update.gsm is not None and paper_update.gsm <= 0:
+            raise HTTPException(status_code=400, detail="GSM must be greater than 0")
+        
+        if paper_update.bf is not None and paper_update.bf <= 0:
+            raise HTTPException(status_code=400, detail="BF must be greater than 0")
+        
+        if paper_update.shade is not None and (not paper_update.shade or not paper_update.shade.strip()):
+            raise HTTPException(status_code=400, detail="Shade cannot be empty")
+        
+        if paper_update.thickness is not None and paper_update.thickness <= 0:
+            raise HTTPException(status_code=400, detail="Thickness must be greater than 0")
+        
+        # Validate enum values if provided
+        if paper_update.type is not None:
+            valid_types = ["standard", "premium", "recycled", "specialty"]
+            if paper_update.type not in valid_types:
+                raise HTTPException(status_code=400, detail=f"Invalid paper type. Must be one of: {valid_types}")
+        
+        if paper_update.status is not None:
+            valid_statuses = ["active", "inactive", "suspended"]
+            if paper_update.status not in valid_statuses:
+                raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        
         paper = crud.update_paper(db=db, paper_id=paper_id, paper_update=paper_update)
         if not paper:
             raise HTTPException(status_code=404, detail="Paper specification not found")
@@ -225,6 +274,65 @@ def delete_paper(paper_id: UUID, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error deleting paper: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/papers/debug/validation", tags=["Paper Master"])
+def debug_paper_validation(db: Session = Depends(get_db)):
+    """Debug endpoint to check paper validation and duplicates"""
+    try:
+        # Get all active papers
+        papers = db.query(models.PaperMaster).filter(
+            models.PaperMaster.status == "active"
+        ).all()
+        
+        # Check for duplicate specifications
+        spec_groups = {}
+        name_duplicates = {}
+        
+        for paper in papers:
+            # Group by specifications
+            spec_key = f"{paper.gsm}-{paper.bf}-{paper.shade}-{paper.type}"
+            if spec_key not in spec_groups:
+                spec_groups[spec_key] = []
+            spec_groups[spec_key].append({
+                "id": str(paper.id),
+                "name": paper.name,
+                "gsm": paper.gsm,
+                "bf": paper.bf,
+                "shade": paper.shade,
+                "type": paper.type
+            })
+            
+            # Group by name
+            if paper.name not in name_duplicates:
+                name_duplicates[paper.name] = []
+            name_duplicates[paper.name].append({
+                "id": str(paper.id),
+                "gsm": paper.gsm,
+                "bf": paper.bf,
+                "shade": paper.shade,
+                "type": paper.type
+            })
+        
+        # Find duplicates
+        duplicate_specs = {k: v for k, v in spec_groups.items() if len(v) > 1}
+        duplicate_names = {k: v for k, v in name_duplicates.items() if len(v) > 1}
+        
+        return {
+            "total_active_papers": len(papers),
+            "duplicate_specifications": duplicate_specs,
+            "duplicate_names": duplicate_names,
+            "validation_rules": {
+                "name": "Required, max 255 chars, must be unique",
+                "gsm": "Required, must be > 0",
+                "bf": "Required, must be > 0",
+                "shade": "Required, max 50 chars",
+                "type": "Must be one of: standard, premium, recycled, specialty",
+                "thickness": "Optional, must be > 0 if provided"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}")
+        return {"error": str(e)}
 
 # ============================================================================
 # ORDER MASTER ENDPOINTS
@@ -1635,6 +1743,50 @@ def get_optimizer_algorithms():
         ]
     }
 
+@router.get("/debug/pending-orders", tags=["Debug"])
+def debug_pending_orders(db: Session = Depends(get_db)):
+    """Debug endpoint to check what pending orders exist in the database."""
+    try:
+        # Check both PendingOrderMaster and PendingOrderItem
+        pending_masters = db.query(models.PendingOrderMaster).all()
+        pending_items = db.query(models.PendingOrderItem).all()
+        
+        return {
+            "pending_order_masters": {
+                "count": len(pending_masters),
+                "items": [
+                    {
+                        "id": str(pm.id),
+                        "paper_id": str(pm.paper_id) if pm.paper_id else None,
+                        "width": pm.width,
+                        "quantity": pm.quantity,
+                        "status": pm.status,
+                        "reason": pm.reason
+                    } for pm in pending_masters
+                ]
+            },
+            "pending_order_items": {
+                "count": len(pending_items),
+                "items": [
+                    {
+                        "id": str(pi.id),
+                        "original_order_id": str(pi.original_order_id),
+                        "width_inches": pi.width_inches,
+                        "gsm": pi.gsm,
+                        "bf": float(pi.bf),
+                        "shade": pi.shade,
+                        "quantity_pending": pi.quantity_pending,
+                        "status": pi.status,
+                        "reason": pi.reason,
+                        "created_at": pi.created_at.isoformat() if pi.created_at else None
+                    } for pi in pending_items
+                ]
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # CUT ROLL PRODUCTION & SELECTION ENDPOINTS
 # ============================================================================
@@ -1798,18 +1950,27 @@ def generate_plan_with_cut_roll_selection(
                 paper_specs.append(spec)
         
         # Fetch pending orders for same specifications
+        logger.info(f"🔍 DEBUG: Fetching pending orders for paper specs: {paper_specs}")
         pending_orders_db = crud.get_pending_orders_by_paper_specs(db, paper_specs)
+        logger.info(f"📋 DEBUG: Found {len(pending_orders_db)} pending orders from database")
+        
         pending_requirements = []
-        for pending in pending_orders_db:
-            if pending.paper:
-                pending_requirements.append({
-                    'width': float(pending.width_inches),
-                    'quantity': pending.quantity_pending,
-                    'gsm': pending.paper.gsm,
-                    'bf': float(pending.paper.bf),
-                    'shade': pending.paper.shade,
-                    'pending_id': str(pending.id)
-                })
+        for i, pending in enumerate(pending_orders_db):
+            logger.info(f"  Processing pending order item {i+1}: ID={pending.id}, width={pending.width_inches}\"")
+            # PendingOrderItem has paper specs directly embedded, no need to check pending.paper
+            pending_req = {
+                'width': float(pending.width_inches),
+                'quantity': pending.quantity_pending,
+                'gsm': pending.gsm,
+                'bf': float(pending.bf),
+                'shade': pending.shade,
+                'pending_id': str(pending.id),
+                'reason': pending.reason
+            }
+            pending_requirements.append(pending_req)
+            logger.info(f"  ✅ Added pending requirement: {pending_req}")
+        
+        logger.info(f"📊 DEBUG: Final pending_requirements: {pending_requirements}")
         
         # Fetch available inventory (20-25" waste rolls)
         available_inventory_db = crud.get_available_inventory_by_paper_specs(db, paper_specs)

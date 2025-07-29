@@ -53,19 +53,28 @@ class WorkflowManager:
                     paper_specs.append(spec)
             
             # NEW FLOW: Fetch pending orders for same paper specifications
+            logger.info(f"🔍 DEBUG WF: Fetching pending orders for paper specs: {paper_specs}")
             pending_orders = crud.get_pending_orders_by_paper_specs(self.db, paper_specs)
+            logger.info(f"📋 DEBUG WF: Found {len(pending_orders)} pending order items")
+            
             pending_requirements = []
-            for pending in pending_orders:
-                if pending.paper:
-                    pending_requirements.append({
-                        'order_id': str(pending.order_id),
-                        'width': float(pending.width_inches),
-                        'quantity': pending.quantity_pending,
-                        'gsm': pending.paper.gsm,
-                        'bf': float(pending.paper.bf),
-                        'shade': pending.paper.shade,
-                        'pending_id': str(pending.id)
-                    })
+            for i, pending in enumerate(pending_orders):
+                logger.info(f"  Processing pending item {i+1}: ID={pending.id}, width={pending.width_inches}\"")
+                # PendingOrderItem has paper specs directly embedded
+                pending_req = {
+                    'order_id': str(pending.original_order_id) if pending.original_order_id else 'unknown',
+                    'width': float(pending.width_inches),
+                    'quantity': pending.quantity_pending,
+                    'gsm': pending.gsm,
+                    'bf': float(pending.bf),
+                    'shade': pending.shade,
+                    'pending_id': str(pending.id),
+                    'reason': pending.reason
+                }
+                pending_requirements.append(pending_req)
+                logger.info(f"  ✅ Added pending requirement: {pending_req}")
+            
+            logger.info(f"📊 DEBUG WF: Final pending_requirements: {pending_requirements}")
             
             # NEW FLOW: Fetch available inventory (20-25" waste rolls)
             available_inventory_items = crud.get_available_inventory_by_paper_specs(self.db, paper_specs)
