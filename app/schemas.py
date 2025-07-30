@@ -9,15 +9,20 @@ from uuid import UUID
 # ============================================================================
 
 class OrderStatus(str, Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    PARTIALLY_FULFILLED = "partially_fulfilled"
+    CREATED = "created"
+    IN_PROCESS = "in_process"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 class PaymentType(str, Enum):
     BILL = "bill"
     CASH = "cash"
+
+class OrderItemStatus(str, Enum):
+    CREATED = "created"
+    IN_PROCESS = "in_process"
+    IN_WAREHOUSE = "in_warehouse"
+    COMPLETED = "completed"
 
 class InventoryStatus(str, Enum):
     AVAILABLE = "available"
@@ -40,7 +45,7 @@ class PlanStatus(str, Enum):
 
 class PendingOrderStatus(str, Enum):
     PENDING = "pending"
-    IN_PRODUCTION = "in_production"
+    INCLUDED_IN_PLAN = "included_in_plan"
     RESOLVED = "resolved"
     CANCELLED = "cancelled"
 
@@ -84,6 +89,7 @@ class Priority(str, Enum):
 class ClientMasterBase(BaseModel):
     company_name: str = Field(..., max_length=255)
     email: Optional[str] = Field(None, max_length=255)
+    gst_number: Optional[str] = Field(None, max_length=50)
     address: Optional[str] = None
     contact_person: Optional[str] = Field(None, max_length=255)
     phone: Optional[str] = Field(None, max_length=50)
@@ -95,6 +101,7 @@ class ClientMasterCreate(ClientMasterBase):
 class ClientMasterUpdate(BaseModel):
     company_name: Optional[str] = Field(None, max_length=255)
     email: Optional[str] = Field(None, max_length=255)
+    gst_number: Optional[str] = Field(None, max_length=50)
     address: Optional[str] = None
     contact_person: Optional[str] = Field(None, max_length=255)
     phone: Optional[str] = Field(None, max_length=50)
@@ -215,7 +222,6 @@ class OrderMasterBase(BaseModel):
     priority: Priority = Field(default=Priority.NORMAL)
     payment_type: PaymentType = Field(default=PaymentType.BILL)
     delivery_date: Optional[datetime] = None
-    notes: Optional[str] = None
 
 class OrderMasterCreate(OrderMasterBase):
     created_by_id: UUID
@@ -225,7 +231,6 @@ class OrderMasterUpdate(BaseModel):
     priority: Optional[Priority] = None
     payment_type: Optional[PaymentType] = None
     delivery_date: Optional[datetime] = None
-    notes: Optional[str] = None
     status: Optional[OrderStatus] = None
 
 class OrderMaster(OrderMasterBase):
@@ -609,11 +614,7 @@ class CutRollProductionWithDetails(CutRollProduction):
     created_by: Optional[UserMaster] = None
     weight_recorded_by: Optional[UserMaster] = None
 
-class CutRollSelectionRequest(BaseModel):
-    """Schema for selecting cut rolls for production"""
-    plan_id: UUID
-    cut_roll_selections: List[Dict[str, Any]]  # List of cut roll data from plan generation
-    created_by_id: UUID
+# Removed duplicate CutRollSelectionRequest - keeping the correct one later in file
 
 class QRCodeData(BaseModel):
     """Schema for QR code information"""
@@ -639,4 +640,149 @@ class WeightUpdateRequest(BaseModel):
     qr_code: str
     actual_weight_kg: float = Field(..., gt=0)
     updated_by_id: UUID
+
+# ============================================================================
+# ADDITIONAL SCHEMAS FOR NEW ENDPOINTS
+# ============================================================================
+
+class UserLogin(BaseModel):
+    """Schema for user login request"""
+    username: str
+    password: str
+
+class CuttingPlanRequestItem(BaseModel):
+    """Individual item in cutting plan request"""
+    width: float = Field(..., gt=0)
+    quantity: int = Field(..., gt=0)
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str
+    min_length: int = Field(default=1600, gt=0)
+
+class CuttingPlanRequest(BaseModel):
+    """Schema for cutting plan generation request"""
+    order_requirements: List[CuttingPlanRequestItem]
+    pending_orders: Optional[List[Dict[str, Any]]] = None
+    available_inventory: Optional[List[Dict[str, Any]]] = None
+
+class CuttingPlanWithSelectionRequest(CuttingPlanRequest):
+    """Schema for cutting plan with selection criteria"""
+    selection_criteria: Optional[Dict[str, Any]] = None
+
+class QRWeightUpdate(BaseModel):
+    """Schema for updating weight via QR code"""
+    qr_code: str
+    weight_kg: float = Field(..., gt=0)
+    location: Optional[str] = None
+    status: Optional[str] = None
+
+class QRGenerateRequest(BaseModel):
+    """Schema for generating QR code"""
+    inventory_id: Optional[UUID] = None
+
+class CutRollSelection(BaseModel):
+    """Individual cut roll selection"""
+    paper_id: UUID
+    width_inches: float
+    qr_code: Optional[str] = None
+    cutting_pattern: Optional[str] = None
+
+class CutRollSelectionRequest(BaseModel):
+    """Schema for selecting cut rolls for production"""
+    plan_id: Optional[UUID] = None
+    selected_rolls: List[CutRollSelection]
+    created_by_id: UUID
+
+class PlanStatusUpdate(BaseModel):
+    """Schema for updating plan status"""
+    status: str
+    actual_waste_percentage: Optional[float] = None
+
+class PlanInventoryLinkRequest(BaseModel):
+    """Schema for linking inventory to plans"""
+    inventory_ids: List[UUID]
+
+class InventoryStatusUpdate(BaseModel):
+    """Schema for updating inventory status"""
+    new_status: str
+    location: Optional[str] = None
+
+# ============================================================================
+# DISPATCH SCHEMAS
+# ============================================================================
+
+class DispatchFormData(BaseModel):
+    """Schema for dispatch form data"""
+    vehicle_number: str = Field(..., max_length=50)
+    driver_name: str = Field(..., max_length=255)
+    driver_mobile: str = Field(..., max_length=20)
+    payment_type: str = Field(default="bill")  # bill/cash
+    dispatch_date: datetime = Field(default_factory=datetime.utcnow)
+    dispatch_number: str = Field(..., max_length=100)
+    reference_number: Optional[str] = Field(None, max_length=100)
+    client_id: UUID
+    primary_order_id: Optional[UUID] = None
+    order_date: Optional[datetime] = None
+    inventory_ids: List[UUID] = Field(..., min_items=1)
+    created_by_id: UUID
+
+class DispatchRecordCreate(BaseModel):
+    """Schema for creating dispatch record"""
+    vehicle_number: str
+    driver_name: str
+    driver_mobile: str
+    payment_type: str
+    dispatch_date: datetime
+    dispatch_number: str
+    reference_number: Optional[str] = None
+    client_id: UUID
+    primary_order_id: Optional[UUID] = None
+    order_date: Optional[datetime] = None
+    total_items: int
+    total_weight_kg: float
+    created_by_id: UUID
+
+class DispatchItem(BaseModel):
+    """Schema for dispatch item"""
+    id: UUID
+    dispatch_record_id: UUID
+    inventory_id: UUID
+    qr_code: str
+    width_inches: float
+    weight_kg: float
+    paper_spec: str
+    status: str
+    dispatched_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class DispatchRecord(BaseModel):
+    """Schema for dispatch record with items"""
+    id: UUID
+    vehicle_number: str
+    driver_name: str
+    driver_mobile: str
+    payment_type: str
+    dispatch_date: datetime
+    dispatch_number: str
+    reference_number: Optional[str] = None
+    client_id: UUID
+    primary_order_id: Optional[UUID] = None
+    order_date: Optional[datetime] = None
+    status: str
+    total_items: int
+    total_weight_kg: float
+    created_by_id: UUID
+    created_at: datetime
+    delivered_at: Optional[datetime] = None
+    
+    # Include related data
+    client: Optional[ClientMaster] = None
+    primary_order: Optional[OrderMaster] = None
+    created_by: Optional[UserMaster] = None
+    dispatch_items: List[DispatchItem] = Field(default_factory=list)
+    
+    class Config:
+        from_attributes = True
 

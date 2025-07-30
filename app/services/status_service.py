@@ -77,7 +77,7 @@ class StatusService:
             notes: Optional notes
             commit: Whether to commit
         """
-        valid_statuses = ["pending", "processing", "partially_fulfilled", "completed", "cancelled"]
+        valid_statuses = ["created", "in_process", "completed", "cancelled"]
         
         if new_status not in valid_statuses:
             raise ValueError(f"Invalid order status '{new_status}'. Must be one of: {valid_statuses}")
@@ -218,9 +218,9 @@ class StatusService:
         if fulfilled_qty >= total_qty:
             new_status = "completed"
         elif fulfilled_qty > 0:
-            new_status = "partially_fulfilled"
+            new_status = "in_process"
         else:
-            new_status = "pending"
+            new_status = "created"
         
         self.update_order_status(
             original_order,

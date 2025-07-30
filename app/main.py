@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Import router after logging is configured
-from .api import router
+from .api_router import api_router
 from . import database, init_db
 
 app = FastAPI(
@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # Include API router
-app.include_router(router, prefix="/api")
+app.include_router(api_router)
 
 @app.on_event("startup")
 async def startup_event():

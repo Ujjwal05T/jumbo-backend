@@ -191,7 +191,7 @@ class PendingOrderService:
                     if remaining_pending == 0:
                         self.status_service.update_status(
                             original_order,
-                            "processing",
+                            "in_process",
                             f"All pending items resolved with jumbo roll {jumbo_roll_id}",
                             commit=False
                         )

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException
 import logging
 
-from .. import models, crud, schemas
+from .. import models, crud_operations, schemas
 from .cutting_optimizer import CuttingOptimizer
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,10 @@ class WorkflowManager:
         """
         try:
             # NEW FLOW: Get order requirements directly (no inventory check)
-            order_requirements = crud.get_orders_with_paper_specs(self.db, order_ids)
+            order_requirements = crud_operations.get_orders_with_paper_specs(self.db, order_ids)
+            
+            # Store order requirements for later use in plan linking
+            self.processed_order_requirements = order_requirements
             
             if not order_requirements:
                 return {
@@ -54,7 +57,7 @@ class WorkflowManager:
             
             # NEW FLOW: Fetch pending orders for same paper specifications
             logger.info(f"🔍 DEBUG WF: Fetching pending orders for paper specs: {paper_specs}")
-            pending_orders = crud.get_pending_orders_by_paper_specs(self.db, paper_specs)
+            pending_orders = crud_operations.get_pending_orders_by_specs(self.db, paper_specs)
             logger.info(f"📋 DEBUG WF: Found {len(pending_orders)} pending order items")
             
             pending_requirements = []
@@ -77,7 +80,7 @@ class WorkflowManager:
             logger.info(f"📊 DEBUG WF: Final pending_requirements: {pending_requirements}")
             
             # NEW FLOW: Fetch available inventory (20-25" waste rolls)
-            available_inventory_items = crud.get_available_inventory_by_paper_specs(self.db, paper_specs)
+            available_inventory_items = crud_operations.get_available_inventory_by_paper_specs(self.db, paper_specs)
             available_inventory = []
             for inv_item in available_inventory_items:
                 if inv_item.paper:
@@ -193,12 +196,13 @@ class WorkflowManager:
                 self.db.flush()  # Get ID
                 created_plans.append(plan)
                 
-                # Link orders to plan
-                for order_id in order_ids:
+                # Link order items to plan using the processed requirements
+                for requirement in self.processed_order_requirements:
                     plan_order_link = models.PlanOrderLink(
                         plan_id=plan.id,
-                        order_id=order_id,
-                        quantity_allocated=1  # Will be calculated properly later
+                        order_id=uuid.UUID(requirement['order_id']),
+                        order_item_id=uuid.UUID(requirement['order_item_id']),
+                        quantity_allocated=requirement['quantity']  # Use actual quantity
                     )
                     self.db.add(plan_order_link)
             
@@ -213,7 +217,7 @@ class WorkflowManager:
                 
                 for gsm, bf, shade in paper_specs_for_production:
                     # Find or create paper master
-                    paper = crud.get_paper_by_specs(self.db, gsm=gsm, bf=bf, shade=shade)
+                    paper = crud_operations.get_paper_by_specs(self.db, gsm=gsm, bf=bf, shade=shade)
                     if not paper and self.user_id:
                         paper_data = type('PaperCreate', (), {
                             'name': f"{shade} {gsm}GSM BF{bf}",
@@ -223,7 +227,7 @@ class WorkflowManager:
                             'type': 'standard',
                             'created_by_id': self.user_id
                         })()
-                        paper = crud.create_paper(self.db, paper_data)
+                        paper = crud_operations.create_paper(self.db, paper_data)
                     
                     if paper:
                         production_order = models.ProductionOrderMaster(
@@ -238,10 +242,32 @@ class WorkflowManager:
             
             # OUTPUT 3: Create Pending Orders from pending_orders
             if optimization_result.get('pending_orders'):
-                created_pending_records = crud.bulk_create_pending_orders(
+                # Enhance pending orders with original order information
+                enhanced_pending_orders = []
+                for pending in optimization_result['pending_orders']:
+                    # Find matching order requirement to get original_order_id
+                    matching_requirement = None
+                    for req in self.processed_order_requirements:
+                        if (req['gsm'] == pending['gsm'] and 
+                            req['bf'] == pending['bf'] and 
+                            req['shade'] == pending['shade'] and
+                            abs(req['width'] - pending['width']) < 0.1):  # Allow small width differences
+                            matching_requirement = req
+                            break
+                    
+                    enhanced_pending = pending.copy()
+                    if matching_requirement:
+                        enhanced_pending['original_order_id'] = matching_requirement['order_id']
+                    else:
+                        # Use the first order ID as fallback
+                        enhanced_pending['original_order_id'] = order_ids[0] if order_ids else None
+                    
+                    enhanced_pending_orders.append(enhanced_pending)
+                
+                created_pending_records = crud_operations.bulk_create_pending_orders(
                     self.db,
-                    optimization_result['pending_orders'],
-                    order_ids
+                    enhanced_pending_orders,
+                    self.user_id
                 )
                 created_pending.extend(created_pending_records)
             
@@ -252,45 +278,125 @@ class WorkflowManager:
                     if inv.get('source') == 'waste'
                 ]
                 if waste_items and self.user_id:
-                    created_inventory_records = crud.create_inventory_from_waste(
+                    created_inventory_records = crud_operations.create_inventory_from_waste(
                         self.db,
                         waste_items,
                         self.user_id
                     )
                     created_inventory.extend(created_inventory_records)
             
-            # Update order statuses to "processing" (ready for fulfillment)
+            # Update order statuses to "in_process" (ready for fulfillment)
             for order_id in order_ids:
-                order = crud.get_order(self.db, order_id)
+                order = crud_operations.get_order(self.db, order_id)
                 if order:
-                    order.status = schemas.OrderStatus.PROCESSING.value
+                    order.status = schemas.OrderStatus.IN_PROCESS.value
                     order.updated_at = datetime.utcnow()
                     updated_orders.append(str(order_id))
             
             self.db.commit()
             
+            # Calculate summary statistics and enhance cut rolls with paper_id
+            cut_rolls_generated = optimization_result.get('cut_rolls_generated', [])
+            
+            # Enhance cut rolls with paper_id by looking up paper master records
+            logger.info(f"🔍 DEBUG WF: Starting paper_id enhancement for {len(cut_rolls_generated)} cut rolls")
+            enhanced_cut_rolls = []
+            for i, cut_roll in enumerate(cut_rolls_generated):
+                logger.info(f"🔍 DEBUG WF: Processing cut roll {i+1}: {cut_roll}")
+                enhanced_roll = cut_roll.copy()
+                
+                # FALLBACK: Map to paper_id from order requirements (simpler and more reliable)
+                paper_id_found = False
+                if 'gsm' in cut_roll and 'bf' in cut_roll and 'shade' in cut_roll:
+                    logger.info(f"🔍 DEBUG WF: Looking for paper_id from order requirements for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']}")
+                    
+                    # Try to find matching order requirement
+                    for req in self.processed_order_requirements:
+                        if (req.get('gsm') == cut_roll['gsm'] and 
+                            req.get('bf') == cut_roll['bf'] and 
+                            req.get('shade') == cut_roll['shade']):
+                            enhanced_roll['paper_id'] = req['paper_id']
+                            logger.info(f"✅ DEBUG WF: Found paper_id from order requirement: {req['paper_id']}")
+                            paper_id_found = True
+                            break
+                    
+                    # If no match found in order requirements, try database lookup
+                    if not paper_id_found:
+                        logger.info(f"🔍 DEBUG WF: No match in order requirements, trying database lookup")
+                        try:
+                            paper = crud_operations.get_paper_by_specs(
+                                self.db, 
+                                gsm=cut_roll['gsm'], 
+                                bf=cut_roll['bf'], 
+                                shade=cut_roll['shade']
+                            )
+                            if paper:
+                                enhanced_roll['paper_id'] = str(paper.id)
+                                logger.info(f"✅ DEBUG WF: Found existing paper in DB with ID: {paper.id}")
+                                paper_id_found = True
+                            else:
+                                logger.info(f"📝 DEBUG WF: Paper not found in DB, using first order requirement paper_id as fallback")
+                                # Use first order requirement's paper_id as fallback
+                                if self.processed_order_requirements:
+                                    enhanced_roll['paper_id'] = self.processed_order_requirements[0]['paper_id']
+                                    logger.info(f"✅ DEBUG WF: Using fallback paper_id: {enhanced_roll['paper_id']}")
+                                    paper_id_found = True
+                        except Exception as paper_error:
+                            logger.error(f"❌ DEBUG WF: Error in paper lookup: {paper_error}")
+                
+                    if not paper_id_found:
+                        enhanced_roll['paper_id'] = ''
+                        logger.error(f"❌ DEBUG WF: Could not find any paper_id for cut roll")
+                else:
+                    logger.error(f"❌ DEBUG WF: Cut roll missing paper specs: gsm={cut_roll.get('gsm')}, bf={cut_roll.get('bf')}, shade={cut_roll.get('shade')}")
+                    enhanced_roll['paper_id'] = ''
+                    
+                logger.info(f"🔍 DEBUG WF: Enhanced roll {i+1} paper_id: '{enhanced_roll.get('paper_id', 'MISSING')}'")
+                enhanced_cut_rolls.append(enhanced_roll)
+            
+            logger.info(f"🔍 DEBUG WF: Finished enhancing {len(enhanced_cut_rolls)} cut rolls")
+            
+            total_cut_rolls = len(enhanced_cut_rolls)
+            total_pending_orders = len(created_pending)
+            total_pending_quantity = sum(po.quantity_pending for po in created_pending)
+            total_inventory_created = len(created_inventory)
+            
             return {
                 "status": "success",
-                "cut_rolls_generated": optimization_result.get('cut_rolls_generated', []),
+                "cut_rolls_generated": enhanced_cut_rolls,
                 "jumbo_rolls_needed": optimization_result.get('jumbo_rolls_needed', 0),
-                "pending_orders_created": [
+                "pending_orders": [
                     {
                         "width": float(po.width_inches),
                         "quantity": po.quantity_pending,
-                        "gsm": po.paper.gsm if po.paper else 90,
-                        "bf": float(po.paper.bf) if po.paper else 18.0,
-                        "shade": po.paper.shade if po.paper else "white",
+                        "gsm": po.gsm,
+                        "bf": float(po.bf),
+                        "shade": po.shade,
                         "reason": po.reason
                     } for po in created_pending
                 ],
-                "inventory_created": [
+                "inventory_remaining": [
                     {
                         "id": str(inv.id),
                         "width": float(inv.width_inches),
-                        "weight": float(inv.weight_kg),
+                        "quantity": 1,  # Each inventory record represents 1 item
+                        "gsm": 90,  # Default values for waste inventory
+                        "bf": 18.0,
+                        "shade": "white",
                         "source": "waste"
                     } for inv in created_inventory
                 ],
+                "summary": {
+                    "total_cut_rolls": total_cut_rolls,
+                    "total_individual_118_rolls": optimization_result.get('summary', {}).get('total_individual_118_rolls', 0),
+                    "total_jumbo_rolls_needed": optimization_result.get('jumbo_rolls_needed', 0),
+                    "total_pending_orders": total_pending_orders,
+                    "total_pending_quantity": total_pending_quantity,
+                    "total_inventory_created": total_inventory_created,
+                    "specification_groups_processed": len(set((cr.get('gsm'), cr.get('shade'), cr.get('bf')) for cr in enhanced_cut_rolls)),
+                    "high_trim_patterns": 0,  # TODO: Calculate from optimization result
+                    "algorithm_note": "NEW FLOW: 3-input/4-output optimization"
+                },
                 "orders_updated": updated_orders,
                 "plans_created": [str(p.id) for p in created_plans],
                 "production_orders_created": [str(po.id) for po in created_production]
@@ -325,8 +431,8 @@ class WorkflowManager:
                     'inventory_ids': []  # Will be populated when inventory is allocated
                 }
                 
-                # Create plan using CRUD
-                plan_master = crud.create_plan(self.db, type('PlanCreate', (), plan_data)())
+                # Create plan using crud_operations
+                plan_master = crud_operations.create_plan(self.db, type('PlanCreate', (), plan_data)())
                 plans_created.append(plan_master)
                 
                 # Update order fulfillment tracking
@@ -411,7 +517,7 @@ class WorkflowManager:
             paper_spec = {'gsm': 90, 'bf': 18.0, 'shade': 'white', 'type': 'standard'}
         
         # Try to find existing paper master
-        paper = crud.get_paper_by_specs(
+        paper = crud_operations.get_paper_by_specs(
             self.db,
             gsm=paper_spec.get('gsm', 90),
             bf=paper_spec.get('bf', 18.0),
@@ -420,7 +526,7 @@ class WorkflowManager:
         )
         
         if not paper:
-            # Create new paper master using CRUD
+            # Create new paper master using crud_operations
             paper_data = type('PaperCreate', (), {
                 'gsm': paper_spec.get('gsm', 90),
                 'bf': paper_spec.get('bf', 18.0),
@@ -428,7 +534,7 @@ class WorkflowManager:
                 'type': paper_spec.get('type', 'standard'),
                 'created_by_id': self.user_id
             })()
-            paper = crud.create_paper(self.db, paper_data)
+            paper = crud_operations.create_paper(self.db, paper_data)
         
         return paper
     
@@ -529,11 +635,11 @@ class WorkflowManager:
         """Get overall workflow status and metrics using master-based architecture."""
         # Get counts of various statuses using master tables
         pending_orders = self.db.query(models.OrderMaster).filter(
-            models.OrderMaster.status == schemas.OrderStatus.PENDING.value
+            models.OrderMaster.status == schemas.OrderStatus.CREATED.value
         ).count()
         
         partial_orders = self.db.query(models.OrderMaster).filter(
-            models.OrderMaster.status == schemas.OrderStatus.PARTIALLY_FULFILLED.value
+            models.OrderMaster.status == schemas.OrderStatus.IN_PROCESS.value
         ).count()
         
         planned_cuts = self.db.query(models.PlanMaster).filter(
@@ -551,8 +657,8 @@ class WorkflowManager:
         
         return {
             "orders": {
-                "pending": pending_orders,
-                "partially_fulfilled": partial_orders,
+                "created": pending_orders,
+                "in_process": partial_orders,
                 "total_needing_attention": pending_orders + partial_orders
             },
             "cutting_plans": {

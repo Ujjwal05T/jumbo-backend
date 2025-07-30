@@ -10,15 +10,20 @@ from typing import Optional, List, Dict, Any
 
 # Status Enums
 class OrderStatus(str, PyEnum):
-    PENDING = "pending"
-    PROCESSING = "processing"
-    PARTIALLY_FULFILLED = "partially_fulfilled"
+    CREATED = "created"
+    IN_PROCESS = "in_process"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 class PaymentType(str, PyEnum):
     BILL = "bill"
     CASH = "cash"
+
+class OrderItemStatus(str, PyEnum):
+    CREATED = "created"
+    IN_PROCESS = "in_process"
+    IN_WAREHOUSE = "in_warehouse"
+    COMPLETED = "completed"
 
 class InventoryStatus(str, PyEnum):
     AVAILABLE = "available"
@@ -41,7 +46,7 @@ class PlanStatus(str, PyEnum):
 
 class PendingOrderStatus(str, PyEnum):
     PENDING = "pending"
-    IN_PRODUCTION = "in_production"
+    INCLUDED_IN_PLAN = "included_in_plan"
     RESOLVED = "resolved"
     CANCELLED = "cancelled"
 
@@ -60,6 +65,7 @@ class ClientMaster(Base):
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     company_name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), nullable=True)
+    gst_number = Column(String(50), nullable=True, index=True)
     address = Column(Text, nullable=True)
     contact_person = Column(String(255), nullable=True)
     phone = Column(String(50), nullable=True)
@@ -126,14 +132,16 @@ class OrderMaster(Base):
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
-    status = Column(String(50), default=OrderStatus.PENDING, nullable=False, index=True)
+    status = Column(String(50), default=OrderStatus.CREATED, nullable=False, index=True)
     priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
     payment_type = Column(String(20), default=PaymentType.BILL, nullable=False)  # bill, cash
     delivery_date = Column(DateTime, nullable=True)
-    notes = Column(Text, nullable=True)
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    started_production_at = Column(DateTime, nullable=True)
+    moved_to_warehouse_at = Column(DateTime, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
     
     # Relationships
     client = relationship("ClientMaster", back_populates="orders")
@@ -165,14 +173,18 @@ class OrderItem(Base):
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
-    width_inches = Column(Integer, nullable=False)
+    width_inches = Column(Numeric(6, 2), nullable=False)
     quantity_rolls = Column(Integer, nullable=False)
     quantity_kg = Column(Numeric(10, 2), nullable=False)  # Weight in kg
     rate = Column(Numeric(10, 2), nullable=False)  # Rate per unit
     amount = Column(Numeric(12, 2), nullable=False)  # Total amount (quantity_kg * rate)
     quantity_fulfilled = Column(Integer, default=0, nullable=False)
+    item_status = Column(String(50), default=OrderItemStatus.CREATED, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    started_production_at = Column(DateTime, nullable=True)
+    moved_to_warehouse_at = Column(DateTime, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
     
     # Relationships
     order = relationship("OrderMaster", back_populates="order_items")
@@ -206,7 +218,7 @@ class PendingOrderMaster(Base):
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     order_item_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_item.id"), nullable=False, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
-    width_inches = Column(Integer, nullable=False)
+    width_inches = Column(Numeric(6, 2), nullable=False)
     quantity_pending = Column(Integer, nullable=False)
     reason = Column(String(100), nullable=False)  # no_inventory, no_jumbo, etc.
     status = Column(String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
@@ -226,7 +238,7 @@ class PendingOrderItem(Base):
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     original_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
-    width_inches = Column(Integer, nullable=False)
+    width_inches = Column(Numeric(6, 2), nullable=False)
     gsm = Column(Integer, nullable=False)
     bf = Column(Numeric(4, 2), nullable=False)
     shade = Column(String(50), nullable=False)
@@ -249,7 +261,7 @@ class InventoryMaster(Base):
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
-    width_inches = Column(Integer, nullable=False, index=True)
+    width_inches = Column(Numeric(6, 2), nullable=False, index=True)
     weight_kg = Column(Numeric(8, 2), nullable=False)
     roll_type = Column(String(20), nullable=False, index=True)  # jumbo, cut
     location = Column(String(100), nullable=True)
@@ -390,3 +402,71 @@ class CutRollProduction(Base):
     client = relationship("ClientMaster")
     created_by = relationship("UserMaster", foreign_keys=[created_by_id])
     weight_recorded_by = relationship("UserMaster", foreign_keys=[weight_recorded_by_id])
+
+# ============================================================================
+# DISPATCH TRACKING
+# ============================================================================
+
+class DispatchRecord(Base):
+    """
+    Track bulk dispatch of cut rolls with vehicle and driver details
+    """
+    __tablename__ = "dispatch_record"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    
+    # Dispatch details
+    vehicle_number = Column(String(50), nullable=False)
+    driver_name = Column(String(255), nullable=False)
+    driver_mobile = Column(String(20), nullable=False)
+    
+    # Payment and reference
+    payment_type = Column(String(20), nullable=False, default="bill")  # bill/cash
+    dispatch_date = Column(DateTime, nullable=False, default=datetime.utcnow)
+    dispatch_number = Column(String(100), nullable=False)  # Internal dispatch number
+    reference_number = Column(String(100), nullable=True)  # External reference
+    
+    # Client and order info
+    client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
+    primary_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)  # Main order if single
+    order_date = Column(DateTime, nullable=True)
+    
+    # Status and tracking
+    status = Column(String(50), default="dispatched", nullable=False)  # dispatched, delivered, returned
+    total_items = Column(Integer, nullable=False, default=0)
+    total_weight_kg = Column(Numeric(10, 2), nullable=False, default=0)
+    
+    # User tracking
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    delivered_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    client = relationship("ClientMaster")
+    primary_order = relationship("OrderMaster")
+    created_by = relationship("UserMaster")
+    dispatch_items = relationship("DispatchItem", back_populates="dispatch_record")
+
+class DispatchItem(Base):
+    """
+    Individual cut rolls in a dispatch record
+    """
+    __tablename__ = "dispatch_item"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    dispatch_record_id = Column(UNIQUEIDENTIFIER, ForeignKey("dispatch_record.id"), nullable=False, index=True)
+    inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=False, index=True)
+    
+    # Cut roll details (denormalized for tracking)
+    qr_code = Column(String(255), nullable=False)
+    width_inches = Column(Numeric(6, 2), nullable=False)
+    weight_kg = Column(Numeric(8, 2), nullable=False)
+    paper_spec = Column(String(255), nullable=False)  # "90gsm, 18.0bf, white"
+    
+    # Status tracking
+    status = Column(String(50), default="dispatched", nullable=False)
+    dispatched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    dispatch_record = relationship("DispatchRecord", back_populates="dispatch_items")
+    inventory = relationship("InventoryMaster")

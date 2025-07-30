@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import uuid
 
-from .. import models, schemas, crud
+from .. import models, schemas, crud_operations
 
 class CutRollStatus(str, Enum):
     AVAILABLE = "available"
@@ -162,12 +162,14 @@ class CuttingOptimizer:
         print(f"Combined Requirements: {all_requirements}")
         
         # Group all requirements by complete specification (GSM + Shade + BF)
+        # This ensures that different paper types are NEVER mixed in the same jumbo roll
+        # Each jumbo roll will contain only 3 sets of 118" rolls with identical paper specs
         spec_groups = {}
         print(f"\n🔍 DEBUG: Grouping requirements by specification...")
         
         for i, req in enumerate(all_requirements):
             print(f"  Processing requirement {i+1}: {req}")
-            # Create unique key for paper specification
+            # Create unique key for paper specification - CRITICAL for avoiding paper mixing
             spec_key = (req['gsm'], req['shade'], req['bf'])
             print(f"  Spec key: {spec_key}")
             
@@ -314,9 +316,39 @@ class CuttingOptimizer:
                             'from_individual_roll': individual_118_rolls_needed
                         })
             
-            # Calculate jumbo roll sets needed for this specification (1 jumbo = 3 individual 118" rolls)
-            jumbo_sets_needed_for_spec = (individual_118_rolls_needed + 2) // 3  # Round up division
-            jumbo_rolls_needed += jumbo_sets_needed_for_spec
+            # CORRECTED JUMBO ROLL CALCULATION: 1 Jumbo Roll = 3 individual 118" rolls
+            # This is the critical fix from the implementation plan
+            complete_jumbo_rolls = individual_118_rolls_needed // 3
+            remaining_individual_rolls = individual_118_rolls_needed % 3
+            
+            # Only count complete jumbo rolls for procurement
+            jumbo_rolls_needed += complete_jumbo_rolls
+            
+            # If there are remaining individual rolls, we need one more jumbo roll
+            if remaining_individual_rolls > 0:
+                jumbo_rolls_needed += 1
+                
+                # Calculate how many sets will be unused from this extra jumbo roll
+                unused_sets_from_extra_jumbo = 3 - remaining_individual_rolls
+                
+                print(f"   📊 CORRECTED Jumbo calculation for spec {spec_key}:")
+                print(f"     Individual 118\" rolls needed: {individual_118_rolls_needed}")
+                print(f"     Complete jumbo rolls: {complete_jumbo_rolls}")
+                print(f"     Remaining individual rolls: {remaining_individual_rolls}")
+                print(f"     Extra jumbo roll needed: {'Yes' if remaining_individual_rolls > 0 else 'No'}")
+                print(f"     Unused sets from extra jumbo: {unused_sets_from_extra_jumbo if remaining_individual_rolls > 0 else 0}")
+                print(f"     Total jumbo rolls for this spec: {complete_jumbo_rolls + (1 if remaining_individual_rolls > 0 else 0)}")
+                
+                # The unused sets from the extra jumbo roll become available for future orders
+                # This is more accurate than sending them to pending orders
+                if unused_sets_from_extra_jumbo > 0:
+                    print(f"   ✅ {unused_sets_from_extra_jumbo} sets from extra jumbo roll will be available for future orders")
+                    # These don't go to pending orders - they're just extra capacity we'll have
+            else:
+                print(f"   📊 CORRECTED Jumbo calculation for spec {spec_key}:")
+                print(f"     Individual 118\" rolls needed: {individual_118_rolls_needed}")
+                print(f"     Complete jumbo rolls needed: {complete_jumbo_rolls}")
+                print(f"     Perfect fit - no extra jumbo roll needed")
             
             # Add orders that couldn't be fulfilled to pending
             if orders_copy:
@@ -360,18 +392,19 @@ class CuttingOptimizer:
         # NEW FLOW: Return 4 distinct outputs
         return {
             'cut_rolls_generated': cut_rolls_generated,
-            'jumbo_roll_sets_needed': jumbo_rolls_needed,  # Updated: This is now jumbo roll SETS (1 set = 3×118" rolls)
+            'jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: 1 jumbo roll = 3 sets of 118" rolls
             'pending_orders': new_pending_orders,
             'inventory_remaining': inventory_remaining,
             'summary': {
                 'total_cut_rolls': total_cut_rolls,
                 'total_individual_118_rolls': total_individual_118_rolls,
-                'total_jumbo_roll_sets_needed': jumbo_rolls_needed,  # 1 set = 3×118" rolls
+                'total_jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: Each jumbo roll produces 3×118" rolls
                 'total_pending_orders': len(new_pending_orders),
                 'total_pending_quantity': total_pending,
                 'total_inventory_created': total_inventory_created,
                 'specification_groups_processed': len(spec_groups),
-                'high_trim_patterns': len(all_high_trims)
+                'high_trim_patterns': len(all_high_trims),
+                'algorithm_note': 'CORRECTED: 1 jumbo roll = 3 individual 118" rolls, same paper specs only'
             },
             'high_trim_approved': all_high_trims
         }
@@ -474,7 +507,7 @@ class CuttingOptimizer:
         # Fetch orders from database
         orders = []
         for order_id in order_ids:
-            order = crud.get_order(db, order_id)
+            order = crud_operations.get_order(db, order_id)
             if not order:
                 raise ValueError(f"Order with ID {order_id} not found")
             orders.append(order)
@@ -483,7 +516,7 @@ class CuttingOptimizer:
         order_requirements = []
         for order in orders:
             # Get paper specifications
-            paper = crud.get_paper(db, order.paper_id)
+            paper = crud_operations.get_paper(db, order.paper_id)
             if not paper:
                 raise ValueError(f"Paper not found for order {order.id}")
             
@@ -509,7 +542,7 @@ class CuttingOptimizer:
             inventory_ids=[]  # Will be populated when inventory is allocated
         )
         
-        return crud.create_plan(db, plan_data)
+        return crud_operations.create_plan(db, plan_data)
 
     def get_order_requirements_from_db(
         self,
@@ -529,12 +562,12 @@ class CuttingOptimizer:
         order_requirements = []
         
         for order_id in order_ids:
-            order = crud.get_order(db, order_id)
+            order = crud_operations.get_order(db, order_id)
             if not order:
                 continue
                 
             # Get paper specifications
-            paper = crud.get_paper(db, order.paper_id)
+            paper = crud_operations.get_paper(db, order.paper_id)
             if not paper:
                 continue
             

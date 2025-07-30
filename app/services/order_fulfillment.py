@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 class OrderFulfillmentService:
     """
-    Service to handle order fulfillment using master-based architecture.
-    Implements the flow: OrderMaster → PendingOrderMaster → PlanMaster
+    Service to handle manual order fulfillment using master-based architecture.
+    NEW FLOW: Orders → WorkflowManager.process_multiple_orders() → Direct to optimization
+    This service now only handles manual fulfillment tracking, not automatic inventory checking.
     """
     def __init__(self, db: Session, user_id: Optional[uuid.UUID] = None):
         self.db = db
@@ -63,7 +64,7 @@ class OrderFulfillmentService:
                 order.status = "completed"
                 status_message = "Order fully fulfilled"
             else:
-                order.status = "partially_fulfilled"
+                order.status = "in_process"
                 status_message = f"Order partially fulfilled: {order.quantity_fulfilled}/{order.quantity_rolls}"
             
             self.db.commit()
@@ -105,51 +106,8 @@ class OrderFulfillmentService:
             
         return order
 
-    def _fulfill_from_inventory(self, order: models.OrderMaster) -> bool:
-        """
-        Try to fulfill order from existing inventory using master-based architecture.
-        Returns True if any quantity was fulfilled from inventory.
-        """
-        if not order.paper:
-            logger.warning(f"Order {order.id} has no associated paper")
-            return False
-        
-        # Find matching inventory items
-        matching_inventory = self.db.query(models.InventoryMaster).filter(
-            models.InventoryMaster.paper_id == order.paper_id,
-            models.InventoryMaster.width_inches == order.width_inches,
-            models.InventoryMaster.status == "available",
-            models.InventoryMaster.roll_type == "cut",
-            models.InventoryMaster.allocated_order_id.is_(None)
-        ).order_by(models.InventoryMaster.created_at).all()
-        
-        remaining_qty = order.quantity - (order.quantity_fulfilled or 0)
-        allocated = 0
-        
-        for inventory_item in matching_inventory:
-            if allocated >= remaining_qty:
-                break
-                
-            # Allocate this inventory item to the order
-            inventory_item.allocated_order_id = order.id
-            inventory_item.status = "allocated"
-            inventory_item.updated_at = datetime.utcnow()
-            allocated += 1
-        
-        if allocated > 0:
-            # Update order fulfillment
-            order.quantity_fulfilled = (order.quantity_fulfilled or 0) + allocated
-            
-            # Update order status
-            if order.quantity_fulfilled >= order.quantity:
-                order.status = "completed"
-            else:
-                order.status = "partially_fulfilled"
-            
-            logger.info(f"Fulfilled {allocated} rolls from inventory for order {order.id}")
-            return True
-        
-        return False
+    # OLD FLOW REMOVED: _fulfill_from_inventory() method
+    # New flow always goes directly to cutting optimization
 
     def bulk_fulfill_orders(self, fulfillment_requests: List[Dict]) -> Dict:
         """
@@ -503,8 +461,8 @@ class OrderFulfillmentService:
         """
         if order.status == "completed":
             return "completed"
-        elif order.status == "partially_fulfilled" and not pending_orders:
-            return "partially_fulfilled_no_pending"
+        elif order.status == "in_process" and not pending_orders:
+            return "in_process_no_pending"
         elif pending_orders and any(p.status == "pending" for p in pending_orders):
             return "pending_orders_created"
         elif pending_orders and any(p.status == "planned" for p in pending_orders):
@@ -555,55 +513,6 @@ class OrderFulfillmentService:
             "results": results
         }
     
-    def execute_complete_fulfillment_flow(self, order_ids: List[uuid.UUID]) -> Dict:
-        """
-        Execute the complete OrderMaster → PendingOrderMaster → PlanMaster flow for multiple orders.
-        This is the main method that demonstrates the full data flow implementation.
-        """
-        try:
-            results = []
-            
-            for order_id in order_ids:
-                # Step 1: Get order with relationships
-                order = self._get_order_with_relationships(order_id)
-                
-                # Step 2: Try inventory fulfillment
-                inventory_fulfilled = self._fulfill_from_inventory(order)
-                
-                # Step 3: Create pending order for remaining quantity
-                remaining_qty = order.quantity - (order.quantity_fulfilled or 0)
-                if remaining_qty > 0:
-                    pending_order = self._create_pending_order_from_order(order)
-                    
-                    # Step 4: Create plan from pending order
-                    plan_result = self._create_plan_from_pending_orders([pending_order])
-                    
-                    results.append({
-                        "order_id": str(order_id),
-                        "inventory_fulfilled": inventory_fulfilled,
-                        "pending_order_created": str(pending_order.id),
-                        "plan_result": plan_result
-                    })
-                else:
-                    results.append({
-                        "order_id": str(order_id),
-                        "inventory_fulfilled": inventory_fulfilled,
-                        "status": "completed_from_inventory"
-                    })
-            
-            self.db.commit()
-            
-            return {
-                "status": "flow_completed",
-                "orders_processed": len(order_ids),
-                "results": results,
-                "message": "Complete OrderMaster → PendingOrderMaster → PlanMaster flow executed"
-            }
-            
-        except Exception as e:
-            self.db.rollback()
-            logger.error(f"Complete fulfillment flow failed: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Complete fulfillment flow failed: {str(e)}"
-            )
+    # OLD FLOW REMOVED: execute_complete_fulfillment_flow() method
+    # This used the old flow: inventory check → then planning
+    # New flow always goes directly to WorkflowManager.process_multiple_orders()
