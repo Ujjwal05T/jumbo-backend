@@ -30,11 +30,48 @@ def get_plans(
     skip: int = 0,
     limit: int = 100,
     status: str = None,
+    client_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
     db: Session = Depends(get_db)
 ):
-    """Get all cutting plans with pagination and status filter"""
+    """Get all cutting plans with pagination and enhanced filtering"""
     try:
-        return crud_operations.get_plans(db=db, skip=skip, limit=limit, status=status)
+        from datetime import datetime
+        from .. import models
+        
+        query = db.query(models.PlanMaster)
+        
+        # Apply status filter
+        if status and status != "all":
+            query = query.filter(models.PlanMaster.status == status)
+        
+        # Apply client filter
+        if client_id and client_id != "all":
+            # Join with plan_order_link to get orders, then filter by client
+            query = query.join(models.PlanOrderLink).join(models.OrderMaster).filter(
+                models.OrderMaster.client_id == client_id
+            )
+        
+        # Apply date filters
+        if date_from:
+            try:
+                date_from_obj = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+                query = query.filter(models.PlanMaster.created_at >= date_from_obj)
+            except ValueError:
+                pass
+        
+        if date_to:
+            try:
+                date_to_obj = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+                query = query.filter(models.PlanMaster.created_at <= date_to_obj)
+            except ValueError:
+                pass
+        
+        # Apply pagination and ordering
+        plans = query.order_by(models.PlanMaster.created_at.desc()).offset(skip).limit(limit).all()
+        
+        return plans
     except Exception as e:
         logger.error(f"Error getting plans: {e}")
         raise HTTPException(status_code=500, detail=str(e))

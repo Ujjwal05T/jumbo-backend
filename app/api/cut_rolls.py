@@ -124,36 +124,108 @@ async def select_cut_rolls_for_production(
 
 @router.get("/cut-rolls/production/{plan_id}", response_model=Dict[str, Any], tags=["Cut Roll Production"])
 def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)):
-    """Get summary of cut roll production for a specific plan"""
+    """Get summary of cut roll production for a specific plan using InventoryMaster"""
     try:
+        from .. import models
+        
         # Get plan details
         plan = crud_operations.get_plan(db=db, plan_id=plan_id)
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
         
-        # Get inventory items associated with this plan (through plan inventory links)
-        plan_inventory = []
-        if hasattr(plan, 'plan_inventory'):
-            plan_inventory = plan.plan_inventory
+        logger.info(f"Getting cut roll summary for plan {plan_id}")
         
-        # Get all cut roll inventory items with status related to this plan
-        cut_roll_inventory = crud_operations.get_inventory_by_type(db=db, roll_type="cut", skip=0, limit=1000)
+        # Method 1: Get cut rolls linked to this plan via PlanInventoryLink
+        cut_rolls_via_link = db.query(models.InventoryMaster).join(
+            models.PlanInventoryLink, 
+            models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
+        ).filter(
+            models.PlanInventoryLink.plan_id == plan_id,
+            models.InventoryMaster.roll_type == "cut"
+        ).all()
         
-        # Filter items created around the same time as plan execution
-        plan_related_items = []
+        logger.info(f"Found {len(cut_rolls_via_link)} cut rolls via PlanInventoryLink")
+        
+        # Method 2: Get all cut rolls created around the time of plan execution
+        # This is a fallback for when PlanInventoryLink is not properly maintained
+        cut_rolls_by_time = []
         if plan.executed_at:
-            for item in cut_roll_inventory:
-                # Items created after plan execution are likely related
-                if item.created_at >= plan.executed_at:
-                    plan_related_items.append(item)
+            # Get cut rolls created within a reasonable time window around plan execution
+            from datetime import timedelta
+            time_window = timedelta(hours=24)  # 24 hour window
+            
+            cut_rolls_by_time = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.roll_type == "cut",
+                models.InventoryMaster.created_at >= plan.executed_at - time_window,
+                models.InventoryMaster.created_at <= plan.executed_at + time_window
+            ).all()
+            
+            logger.info(f"Found {len(cut_rolls_by_time)} cut rolls by time window around {plan.executed_at}")
+        
+        # Method 3: If no specific linking exists, get recent cut rolls (last 7 days) as fallback
+        if not cut_rolls_via_link and not cut_rolls_by_time:
+            from datetime import datetime, timedelta
+            recent_cutoff = datetime.utcnow() - timedelta(days=7)
+            
+            cut_rolls_by_time = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.roll_type == "cut",
+                models.InventoryMaster.created_at >= recent_cutoff
+            ).order_by(models.InventoryMaster.created_at.desc()).limit(50).all()
+            
+            logger.info(f"Using fallback: Found {len(cut_rolls_by_time)} recent cut rolls")
+        
+        # Combine and deduplicate cut rolls
+        all_cut_rolls_raw = cut_rolls_via_link + cut_rolls_by_time
+        seen_ids = set()
+        all_cut_rolls = []
+        
+        for inventory_item in all_cut_rolls_raw:
+            if inventory_item.id not in seen_ids:
+                seen_ids.add(inventory_item.id)
+                
+                # Get client info from allocated order or plan orders
+                client_name = "Unknown Client"
+                order_date = None
+                
+                # Try to get client from allocated order
+                if inventory_item.allocated_order and inventory_item.allocated_order.client:
+                    client_name = inventory_item.allocated_order.client.company_name
+                    order_date = inventory_item.allocated_order.created_at.isoformat()
+                
+                # If no allocated order, try to get client from plan orders
+                elif hasattr(plan, 'plan_orders') and plan.plan_orders:
+                    for plan_order in plan.plan_orders:
+                        if plan_order.order and plan_order.order.client:
+                            client_name = plan_order.order.client.company_name
+                            order_date = plan_order.order.created_at.isoformat()
+                            break
+                
+                all_cut_rolls.append({
+                    "inventory_id": str(inventory_item.id),
+                    "qr_code": inventory_item.qr_code or f"QR{str(inventory_item.id)[:8].upper()}",
+                    "width_inches": float(inventory_item.width_inches),
+                    "weight_kg": float(inventory_item.weight_kg),
+                    "status": inventory_item.status,
+                    "location": inventory_item.location or "warehouse",
+                    "created_at": inventory_item.created_at,
+                    "paper_specs": {
+                        "gsm": inventory_item.paper.gsm,
+                        "bf": float(inventory_item.paper.bf),
+                        "shade": inventory_item.paper.shade
+                    } if inventory_item.paper else None,
+                    "client_name": client_name,
+                    "order_date": order_date
+                })
+        
+        logger.info(f"Final result: {len(all_cut_rolls)} unique cut rolls")
         
         # Group items by status
         status_breakdown = {}
         total_weight = 0
-        total_rolls = 0
+        total_rolls = len(all_cut_rolls)
         
-        for item in plan_related_items:
-            status = item.status
+        for item in all_cut_rolls:
+            status = item["status"]
             if status not in status_breakdown:
                 status_breakdown[status] = {
                     "count": 0,
@@ -162,25 +234,36 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 }
             
             status_breakdown[status]["count"] += 1
-            status_breakdown[status]["total_weight"] += item.weight_kg
-            status_breakdown[status]["widths"].append(float(item.width_inches))
+            status_breakdown[status]["total_weight"] += item["weight_kg"]
+            status_breakdown[status]["widths"].append(item["width_inches"])
             
-            total_weight += item.weight_kg
-            total_rolls += 1
+            total_weight += item["weight_kg"]
         
         # Get paper specifications
         paper_specs = {}
-        for item in plan_related_items:
-            if item.paper:
-                spec_key = f"{item.paper.gsm}_{item.paper.bf}_{item.paper.shade}"
+        for item in all_cut_rolls:
+            if item["paper_specs"]:
+                spec_key = f"{item['paper_specs']['gsm']}_{item['paper_specs']['bf']}_{item['paper_specs']['shade']}"
                 if spec_key not in paper_specs:
                     paper_specs[spec_key] = {
-                        "gsm": item.paper.gsm,
-                        "bf": float(item.paper.bf),
-                        "shade": item.paper.shade,
+                        "gsm": item["paper_specs"]["gsm"],
+                        "bf": item["paper_specs"]["bf"],
+                        "shade": item["paper_specs"]["shade"],
                         "roll_count": 0
                     }
                 paper_specs[spec_key]["roll_count"] += 1
+        
+        # Get client information from orders linked to this plan
+        plan_order_links = []
+        client_info = {}
+        if hasattr(plan, 'plan_orders'):
+            plan_order_links = plan.plan_orders
+            for link in plan_order_links:
+                if link.order and link.order.client:
+                    client_info[str(link.order.id)] = {
+                        "client_name": link.order.client.company_name,
+                        "order_date": link.order.created_at.isoformat()
+                    }
         
         return {
             "plan_id": str(plan.id),
@@ -192,24 +275,23 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 "total_weight_kg": round(total_weight, 2),
                 "average_weight_per_roll": round(total_weight / total_rolls, 2) if total_rolls > 0 else 0,
                 "status_breakdown": status_breakdown,
-                "paper_specifications": list(paper_specs.values())
+                "paper_specifications": list(paper_specs.values()),
+                "client_orders": list(client_info.values())
             },
             "detailed_items": [
                 {
-                    "inventory_id": str(item.id),
-                    "width_inches": float(item.width_inches),
-                    "weight_kg": float(item.weight_kg),
-                    "status": item.status,
-                    "location": item.location,
-                    "qr_code": item.qr_code,
-                    "created_at": item.created_at.isoformat(),
-                    "paper_specs": {
-                        "gsm": item.paper.gsm,
-                        "bf": float(item.paper.bf),
-                        "shade": item.paper.shade
-                    } if item.paper else None
+                    "inventory_id": item["inventory_id"],
+                    "width_inches": item["width_inches"],
+                    "weight_kg": item["weight_kg"],
+                    "status": item["status"],
+                    "location": item["location"],
+                    "qr_code": item["qr_code"],
+                    "created_at": item["created_at"].isoformat() if hasattr(item["created_at"], 'isoformat') else str(item["created_at"]),
+                    "paper_specs": item["paper_specs"],
+                    "client_name": item["client_name"],
+                    "order_date": item["order_date"]
                 }
-                for item in plan_related_items
+                for item in all_cut_rolls
             ]
         }
         
@@ -268,4 +350,96 @@ def update_cut_roll_status(
         raise
     except Exception as e:
         logger.error(f"Error updating cut roll status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/cut-rolls/create-sample-data/{plan_id}", response_model=Dict[str, Any], tags=["Cut Roll Production"])
+def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
+    """Create sample cut roll inventory data for testing"""
+    try:
+        from .. import models
+        import uuid
+        from datetime import datetime
+        
+        # Get plan
+        plan = crud_operations.get_plan(db=db, plan_id=plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Get first available paper, client, and user for sample data
+        paper = db.query(models.PaperMaster).first()
+        client = db.query(models.ClientMaster).first()
+        order = db.query(models.OrderMaster).first()
+        user = db.query(models.UserMaster).first()
+        
+        if not all([paper, user]):
+            raise HTTPException(status_code=400, detail="Missing required master data (paper or user)")
+        
+        # Update plan executed_at if not set (for time-based linking)
+        if not plan.executed_at:
+            plan.executed_at = datetime.utcnow()
+            db.commit()
+        
+        # Create sample cut roll inventory records
+        sample_rolls = []
+        widths = [12, 18, 24, 30, 36]
+        statuses = ["available", "cutting", "available", "allocated", "available"]
+        locations = ["warehouse_a", "production_floor", "warehouse_b", "cutting_section", "quality_check"]
+        
+        for i in range(10):  # Create 10 sample rolls
+            qr_code = f"QR{plan_id.hex[:8].upper()}{i+1:03d}"
+            width = widths[i % len(widths)]
+            status = statuses[i % len(statuses)]
+            location = locations[i % len(locations)]
+            
+            # Create inventory item
+            inventory_item = models.InventoryMaster(
+                id=uuid.uuid4(),
+                paper_id=paper.id,
+                width_inches=width,
+                weight_kg=width * 13.5,  # Approximate weight calculation
+                roll_type="cut",
+                location=location,
+                status=status,
+                qr_code=qr_code,
+                production_date=datetime.utcnow(),
+                allocated_to_order_id=order.id if order and status == "allocated" else None,
+                created_by_id=user.id,
+                created_at=datetime.utcnow()
+            )
+            
+            db.add(inventory_item)
+            
+            # Create plan inventory link
+            plan_inventory_link = models.PlanInventoryLink(
+                id=uuid.uuid4(),
+                plan_id=plan_id,
+                inventory_id=inventory_item.id,
+                quantity_used=1.0  # One roll used
+            )
+            
+            db.add(plan_inventory_link)
+            
+            sample_rolls.append({
+                "inventory_id": str(inventory_item.id),
+                "qr_code": qr_code,
+                "width_inches": width,
+                "weight_kg": width * 13.5,
+                "status": status,
+                "location": location
+            })
+        
+        db.commit()
+        
+        return {
+            "message": f"Created {len(sample_rolls)} sample cut rolls for plan {plan_id}",
+            "plan_id": str(plan_id),
+            "sample_rolls": sample_rolls,
+            "note": "Cut rolls created in InventoryMaster with PlanInventoryLink connections"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating sample cut roll data: {e}")
         raise HTTPException(status_code=500, detail=str(e))

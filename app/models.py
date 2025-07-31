@@ -297,6 +297,7 @@ class PlanMaster(Base):
     created_by = relationship("UserMaster", back_populates="plans_created")
     plan_orders = relationship("PlanOrderLink", back_populates="plan")
     plan_inventory = relationship("PlanInventoryLink", back_populates="plan")
+    cut_roll_productions = relationship("CutRollProduction", back_populates="plan")
 
 # Production Order Master - Manufacturing queue for jumbo rolls
 class ProductionOrderMaster(Base):
