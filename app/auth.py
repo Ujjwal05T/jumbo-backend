@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import hashlib
 
-from . import crud, models, schemas, database
+from . import crud_operations, models, schemas, database
 
 # Set up HTTP Basic Auth
 security = HTTPBasic()
@@ -46,7 +46,7 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[mod
     Returns:
         UserMaster object if authentication successful, None otherwise
     """
-    user = crud.get_user_by_username(db, username)
+    user = crud_operations.get_user_by_username(db, username)
     if not user:
         return None
     
@@ -75,7 +75,7 @@ def register_user(db: Session, user_data: schemas.UserMasterCreate) -> models.Us
         HTTPException: If username already exists or other validation errors
     """
     # Check if username already exists
-    existing_user = crud.get_user_by_username(db, user_data.username)
+    existing_user = crud_operations.get_user_by_username(db, user_data.username)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -97,7 +97,7 @@ def register_user(db: Session, user_data: schemas.UserMasterCreate) -> models.Us
     )
     
     # Create user using CRUD
-    return crud.create_user(db, user_create_data)
+    return crud_operations.create_user(db, user_create_data)
 
 def get_current_user(
     credentials: HTTPBasicCredentials = Depends(security),

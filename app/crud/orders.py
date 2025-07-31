@@ -90,6 +90,53 @@ class CRUDOrder(CRUDBase[models.OrderMaster, schemas.OrderMasterCreate, schemas.
             db.refresh(db_order)
         return db_order
 
+    def update_order_with_items(
+        self, db: Session, *, order_id: UUID, order_update: schemas.OrderMasterUpdateWithItems
+    ) -> Optional[models.OrderMaster]:
+        """Update order with items - replaces all order items"""
+        db_order = self.get_order(db, order_id)
+        if not db_order:
+            return None
+        
+        # Update master fields
+        update_data = order_update.model_dump(exclude={'order_items'}, exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(db_order, field, value)
+        
+        # Delete existing order items
+        db.query(models.OrderItem).filter(models.OrderItem.order_id == order_id).delete()
+        
+        # Create new order items
+        for item_data in order_update.order_items:
+            db_item = models.OrderItem(
+                order_id=order_id,
+                paper_id=item_data.paper_id,
+                width_inches=item_data.width_inches,
+                quantity_rolls=item_data.quantity_rolls,
+                quantity_kg=item_data.quantity_kg,
+                rate=item_data.rate,
+                amount=item_data.amount
+            )
+            db.add(db_item)
+        
+        db.commit()
+        db.refresh(db_order)
+        
+        # Return the order with all relationships loaded
+        return self.get_order(db, order_id)
+
+    def delete_order(self, db: Session, order_id: UUID) -> bool:
+        """Delete order and all its items"""
+        db_order = self.get_order(db, order_id)
+        if db_order:
+            # Delete all order items first (foreign key constraint)
+            db.query(models.OrderItem).filter(models.OrderItem.order_id == order_id).delete()
+            # Delete the order
+            db.query(models.OrderMaster).filter(models.OrderMaster.id == order_id).delete()
+            db.commit()
+            return True
+        return False
+
 
 class CRUDOrderItem(CRUDBase[models.OrderItem, schemas.OrderItemCreate, schemas.OrderItemUpdate]):
     def get_order_items(self, db: Session, order_id: UUID) -> List[models.OrderItem]:

@@ -59,16 +59,100 @@ def update_order(
     order_update: schemas.OrderMasterUpdate,
     db: Session = Depends(get_db)
 ):
-    """Update order information"""
+    """Update order information (only if status is 'created')"""
     try:
-        order = crud_operations.update_order(db=db, order_id=order_id, order_update=order_update)
+        # Get the order first to check status
+        order = crud_operations.get_order(db=db, order_id=order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
-        return order
+        
+        # Only allow updates of orders in 'created' status
+        if order.status != "created":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot update order with status '{order.status}'. Only orders with status 'created' can be updated."
+            )
+        
+        # Perform the update
+        updated_order = crud_operations.update_order(db=db, order_id=order_id, order_update=order_update)
+        if not updated_order:
+            raise HTTPException(status_code=500, detail="Failed to update order")
+        return updated_order
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating order: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/orders/{order_id}/with-items", response_model=schemas.OrderMaster, tags=["Order Master"])
+async def update_order_with_items(
+    order_id: UUID,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Update order with items (only if status is 'created') - replaces all order items"""
+    try:
+        # Parse and log raw request data first
+        raw_data = await request.json()
+        logger.info(f"Raw request data for order {order_id}: {raw_data}")
+        
+        # Try to parse with Pydantic schema
+        try:
+            order_update = schemas.OrderMasterUpdateWithItems(**raw_data)
+            logger.info(f"Successfully parsed order update: {order_update}")
+        except Exception as parse_error:
+            logger.error(f"Pydantic validation error: {parse_error}")
+            raise HTTPException(status_code=422, detail=f"Validation error: {str(parse_error)}")
+        
+        # Get the order first to check status
+        order = crud_operations.get_order(db=db, order_id=order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Only allow updates of orders in 'created' status
+        if order.status != "created":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot update order with status '{order.status}'. Only orders with status 'created' can be updated."
+            )
+        
+        # Perform the update with items
+        updated_order = crud_operations.update_order_with_items(db=db, order_id=order_id, order_update=order_update)
+        if not updated_order:
+            raise HTTPException(status_code=500, detail="Failed to update order")
+        return updated_order
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating order with items: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/orders/{order_id}", tags=["Order Master"])
+def delete_order(order_id: UUID, db: Session = Depends(get_db)):
+    """Delete order (only if status is 'created')"""
+    try:
+        # Get the order first to check status
+        order = crud_operations.get_order(db=db, order_id=order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Only allow deletion of orders in 'created' status
+        if order.status != "created":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot delete order with status '{order.status}'. Only orders with status 'created' can be deleted."
+            )
+        
+        # Delete the order using CRUD operations
+        success = crud_operations.delete_order(db=db, order_id=order_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete order")
+        
+        return {"message": "Order deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting order: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================

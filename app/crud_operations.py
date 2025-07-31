@@ -87,6 +87,12 @@ def get_order(db, order_id):
 def update_order(db, order_id, order_update):
     return order.update_order(db=db, order_id=order_id, order_update=order_update)
 
+def update_order_with_items(db, order_id, order_update):
+    return order.update_order_with_items(db=db, order_id=order_id, order_update=order_update)
+
+def delete_order(db, order_id):
+    return order.delete_order(db=db, order_id=order_id)
+
 def get_order_items(db, order_id):
     return order_item.get_order_items(db=db, order_id=order_id)
 

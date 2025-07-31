@@ -39,8 +39,12 @@ def get_plans(
     try:
         from datetime import datetime
         from .. import models
+        from sqlalchemy.orm import joinedload
         
-        query = db.query(models.PlanMaster)
+        # Start with base query that includes user relationship
+        query = db.query(models.PlanMaster).options(
+            joinedload(models.PlanMaster.created_by)
+        )
         
         # Apply status filter
         if status and status != "all":

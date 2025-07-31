@@ -133,6 +133,7 @@ class UserMasterLogin(BaseModel):
 
 class UserMasterUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=255)
+    password: Optional[str] = Field(None, min_length=6)  # Optional password for updates
     role: Optional[UserRole] = None
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
@@ -232,6 +233,12 @@ class OrderMasterUpdate(BaseModel):
     payment_type: Optional[PaymentType] = None
     delivery_date: Optional[datetime] = None
     status: Optional[OrderStatus] = None
+
+class OrderMasterUpdateWithItems(BaseModel):
+    priority: Optional[Priority] = None
+    payment_type: Optional[PaymentType] = None
+    delivery_date: Optional[datetime] = None
+    order_items: List[OrderItemCreate] = Field(..., min_items=1, description="Updated list of order items")
 
 class OrderMaster(OrderMasterBase):
     id: UUID
