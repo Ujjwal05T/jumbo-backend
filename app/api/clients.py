@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def create_client(client: schemas.ClientMasterCreate, db: Session = Depends(get_db)):
     """Create a new client in Client Master"""
     try:
-        return crud_operations.create_client(db=db, client=client)
+        return crud_operations.create_client(db=db, client_data=client)
     except HTTPException:
         raise
     except Exception as e:

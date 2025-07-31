@@ -30,7 +30,7 @@ def create_paper(paper: schemas.PaperMasterCreate, db: Session = Depends(get_db)
         if not paper.shade or not paper.shade.strip():
             raise HTTPException(status_code=400, detail="Shade is required")
             
-        return crud_operations.create_paper(db=db, paper=paper)
+        return crud_operations.create_paper(db=db, paper_data=paper)
     except HTTPException:
         raise
     except Exception as e:

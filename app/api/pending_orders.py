@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def create_pending_order_item(pending: schemas.PendingOrderItemCreate, db: Session = Depends(get_db)):
     """Create a new pending order item"""
     try:
-        return crud_operations.create_pending_order_item(db=db, pending=pending)
+        return crud_operations.create_pending_order_item(db=db, pending_data=pending)
     except HTTPException:
         raise
     except Exception as e:

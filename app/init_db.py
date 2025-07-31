@@ -28,7 +28,7 @@ def init_admin_user(db: Session):
         role="admin"
     )
     
-    return crud_operations.create_user(db, admin_user)
+    return crud_operations.create_user(db, user_data=admin_user)
 
 def init_db():
     """

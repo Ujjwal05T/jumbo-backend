@@ -542,7 +542,7 @@ class CuttingOptimizer:
             inventory_ids=[]  # Will be populated when inventory is allocated
         )
         
-        return crud_operations.create_plan(db, plan_data)
+        return crud_operations.create_plan(db, plan_data=plan_data)
 
     def get_order_requirements_from_db(
         self,

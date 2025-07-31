@@ -62,17 +62,17 @@ class WorkflowManager:
             
             pending_requirements = []
             for i, pending in enumerate(pending_orders):
-                logger.info(f"  Processing pending item {i+1}: ID={pending.id}, width={pending.width_inches}\"")
-                # PendingOrderItem has paper specs directly embedded
+                logger.info(f"  Processing pending item {i+1}: ID={pending.get('pending_order_id', 'unknown')}, width={pending.get('width', 0)}\"")
+                # pending is already a dictionary from crud_operations
                 pending_req = {
-                    'order_id': str(pending.original_order_id) if pending.original_order_id else 'unknown',
-                    'width': float(pending.width_inches),
-                    'quantity': pending.quantity_pending,
-                    'gsm': pending.gsm,
-                    'bf': float(pending.bf),
-                    'shade': pending.shade,
-                    'pending_id': str(pending.id),
-                    'reason': pending.reason
+                    'order_id': str(pending.get('original_order_id', 'unknown')),
+                    'width': float(pending.get('width', 0)),
+                    'quantity': pending.get('quantity', 0),
+                    'gsm': pending.get('gsm', 0),
+                    'bf': float(pending.get('bf', 0)),
+                    'shade': pending.get('shade', ''),
+                    'pending_id': str(pending.get('pending_order_id', 'unknown')),
+                    'reason': pending.get('reason', 'unknown')
                 }
                 pending_requirements.append(pending_req)
                 logger.info(f"  ✅ Added pending requirement: {pending_req}")
@@ -227,7 +227,7 @@ class WorkflowManager:
                             'type': 'standard',
                             'created_by_id': self.user_id
                         })()
-                        paper = crud_operations.create_paper(self.db, paper_data)
+                        paper = crud_operations.create_paper(self.db, paper_data=paper_data)
                     
                     if paper:
                         production_order = models.ProductionOrderMaster(
@@ -432,7 +432,7 @@ class WorkflowManager:
                 }
                 
                 # Create plan using crud_operations
-                plan_master = crud_operations.create_plan(self.db, type('PlanCreate', (), plan_data)())
+                plan_master = crud_operations.create_plan(self.db, plan_data=type('PlanCreate', (), plan_data)())
                 plans_created.append(plan_master)
                 
                 # Update order fulfillment tracking
@@ -534,7 +534,7 @@ class WorkflowManager:
                 'type': paper_spec.get('type', 'standard'),
                 'created_by_id': self.user_id
             })()
-            paper = crud_operations.create_paper(self.db, paper_data)
+            paper = crud_operations.create_paper(self.db, paper_data=paper_data)
         
         return paper
     

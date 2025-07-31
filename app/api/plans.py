@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def create_plan(plan: schemas.PlanMasterCreate, db: Session = Depends(get_db)):
     """Create a new cutting plan"""
     try:
-        return crud_operations.create_plan(db=db, plan=plan)
+        return crud_operations.create_plan(db=db, plan_data=plan)
     except HTTPException:
         raise
     except Exception as e:

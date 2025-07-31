@@ -21,8 +21,8 @@ from .crud.plans import plan
 from .crud.pending_orders import pending_order
 
 # Import individual functions for backward compatibility
-def create_client(db, client):
-    return client.create_client(db=db, client=client)
+def create_client(db, client_data):
+    return client.create_client(db=db, client=client_data)
 
 def get_clients(db, skip=0, limit=100, status="active"):
     return client.get_clients(db=db, skip=skip, limit=limit, status=status)
@@ -45,8 +45,8 @@ def get_user(db, user_id):
 def update_user(db, user_id, user_update):
     return user_crud.update_user(db=db, user_id=user_id, user_update=user_update)
 
-def create_user(db, user):
-    return user_crud.create_user(db=db, user=user)
+def create_user(db, user_data):
+    return user_crud.create_user(db=db, user=user_data)
 
 def get_user_by_username(db, username):
     return user_crud.get_user_by_username(db=db, username=username)
@@ -54,8 +54,8 @@ def get_user_by_username(db, username):
 def login_user(db, username, password):
     return user_crud.authenticate_user(db=db, username=username, password=password)
 
-def create_paper(db, paper):
-    return paper.create_paper(db=db, paper=paper)
+def create_paper(db, paper_data):
+    return paper.create_paper(db=db, paper=paper_data)
 
 def get_papers(db, skip=0, limit=100, status="active"):
     return paper.get_papers(db=db, skip=skip, limit=limit, status=status)
@@ -117,8 +117,8 @@ def create_inventory_from_waste(db, waste_items, user_id):
 def update_inventory_status(db, inventory_id, new_status):
     return inventory.update_inventory_status(db=db, inventory_id=inventory_id, new_status=new_status)
 
-def create_plan(db, plan):
-    return plan.create_plan(db=db, plan=plan)
+def create_plan(db, plan_data):
+    return plan.create_plan(db=db, plan=plan_data)
 
 def get_plans(db, skip=0, limit=100, status=None):
     return plan.get_plans(db=db, skip=skip, limit=limit, status=status)
@@ -138,8 +138,8 @@ def complete_plan(db, plan_id):
 def start_production_for_plan(db, plan_id, request_data):
     return plan.start_production_for_plan(db=db, plan_id=plan_id, request_data=request_data)
 
-def create_pending_order_item(db, pending):
-    return pending_order.create_pending_order_item(db=db, pending=pending)
+def create_pending_order_item(db, pending_data):
+    return pending_order.create_pending_order_item(db=db, pending=pending_data)
 
 def get_pending_order_items(db, skip=0, limit=100, status="pending"):
     return pending_order.get_pending_order_items(db=db, skip=skip, limit=limit, status=status)
