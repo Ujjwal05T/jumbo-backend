@@ -271,19 +271,7 @@ class WorkflowManager:
                 )
                 created_pending.extend(created_pending_records)
             
-            # OUTPUT 4: Create Inventory from inventory_remaining (waste)
-            if optimization_result.get('inventory_remaining'):
-                waste_items = [
-                    inv for inv in optimization_result['inventory_remaining'] 
-                    if inv.get('source') == 'waste'
-                ]
-                if waste_items and self.user_id:
-                    created_inventory_records = crud_operations.create_inventory_from_waste(
-                        self.db,
-                        waste_items,
-                        self.user_id
-                    )
-                    created_inventory.extend(created_inventory_records)
+            # OUTPUT 4: No waste inventory creation (removed - waste >20" goes to pending)
             
             # Update order statuses to "in_process" (ready for fulfillment)
             for order_id in order_ids:
@@ -359,7 +347,6 @@ class WorkflowManager:
             total_cut_rolls = len(enhanced_cut_rolls)
             total_pending_orders = len(created_pending)
             total_pending_quantity = sum(po.quantity_pending for po in created_pending)
-            total_inventory_created = len(created_inventory)
             
             return {
                 "status": "success",
@@ -375,27 +362,15 @@ class WorkflowManager:
                         "reason": po.reason
                     } for po in created_pending
                 ],
-                "inventory_remaining": [
-                    {
-                        "id": str(inv.id),
-                        "width": float(inv.width_inches),
-                        "quantity": 1,  # Each inventory record represents 1 item
-                        "gsm": 90,  # Default values for waste inventory
-                        "bf": 18.0,
-                        "shade": "white",
-                        "source": "waste"
-                    } for inv in created_inventory
-                ],
                 "summary": {
                     "total_cut_rolls": total_cut_rolls,
                     "total_individual_118_rolls": optimization_result.get('summary', {}).get('total_individual_118_rolls', 0),
                     "total_jumbo_rolls_needed": optimization_result.get('jumbo_rolls_needed', 0),
                     "total_pending_orders": total_pending_orders,
                     "total_pending_quantity": total_pending_quantity,
-                    "total_inventory_created": total_inventory_created,
                     "specification_groups_processed": len(set((cr.get('gsm'), cr.get('shade'), cr.get('bf')) for cr in enhanced_cut_rolls)),
                     "high_trim_patterns": 0,  # TODO: Calculate from optimization result
-                    "algorithm_note": "NEW FLOW: 3-input/4-output optimization"
+                    "algorithm_note": "Updated: 1-20\" trim accepted, >20\" goes to pending, no waste inventory created"
                 },
                 "orders_updated": updated_orders,
                 "plans_created": [str(p.id) for p in created_plans],

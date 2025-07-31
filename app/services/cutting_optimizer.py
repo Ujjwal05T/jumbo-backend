@@ -8,8 +8,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import uuid
+import logging
 
 from .. import models, schemas, crud_operations
+
+logger = logging.getLogger(__name__)
 
 class CutRollStatus(str, Enum):
     AVAILABLE = "available"
@@ -28,7 +31,7 @@ class RollSpec:
 # --- CONFIGURATIONS ---
 JUMBO_WIDTH = 118
 MIN_TRIM = 1
-MAX_TRIM = 6
+MAX_TRIM = 20
 MAX_TRIM_WITH_CONFIRMATION = 20
 MAX_ROLLS_PER_JUMBO = 5
 
@@ -79,29 +82,20 @@ class CuttingOptimizer:
             combo_count = Counter(combo)
             while all(order_counter[k] >= v for k, v in combo_count.items()):
                 if trim <= MAX_TRIM:
-                    # Accept directly
+                    # Accept directly (up to 20" trim)
                     for k in combo:
                         order_counter[k] -= 1
                     used.append((combo, trim))
-                elif trim <= MAX_TRIM_WITH_CONFIRMATION:
-                    # Ask user or auto-accept based on interactive flag
-                    if interactive:
-                        print(f"\n⚠️ Combo {combo} leaves {trim}\" trim. Use it? (yes/no):")
-                        choice = input().strip().lower()
-                        if choice == "yes":
-                            for k in combo:
-                                order_counter[k] -= 1
-                            used.append((combo, trim))
-                            high_trim_log.append((combo, trim))
-                        else:
-                            break
+                    
+                    # Log trim decisions
+                    if trim <= 6:
+                        logger.debug(f"     ✅ ACCEPTED: {combo} → trim={trim}\" (normal)")
                     else:
-                        # Auto-accept for non-interactive mode
-                        for k in combo:
-                            order_counter[k] -= 1
-                        used.append((combo, trim))
+                        logger.info(f"     ⚠️ ACCEPTED HIGH TRIM: {combo} → trim={trim}\" (6-20\" range)")
                         high_trim_log.append((combo, trim))
                 else:
+                    # >20" trim goes to pending orders
+                    logger.warning(f"     ❌ REJECTED: {combo} → trim={trim}\" (>20\" - goes to pending)")
                     break
         
         # Remaining = pending
@@ -128,50 +122,49 @@ class CuttingOptimizer:
         Args:
             order_requirements: List of new order dicts with width, quantity, etc.
             pending_orders: List of pending orders from previous cycles
-            available_inventory: List of 20-25" waste rolls available for reuse
+            available_inventory: List of available inventory rolls for reuse
             interactive: Whether to prompt user for high trim decisions
             
         Returns:
-            Dict with 4 outputs:
+            Dict with 3 outputs:
             - cut_rolls_generated: Rolls that can be fulfilled
             - jumbo_rolls_needed: Number of jumbo rolls to procure
-            - pending_orders: Orders that cannot be fulfilled
-            - inventory_remaining: 20-25" waste rolls for future use
+            - pending_orders: Orders that cannot be fulfilled (>20" trim)
         """
-        print(f"\n🔧 DEBUG: Starting optimize_with_new_algorithm")
-        print(f"📦 Input - Order Requirements: {len(order_requirements)} items")
-        print(f"⏳ Input - Pending Orders: {len(pending_orders) if pending_orders else 0} items")
-        print(f"📋 Input - Available Inventory: {len(available_inventory) if available_inventory else 0} items")
+        logger.info(f"🔧 OPTIMIZER: Starting optimize_with_new_algorithm")
+        logger.info(f"📦 INPUT: Order Requirements: {len(order_requirements)} items")
+        logger.info(f"⏳ INPUT: Pending Orders: {len(pending_orders) if pending_orders else 0} items")
+        logger.info(f"📋 INPUT: Available Inventory: {len(available_inventory) if available_inventory else 0} items")
         
         # Initialize default values for optional inputs
         if pending_orders is None:
             pending_orders = []
-            print("⚠️  DEBUG: pending_orders was None, initialized to empty list")
+            logger.warning("⚠️  OPTIMIZER: pending_orders was None, initialized to empty list")
         if available_inventory is None:
             available_inventory = []
-            print("⚠️  DEBUG: available_inventory was None, initialized to empty list")
+            logger.warning("⚠️  OPTIMIZER: available_inventory was None, initialized to empty list")
         
-        print(f"\n📋 DEBUG: Detailed Input Analysis:")
-        print(f"Order Requirements: {order_requirements}")
-        print(f"Pending Orders: {pending_orders}")
-        print(f"Available Inventory: {available_inventory}")
+        # Log detailed input analysis
+        logger.debug(f"📋 INPUT DETAILS: Order Requirements: {order_requirements}")
+        logger.debug(f"📋 INPUT DETAILS: Pending Orders: {pending_orders}")
+        logger.debug(f"📋 INPUT DETAILS: Available Inventory: {available_inventory}")
         
         # Combine all requirements (new orders + pending orders)
         all_requirements = order_requirements + pending_orders
-        print(f"\n🔄 DEBUG: Combined all_requirements: {len(all_requirements)} total items")
-        print(f"Combined Requirements: {all_requirements}")
+        logger.info(f"🔄 OPTIMIZER: Combined all_requirements: {len(all_requirements)} total items")
+        logger.debug(f"📋 COMBINED REQUIREMENTS: {all_requirements}")
         
         # Group all requirements by complete specification (GSM + Shade + BF)
         # This ensures that different paper types are NEVER mixed in the same jumbo roll
         # Each jumbo roll will contain only 3 sets of 118" rolls with identical paper specs
         spec_groups = {}
-        print(f"\n🔍 DEBUG: Grouping requirements by specification...")
+        logger.info(f"🔍 OPTIMIZER: Grouping requirements by specification...")
         
         for i, req in enumerate(all_requirements):
-            print(f"  Processing requirement {i+1}: {req}")
+            logger.debug(f"  📝 Processing requirement {i+1}: {req}")
             # Create unique key for paper specification - CRITICAL for avoiding paper mixing
             spec_key = (req['gsm'], req['shade'], req['bf'])
-            print(f"  Spec key: {spec_key}")
+            logger.debug(f"  🔑 Spec key: {spec_key}")
             
             if spec_key not in spec_groups:
                 spec_groups[spec_key] = {
@@ -179,21 +172,21 @@ class CuttingOptimizer:
                     'inventory': [],
                     'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']}
                 }
-                print(f"  Created new spec group for {spec_key}")
+                logger.info(f"  ✨ Created new spec group for {spec_key}")
             
             # Add width and quantity to this specification group
             width = float(req['width'])
             if width in spec_groups[spec_key]['orders']:
                 old_qty = spec_groups[spec_key]['orders'][width]
                 spec_groups[spec_key]['orders'][width] += req['quantity']
-                print(f"  Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
+                logger.debug(f"  ➕ Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
             else:
                 spec_groups[spec_key]['orders'][width] = req['quantity']
-                print(f"  Added new width {width}\" with quantity {req['quantity']}")
+                logger.debug(f"  🆕 Added new width {width}\" with quantity {req['quantity']}")
         
-        print(f"\n📊 DEBUG: Final spec_groups structure:")
+        logger.info(f"📊 OPTIMIZER: Final spec_groups structure:")
         for spec_key, group_data in spec_groups.items():
-            print(f"  Spec {spec_key}: {group_data['orders']}")
+            logger.info(f"  📋 Spec {spec_key}: {group_data['orders']}")
         
         # Add available inventory to matching specification groups
         print(f"\n📦 DEBUG: Adding available inventory to spec groups...")
@@ -215,7 +208,6 @@ class CuttingOptimizer:
         # Process each specification group separately
         cut_rolls_generated = []
         new_pending_orders = []
-        inventory_remaining = []
         jumbo_rolls_needed = 0
         all_high_trims = []
         
@@ -224,21 +216,21 @@ class CuttingOptimizer:
             inventory = group_data['inventory']
             spec = group_data['spec']
             
-            print(f"\n🔧 DEBUG: Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
-            print(f"   📦 Orders to fulfill: {orders}")
-            print(f"   📋 Available Inventory: {len(inventory)} items")
+            logger.info(f"🔧 OPTIMIZER: Processing Paper Spec: GSM={spec['gsm']}, Shade={spec['shade']}, BF={spec['bf']}")
+            logger.info(f"   📦 Orders to fulfill: {orders}")
+            logger.info(f"   📋 Available Inventory: {len(inventory)} items")
             for inv_idx, inv_item in enumerate(inventory):
-                print(f"     Inventory {inv_idx+1}: width={inv_item.get('width', 'N/A')}\", id={inv_item.get('id', 'N/A')}")
+                logger.debug(f"     📦 Inventory {inv_idx+1}: width={inv_item.get('width', 'N/A')}\", id={inv_item.get('id', 'N/A')}")
             
             total_order_quantity = sum(orders.values())
-            print(f"   📊 Total order quantity for this spec: {total_order_quantity} rolls")
+            logger.info(f"   📊 Total order quantity for this spec: {total_order_quantity} rolls")
             
             # First, try to fulfill orders using available inventory
             orders_copy = orders.copy()
             inventory_used = []
             
-            print(f"   🔄 DEBUG: Starting inventory fulfillment phase...")
-            print(f"   📦 Orders copy before inventory: {orders_copy}")
+            logger.info(f"   🔄 OPTIMIZER: Starting inventory fulfillment phase...")
+            logger.debug(f"   📦 Orders copy before inventory: {orders_copy}")
             
             for inv_idx, inv_item in enumerate(inventory):
                 inv_width = float(inv_item['width'])
@@ -278,14 +270,14 @@ class CuttingOptimizer:
             # Run the matching algorithm for remaining orders
             individual_118_rolls_needed = 0
             if orders_copy:
-                print(f"   🔪 DEBUG: Running cutting algorithm for remaining orders: {orders_copy}")
+                logger.info(f"   🔪 OPTIMIZER: Running cutting algorithm for remaining orders: {orders_copy}")
                 used, pending, high_trims = self.match_combos(orders_copy, interactive)
-                print(f"   📊 Cutting results: {len(used)} patterns used, {len(list(pending.keys()))} pending widths")
+                logger.info(f"   📊 CUTTING RESULTS: {len(used)} patterns used, {len(list(pending.keys()))} pending widths")
                 
                 # Process successful cutting patterns (each pattern = 1 individual 118" roll)
                 for pattern_idx, (combo, trim) in enumerate(used):
                     individual_118_rolls_needed += 1
-                    print(f"     Pattern {pattern_idx+1}: {combo} → trim={trim}\" (Roll #{individual_118_rolls_needed})")
+                    logger.info(f"     ✂️ Pattern {pattern_idx+1}: {combo} → trim={trim}\" (Roll #{individual_118_rolls_needed})")
                     
                     # Add cut rolls from this pattern
                     for width in combo:
@@ -300,21 +292,9 @@ class CuttingOptimizer:
                             'trim_left': trim
                         }
                         cut_rolls_generated.append(cut_roll)
-                        print(f"       Added cut roll: {width}\" from roll #{individual_118_rolls_needed}")
+                        logger.debug(f"       ➕ Added cut roll: {width}\" from roll #{individual_118_rolls_needed}")
             else:
-                print(f"   ✅ DEBUG: All orders fulfilled from inventory, no cutting needed")
-                    
-                    # Handle waste: 20-25" becomes inventory, >25" discarded
-                if 20 <= trim <= 25:
-                        inventory_remaining.append({
-                            'width': trim,
-                            'quantity': 1,
-                            'gsm': spec['gsm'],
-                            'bf': spec['bf'],
-                            'shade': spec['shade'],
-                            'source': 'waste',
-                            'from_individual_roll': individual_118_rolls_needed
-                        })
+                logger.info(f"   ✅ OPTIMIZER: All orders fulfilled from inventory, no cutting needed")
             
             # CORRECTED JUMBO ROLL CALCULATION: 1 Jumbo Roll = 3 individual 118" rolls
             # This is the critical fix from the implementation plan
@@ -331,13 +311,13 @@ class CuttingOptimizer:
                 # Calculate how many sets will be unused from this extra jumbo roll
                 unused_sets_from_extra_jumbo = 3 - remaining_individual_rolls
                 
-                print(f"   📊 CORRECTED Jumbo calculation for spec {spec_key}:")
-                print(f"     Individual 118\" rolls needed: {individual_118_rolls_needed}")
-                print(f"     Complete jumbo rolls: {complete_jumbo_rolls}")
-                print(f"     Remaining individual rolls: {remaining_individual_rolls}")
-                print(f"     Extra jumbo roll needed: {'Yes' if remaining_individual_rolls > 0 else 'No'}")
-                print(f"     Unused sets from extra jumbo: {unused_sets_from_extra_jumbo if remaining_individual_rolls > 0 else 0}")
-                print(f"     Total jumbo rolls for this spec: {complete_jumbo_rolls + (1 if remaining_individual_rolls > 0 else 0)}")
+                logger.info(f"   📊 JUMBO CALCULATION for spec {spec_key}:")
+                logger.info(f"     🎯 Individual 118\" rolls needed: {individual_118_rolls_needed}")
+                logger.info(f"     📦 Complete jumbo rolls: {complete_jumbo_rolls}")
+                logger.info(f"     ⏳ Remaining individual rolls: {remaining_individual_rolls}")
+                logger.info(f"     ➕ Extra jumbo roll needed: {'Yes' if remaining_individual_rolls > 0 else 'No'}")
+                logger.info(f"     💡 Unused sets from extra jumbo: {unused_sets_from_extra_jumbo if remaining_individual_rolls > 0 else 0}")
+                logger.info(f"     🎯 Total jumbo rolls for this spec: {complete_jumbo_rolls + (1 if remaining_individual_rolls > 0 else 0)}")
                 
                 # The unused sets from the extra jumbo roll become available for future orders
                 # This is more accurate than sending them to pending orders
@@ -370,44 +350,53 @@ class CuttingOptimizer:
                         'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
                         'paper_spec': spec
                     })
-            
-            # Add remaining unused inventory back to inventory_remaining
-            for inv_item in remaining_inventory:
-                inventory_remaining.append({
-                    'width': float(inv_item['width']),
-                    'quantity': 1,
-                    'gsm': spec['gsm'],
-                    'bf': spec['bf'],
-                    'shade': spec['shade'],
-                    'source': 'unused_inventory',
-                    'inventory_id': inv_item.get('id')
-                })
         
         # Calculate summary statistics
         total_cut_rolls = len(cut_rolls_generated)
-        total_inventory_created = len([inv for inv in inventory_remaining if inv['source'] == 'waste'])
         total_pending = sum(order['quantity'] for order in new_pending_orders)
         total_individual_118_rolls = len([roll for roll in cut_rolls_generated if roll['source'] == 'cutting'])
         
-        # NEW FLOW: Return 4 distinct outputs
-        return {
+        # Log final results
+        logger.info(f"🎯 OPTIMIZER RESULTS:")
+        logger.info(f"   📦 Total cut rolls generated: {total_cut_rolls}")
+        logger.info(f"   🎯 Total individual 118\" rolls: {total_individual_118_rolls}")
+        logger.info(f"   📋 Total jumbo rolls needed: {jumbo_rolls_needed}")
+        logger.info(f"   ⏳ Total pending orders: {len(new_pending_orders)}")
+        logger.info(f"   📊 Total pending quantity: {total_pending}")
+        logger.info(f"   🔧 Specification groups processed: {len(spec_groups)}")
+        logger.info(f"   ⚠️  High trim patterns: {len(all_high_trims)}")
+        
+        # Log detailed cut rolls
+        logger.info(f"📋 DETAILED CUT ROLLS:")
+        for i, roll in enumerate(cut_rolls_generated, 1):
+            logger.info(f"   Roll {i}: {roll['width']}\" - GSM:{roll['gsm']}, BF:{roll['bf']}, Shade:{roll['shade']}, Source:{roll['source']}")
+        
+        # Log pending orders if any
+        if new_pending_orders:
+            logger.warning(f"⏳ PENDING ORDERS (>20\" trim):")
+            for i, pending in enumerate(new_pending_orders, 1):
+                logger.warning(f"   Pending {i}: {pending['width']}\" x{pending['quantity']} - GSM:{pending['gsm']}, Reason:{pending.get('reason', 'high_trim')}")
+        
+        # NEW FLOW: Return 3 distinct outputs (removed waste inventory)
+        result = {
             'cut_rolls_generated': cut_rolls_generated,
             'jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: 1 jumbo roll = 3 sets of 118" rolls
             'pending_orders': new_pending_orders,
-            'inventory_remaining': inventory_remaining,
             'summary': {
                 'total_cut_rolls': total_cut_rolls,
                 'total_individual_118_rolls': total_individual_118_rolls,
                 'total_jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: Each jumbo roll produces 3×118" rolls
                 'total_pending_orders': len(new_pending_orders),
                 'total_pending_quantity': total_pending,
-                'total_inventory_created': total_inventory_created,
                 'specification_groups_processed': len(spec_groups),
                 'high_trim_patterns': len(all_high_trims),
-                'algorithm_note': 'CORRECTED: 1 jumbo roll = 3 individual 118" rolls, same paper specs only'
+                'algorithm_note': 'Updated: 1-20" trim accepted, >20" goes to pending, no waste rolls created'
             },
             'high_trim_approved': all_high_trims
         }
+        
+        logger.info(f"🎯 OPTIMIZER COMPLETED: Returning result with {len(result)} main sections")
+        return result
 
     def generate_optimized_plan(
         self,
@@ -432,56 +421,6 @@ class CuttingOptimizer:
             interactive=interactive
         )
 
-    def process_inventory_input(self, inventory_items: List[Dict]) -> List[Dict]:
-        """
-        Process available inventory input to standardize format.
-        Filters for 20-25" waste rolls only.
-        
-        Args:
-            inventory_items: Raw inventory data
-            
-        Returns:
-            Processed inventory items suitable for optimization
-        """
-        processed_items = []
-        for item in inventory_items:
-            width = float(item.get('width', 0))
-            # Only include 20-25" rolls as per new flow
-            if 20 <= width <= 25:
-                processed_items.append({
-                    'id': item.get('id', str(uuid.uuid4())),
-                    'width': width,
-                    'gsm': item.get('gsm', 90),
-                    'bf': float(item.get('bf', 18.0)),
-                    'shade': item.get('shade', 'white'),
-                    'weight': item.get('weight', 0),
-                    'location': item.get('location', 'warehouse')
-                })
-        return processed_items
-
-    def generate_inventory_from_waste(self, waste_width: float, paper_spec: Dict, jumbo_number: int) -> Dict:
-        """
-        Generate inventory item from waste that falls in 20-25" range.
-        
-        Args:
-            waste_width: Width of the waste piece
-            paper_spec: Paper specification (GSM, BF, Shade)
-            jumbo_number: Source jumbo roll number
-            
-        Returns:
-            Inventory item dictionary
-        """
-        return {
-            'id': f"waste_{jumbo_number}_{waste_width}",
-            'width': waste_width,
-            'gsm': paper_spec['gsm'],
-            'bf': paper_spec['bf'],
-            'shade': paper_spec['shade'],
-            'source': 'waste',
-            'from_jumbo': jumbo_number,
-            'roll_type': 'cut',
-            'status': 'available'
-        }
 
     def create_plan_from_orders(
         self,
@@ -544,85 +483,6 @@ class CuttingOptimizer:
         
         return crud_operations.create_plan(db, plan_data=plan_data)
 
-    def get_order_requirements_from_db(
-        self,
-        db: Session,
-        order_ids: List[uuid.UUID]
-    ) -> List[Dict]:
-        """
-        Fetch order requirements from database for testing purposes.
-        
-        Args:
-            db: Database session
-            order_ids: List of order IDs
-            
-        Returns:
-            List of order requirements in optimizer format
-        """
-        order_requirements = []
-        
-        for order_id in order_ids:
-            order = crud_operations.get_order(db, order_id)
-            if not order:
-                continue
-                
-            # Get paper specifications
-            paper = crud_operations.get_paper(db, order.paper_id)
-            if not paper:
-                continue
-            
-            order_requirements.append({
-                'width': float(order.width_inches),
-                'quantity': order.quantity_rolls,
-                'gsm': paper.gsm,
-                'bf': paper.bf,
-                'shade': paper.shade,
-                'min_length': 1600,  # Default min length since OrderMaster doesn't have this field
-                'order_id': str(order.id),
-                'client_name': order.client.company_name if order.client else 'Unknown'
-            })
-        
-        return order_requirements
-
-    def test_algorithm_with_sample_data(self) -> Dict:
-        """
-        NEW FLOW: Test the algorithm with sample data demonstrating 3-input/4-output.
-        This method is useful for testing the optimization logic with the new flow.
-        
-        Returns:
-            Optimization result with sample data showing new flow
-        """
-        # Sample new orders
-        new_orders = [
-            {"width": 29.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1500},
-            {"width": 32.5, "quantity": 3, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-            {"width": 38, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-        ]
-        
-        # Sample pending orders from previous cycles
-        pending_orders = [
-            {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-            {"width": 48, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
-        ]
-        
-        # Sample available inventory (20-25" waste rolls)
-        available_inventory = [
-            {"id": "inv_1", "width": 22.5, "gsm": 90, "bf": 18.0, "shade": "white"},
-            {"id": "inv_2", "width": 24, "gsm": 90, "bf": 18.0, "shade": "white"},
-            {"id": "inv_3", "width": 23, "gsm": 120, "bf": 18.0, "shade": "white"},
-        ]
-        
-        print("\n🧪 Testing NEW FLOW Algorithm with 3 inputs:")
-        print(f"📦 New Orders: {len(new_orders)} items")
-        print(f"⏳ Pending Orders: {len(pending_orders)} items")
-        print(f"📋 Available Inventory: {len(available_inventory)} items")
-        
-        return self.optimize_with_new_algorithm(
-            order_requirements=new_orders,
-            pending_orders=pending_orders,
-            available_inventory=available_inventory,
-            interactive=False
-        )
 
 # Example usage and testing
 def test_optimizer():
@@ -654,27 +514,27 @@ def test_optimizer():
         interactive=False  # Set to True for interactive mode
     )
     
-    print("\n✅ Jumbo Rolls Used:")
-    for jumbo in result['jumbo_rolls_used']:
-        widths = [roll['width'] for roll in jumbo['rolls']]
-        print(f"Jumbo #{jumbo['jumbo_number']}: {tuple(widths)} → Trim Left: {jumbo['trim_left']}\"")
+    print("\n✅ Cut Rolls Generated:")
+    for i, roll in enumerate(result.get('cut_rolls_generated', []), 1):
+        print(f"Roll #{i}: {roll['width']}\" - GSM {roll['gsm']}, Shade: {roll['shade']}")
     
-    if result['pending_orders']:
-        print("\n⏳ Pending Rolls:")
+    if result.get('pending_orders'):
+        print("\n⏳ Pending Orders:")
         for pending in result['pending_orders']:
-            print(f"• {pending['quantity']} roll(s) of size {pending['width']}\"")
+            print(f"• {pending['quantity']} roll(s) of size {pending['width']}\" - {pending.get('reason', 'high trim')}")
     else:
-        print("\n🎯 All rolls fulfilled!")
+        print("\n🎯 All orders fulfilled!")
     
-    if result['high_trim_approved']:
-        print("\n📋 Approved High Trim Combos (6–20\"): ")
+    if result.get('high_trim_approved'):
+        print("\n📋 High Trim Patterns (6–20\"): ")
         for high_trim in result['high_trim_approved']:
             print(f"• {high_trim['combo']} → Trim: {high_trim['trim']}\"")
     
     print(f"\n📊 Summary:")
-    print(f"Total Jumbos Used: {result['summary']['total_jumbos_used']}")
-    print(f"Total Trim: {result['summary']['total_trim_inches']}\"")
-    print(f"Overall Waste: {result['summary']['overall_waste_percentage']}%")
+    print(f"Total Cut Rolls: {result.get('summary', {}).get('total_cut_rolls', 0)}")
+    print(f"Total Jumbo Rolls Needed: {result.get('jumbo_rolls_needed', 0)}")
+    print(f"Total Pending Orders: {result.get('summary', {}).get('total_pending_orders', 0)}")
+    print(f"Algorithm: {result.get('summary', {}).get('algorithm_note', 'Updated algorithm')}")
     
     return result
 

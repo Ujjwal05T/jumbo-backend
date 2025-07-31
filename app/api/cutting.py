@@ -111,32 +111,31 @@ def get_cutting_algorithms():
         return {
             "available_algorithms": [
                 {
-                    "name": "3-input-4-output",
-                    "description": "NEW FLOW: Optimizes cutting using new orders, pending orders, and available inventory",
+                    "name": "3-input-3-output",
+                    "description": "UPDATED FLOW: Optimizes cutting using new orders, pending orders, and available inventory",
                     "inputs": [
                         "order_requirements (new orders)",
                         "pending_orders (from previous cycles)",
-                        "available_inventory (20-25\" waste rolls)"
+                        "available_inventory (existing inventory rolls)"
                     ],
                     "outputs": [
                         "cut_rolls_generated",
                         "jumbo_rolls_needed",
-                        "pending_orders",
-                        "inventory_remaining"
+                        "pending_orders"
                     ],
                     "parameters": {
                         "jumbo_width": 118,
                         "min_trim": 1,
-                        "max_trim": 6,
+                        "max_trim": 20,
                         "max_trim_with_confirmation": 20,
                         "max_rolls_per_jumbo": 5,
-                        "waste_reuse_range": "20-25 inches"
+                        "trim_acceptance": "1-20 inches accepted, >20 goes to pending"
                     },
                     "features": [
                         "Paper specification grouping (GSM + Shade + BF)",
                         "Corrected jumbo roll calculation (1 jumbo = 3 sets of 118\" rolls)",
-                        "Waste recycling (20-25\" becomes inventory)",
-                        "Interactive high-trim approval",
+                        "Simplified trim handling (1-20\" accepted, >20\" pending)",
+                        "No waste inventory creation",
                         "Master-based architecture support"
                     ]
                 }
@@ -144,13 +143,12 @@ def get_cutting_algorithms():
             "constraints": {
                 "jumbo_roll_width": "118 inches",
                 "minimum_trim": "1 inch",
-                "maximum_acceptable_trim": "6 inches",
-                "maximum_trim_with_approval": "20 inches",
+                "maximum_acceptable_trim": "20 inches",
                 "maximum_rolls_per_pattern": 5,
-                "reusable_waste_range": "20-25 inches"
+                "trim_handling": "1-20 inches accepted, >20 inches goes to pending orders"
             },
-            "algorithm_version": "2.0_corrected_jumbo_calculation",
-            "last_updated": "2024-01-15"
+            "algorithm_version": "2.1_simplified_waste_handling",
+            "last_updated": "2024-01-31"
         }
         
     except Exception as e:
