@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Table, Text, Boolean, Numeric, Enum
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Table, Text, Boolean, Numeric, Enum, event
+from sqlalchemy.orm import relationship, Session
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
 import uuid
@@ -63,6 +63,7 @@ class ClientMaster(Base):
     __tablename__ = "client_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # CL-001, CL-002, etc.
     company_name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), nullable=True)
     gst_number = Column(String(50), nullable=True, index=True)
@@ -82,6 +83,7 @@ class UserMaster(Base):
     __tablename__ = "user_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # USR-001, USR-002, etc.
     name = Column(String(255), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)  # For simple registration
@@ -105,6 +107,7 @@ class PaperMaster(Base):
     __tablename__ = "paper_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PAP-001, PAP-002, etc.
     name = Column(String(255), nullable=False, index=True)  # e.g., "White Bond 90GSM"
     gsm = Column(Integer, nullable=False, index=True)  # Grams per square meter
     bf = Column(Numeric(4, 2), nullable=False, index=True)  # Brightness Factor
@@ -131,6 +134,7 @@ class OrderMaster(Base):
     __tablename__ = "order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # ORD-2025-001, etc.
     client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
     status = Column(String(50), default=OrderStatus.CREATED, nullable=False, index=True)
     priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
@@ -171,6 +175,7 @@ class OrderItem(Base):
     __tablename__ = "order_item"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # ORI-001, ORI-002, etc.
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     width_inches = Column(Numeric(6, 2), nullable=False)
@@ -215,6 +220,7 @@ class PendingOrderMaster(Base):
     __tablename__ = "pending_order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # POM-001, POM-002, etc.
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     order_item_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_item.id"), nullable=False, index=True)
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
@@ -237,6 +243,7 @@ class PendingOrderItem(Base):
     __tablename__ = "pending_order_item"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # POI-001, POI-002, etc.
     original_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     width_inches = Column(Numeric(6, 2), nullable=False)
     gsm = Column(Integer, nullable=False)
@@ -260,6 +267,7 @@ class InventoryMaster(Base):
     __tablename__ = "inventory_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # INV-001, INV-002, etc.
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     width_inches = Column(Numeric(6, 2), nullable=False, index=True)
     weight_kg = Column(Numeric(8, 2), nullable=False)
@@ -283,6 +291,7 @@ class PlanMaster(Base):
     __tablename__ = "plan_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PLN-2025-001, etc.
     name = Column(String(255), nullable=True)  # Optional plan name
     cut_pattern = Column(Text, nullable=False)  # JSON array of cutting pattern
     expected_waste_percentage = Column(Numeric(5, 2), nullable=False)
@@ -304,6 +313,7 @@ class ProductionOrderMaster(Base):
     __tablename__ = "production_order_master"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PRO-001, PRO-002, etc.
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     quantity = Column(Integer, nullable=False, default=1)  # Number of jumbo rolls
     priority = Column(String(20), default="normal", nullable=False)  # low, normal, high, urgent
@@ -328,6 +338,7 @@ class PlanOrderLink(Base):
     __tablename__ = "plan_order_link"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # POL-001, POL-002, etc.
     plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
     order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
     order_item_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_item.id"), nullable=False, index=True)
@@ -343,6 +354,7 @@ class PlanInventoryLink(Base):
     __tablename__ = "plan_inventory_link"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PIL-001, PIL-002, etc.
     plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
     inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=False, index=True)
     quantity_used = Column(Numeric(8, 2), nullable=False)  # Weight or length used
@@ -363,6 +375,7 @@ class CutRollProduction(Base):
     __tablename__ = "cut_roll_production"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # CRP-001, CRP-002, etc.
     qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code
     
     # Cut roll specifications
@@ -415,6 +428,7 @@ class DispatchRecord(Base):
     __tablename__ = "dispatch_record"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # DSP-2025-001, etc.
     
     # Dispatch details
     vehicle_number = Column(String(50), nullable=False)
@@ -455,6 +469,7 @@ class DispatchItem(Base):
     __tablename__ = "dispatch_item"
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # DSI-001, DSI-002, etc.
     dispatch_record_id = Column(UNIQUEIDENTIFIER, ForeignKey("dispatch_record.id"), nullable=False, index=True)
     inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=False, index=True)
     
@@ -471,3 +486,51 @@ class DispatchItem(Base):
     # Relationships
     dispatch_record = relationship("DispatchRecord", back_populates="dispatch_items")
     inventory = relationship("InventoryMaster")
+
+
+# ============================================================================
+# FRONTEND ID GENERATION - Auto-generate human-readable IDs on record creation
+# ============================================================================
+
+def generate_frontend_id_on_insert(mapper, connection, target):
+    """
+    SQLAlchemy event handler to generate frontend_id before insert.
+    This function is called automatically when new records are inserted.
+    """
+    from app.services.id_generator import FrontendIDGenerator
+    
+    if target.frontend_id is None:  # Only generate if not already provided
+        table_name = target.__tablename__
+        
+        # Create a temporary session for the ID generation
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=connection)
+        session = Session()
+        
+        try:
+            target.frontend_id = FrontendIDGenerator.generate_frontend_id(table_name, session)
+        finally:
+            session.close()
+
+
+# Register event listeners for all models that have frontend_id
+models_with_frontend_id = [
+    ClientMaster,
+    UserMaster, 
+    PaperMaster,
+    OrderMaster,
+    OrderItem,
+    PendingOrderMaster,
+    PendingOrderItem,
+    InventoryMaster,
+    PlanMaster,
+    ProductionOrderMaster,
+    PlanOrderLink,
+    PlanInventoryLink,
+    CutRollProduction,
+    DispatchRecord,
+    DispatchItem
+]
+
+for model in models_with_frontend_id:
+    event.listen(model, 'before_insert', generate_frontend_id_on_insert)

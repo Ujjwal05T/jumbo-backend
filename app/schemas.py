@@ -109,6 +109,7 @@ class ClientMasterUpdate(BaseModel):
 
 class ClientMaster(ClientMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable client ID (e.g., CL-001)")
     created_by_id: UUID
     created_at: datetime
 
@@ -141,6 +142,7 @@ class UserMasterUpdate(BaseModel):
 
 class UserMaster(UserMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable user ID (e.g., USR-001)")
     created_at: datetime
     last_login: Optional[datetime] = None
 
@@ -171,6 +173,7 @@ class PaperMasterUpdate(BaseModel):
 
 class PaperMaster(PaperMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable paper ID (e.g., PAP-001)")
     created_by_id: UUID
     created_at: datetime
 
@@ -206,6 +209,7 @@ class OrderItemUpdate(BaseModel):
 
 class OrderItem(OrderItemBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable order item ID (e.g., ORI-001)")
     order_id: UUID
     quantity_fulfilled: int
     created_at: datetime
@@ -242,6 +246,7 @@ class OrderMasterUpdateWithItems(BaseModel):
 
 class OrderMaster(OrderMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable order ID (e.g., ORD-2025-001)")
     status: OrderStatus
     created_by_id: UUID
     created_at: datetime
@@ -272,6 +277,7 @@ class PendingOrderMasterUpdate(BaseModel):
 
 class PendingOrderMaster(PendingOrderMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable pending order ID (e.g., POM-001)")
     status: PendingOrderStatus
     production_order_id: Optional[UUID] = None
     created_at: datetime
@@ -305,6 +311,7 @@ class PendingOrderItemUpdate(BaseModel):
 
 class PendingOrderItem(PendingOrderItemBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable pending order item ID (e.g., POI-001)")
     status: PendingOrderStatus
     production_order_id: Optional[UUID] = None
     created_by_id: Optional[UUID] = None
@@ -338,6 +345,7 @@ class InventoryMasterUpdate(BaseModel):
 
 class InventoryMaster(InventoryMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable inventory ID (e.g., INV-001)")
     status: InventoryStatus
     allocated_to_order_id: Optional[UUID] = None
     created_by_id: UUID
@@ -366,6 +374,7 @@ class PlanMasterUpdate(BaseModel):
 
 class PlanMaster(PlanMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable plan ID (e.g., PLN-2025-001)")
     status: PlanStatus
     actual_waste_percentage: Optional[float] = None
     created_by_id: UUID
@@ -403,6 +412,7 @@ class ProductionOrderMasterUpdate(BaseModel):
 
 class ProductionOrderMaster(ProductionOrderMasterBase):
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable production order ID (e.g., PRO-001)")
     status: ProductionOrderStatus
     created_by_id: UUID
     created_at: datetime
@@ -598,6 +608,7 @@ class CutRollProductionUpdate(BaseModel):
 class CutRollProduction(CutRollProductionBase):
     """Complete schema for CutRollProduction with all fields"""
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable cut roll production ID (e.g., CRP-001)")
     qr_code: str
     paper_id: UUID
     plan_id: UUID
@@ -752,6 +763,7 @@ class DispatchRecordCreate(BaseModel):
 class DispatchItem(BaseModel):
     """Schema for dispatch item"""
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable dispatch item ID (e.g., DIT-001)")
     dispatch_record_id: UUID
     inventory_id: UUID
     qr_code: str
@@ -767,6 +779,7 @@ class DispatchItem(BaseModel):
 class DispatchRecord(BaseModel):
     """Schema for dispatch record with items"""
     id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable dispatch record ID (e.g., DSP-001)")
     vehicle_number: str
     driver_name: str
     driver_mobile: str
