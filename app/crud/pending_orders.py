@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from .base import CRUDBase
 from .. import models, schemas
+from ..services.id_generator import FrontendIDGenerator
 
 
 class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderItemCreate, schemas.PendingOrderItemUpdate]):
@@ -18,12 +19,25 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         limit: int = 100, 
         status: str = "pending"
     ) -> List[models.PendingOrderItem]:
-        """Get pending order items with filtering"""
-        return (
+        """Get pending order items with filtering - prevents conflicts by excluding already used items"""
+        query = (
             db.query(models.PendingOrderItem)
             .options(joinedload(models.PendingOrderItem.original_order).joinedload(models.OrderMaster.client))
             .filter(models.PendingOrderItem.status == status)
-            .order_by(desc(models.PendingOrderItem.created_at))
+        )
+        
+        # If requesting "pending" items, exclude those already used in active plans
+        if status == "pending":
+            query = query.filter(
+                ~models.PendingOrderItem.id.in_(
+                    db.query(models.PendingOrderItem.id)
+                    .filter(models.PendingOrderItem.status == "included_in_plan")
+                    .subquery()
+                )
+            )
+        
+        return (
+            query.order_by(desc(models.PendingOrderItem.created_at))
             .offset(skip)
             .limit(limit)
             .all()
@@ -32,7 +46,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
     def get_pending_orders_by_specs(
         self, db: Session, paper_specs: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Get pending orders grouped by paper specifications - NEW FLOW"""
+        """Get pending orders grouped by paper specifications - NEW FLOW with conflict prevention"""
         if not paper_specs:
             return []
         
@@ -50,12 +64,19 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         from sqlalchemy import or_
         paper_filter = or_(*spec_conditions) if len(spec_conditions) > 1 else spec_conditions[0]
         
+        # CRITICAL: Filter out pending items already used in active plans
         pending_items = (
             db.query(models.PendingOrderItem)
             .filter(
                 and_(
                     models.PendingOrderItem.status == "pending",
-                    paper_filter
+                    paper_filter,
+                    # Exclude items that are already included in active plans
+                    ~models.PendingOrderItem.id.in_(
+                        db.query(models.PendingOrderItem.id)
+                        .filter(models.PendingOrderItem.status == "included_in_plan")
+                        .subquery()
+                    )
                 )
             )
             .all()
@@ -81,7 +102,9 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         self, db: Session, *, pending: schemas.PendingOrderItemCreate
     ) -> models.PendingOrderItem:
         """Create new pending order item"""
+        frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
         db_pending = models.PendingOrderItem(
+            frontend_id=frontend_id,
             original_order_id=pending.original_order_id,
             width_inches=pending.width_inches,
             gsm=pending.gsm,
@@ -124,7 +147,9 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
                 if not original_order_id:
                     raise ValueError(f"original_order_id is required for pending order: {pending}")
                 
+                frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
                 db_pending = models.PendingOrderItem(
+                    frontend_id=frontend_id,
                     original_order_id=original_order_id,
                     width_inches=pending['width'],
                     gsm=pending['gsm'],
@@ -135,12 +160,11 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
                     created_by_id=user_id
                 )
                 db.add(db_pending)
+                db.flush()  # Ensure this record is committed before generating next frontend_id
                 created_items.append(db_pending)
         
         if created_items:
             db.commit()
-            for item in created_items:
-                db.refresh(item)
         
         return created_items
     

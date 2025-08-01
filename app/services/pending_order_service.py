@@ -7,6 +7,7 @@ import logging
 
 from .. import models
 from .status_service import StatusService
+from .id_generator import FrontendIDGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ class PendingOrderService:
                     logger.info(f"Updated existing pending item {existing_item.id} with additional {pending['quantity']} units")
                 else:
                     # Create new pending item
+                    frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", self.db)
                     pending_item = models.PendingOrderItem(
+                        frontend_id=frontend_id,
                         original_order_id=original_order_id,
                         width_inches=int(pending['width']),
                         gsm=pending['gsm'],
@@ -66,6 +69,7 @@ class PendingOrderService:
                         created_by_id=self.user_id
                     )
                     self.db.add(pending_item)
+                    self.db.flush()  # Ensure this record is committed before generating next frontend_id
                     created_items.append(pending_item)
                     logger.info(f"Created pending item for {pending['quantity']} x {pending['width']}\" {pending['shade']} paper")
             

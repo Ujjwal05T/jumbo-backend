@@ -8,6 +8,7 @@ import logging
 
 from .. import models, crud_operations, schemas
 from .cutting_optimizer import CuttingOptimizer
+from .id_generator import FrontendIDGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class WorkflowManager:
                 # pending is already a dictionary from crud_operations
                 pending_req = {
                     'order_id': str(pending.get('original_order_id', 'unknown')),
+                    'original_order_id': str(pending.get('original_order_id', 'unknown')),  # Add the correct field name
                     'width': float(pending.get('width', 0)),
                     'quantity': pending.get('quantity', 0),
                     'gsm': pending.get('gsm', 0),
@@ -104,7 +106,7 @@ class WorkflowManager:
             )
             
             # NEW FLOW: Process 4 outputs
-            result = self._process_optimizer_outputs(optimization_result, order_ids)
+            result = self._process_optimizer_outputs(optimization_result, order_ids, pending_requirements)
             
             return result
             
@@ -161,7 +163,7 @@ class WorkflowManager:
         
         return consolidated_orders
     
-    def _process_optimizer_outputs(self, optimization_result: Dict, order_ids: List[uuid.UUID]) -> Dict:
+    def _process_optimizer_outputs(self, optimization_result: Dict, order_ids: List[uuid.UUID], pending_requirements: List[Dict]) -> Dict:
         """
         NEW FLOW: Process the 4 outputs from optimization algorithm.
         Creates database records for each output type.
@@ -169,15 +171,18 @@ class WorkflowManager:
         Args:
             optimization_result: Result from 3-input/4-output optimization
             order_ids: Original order IDs being processed
+            pending_requirements: Input pending orders to track status updates
             
         Returns:
             Summary of processing results
         """
         try:
             created_plans = []
+            created_plan_ids = []  # Store IDs separately to avoid session issues
             created_pending = []
             created_inventory = []
             created_production = []
+            created_production_ids = []  # Store IDs separately to avoid session issues
             updated_orders = []
             
             # OUTPUT 1: Create Plan Master from cut_rolls_generated
@@ -195,16 +200,20 @@ class WorkflowManager:
                 self.db.add(plan)
                 self.db.flush()  # Get ID
                 created_plans.append(plan)
+                created_plan_ids.append(str(plan.id))  # Store ID immediately
                 
                 # Link order items to plan using the processed requirements
                 for requirement in self.processed_order_requirements:
+                    frontend_id = FrontendIDGenerator.generate_frontend_id("plan_order_link", self.db)
                     plan_order_link = models.PlanOrderLink(
+                        frontend_id=frontend_id,
                         plan_id=plan.id,
                         order_id=uuid.UUID(requirement['order_id']),
                         order_item_id=uuid.UUID(requirement['order_item_id']),
                         quantity_allocated=requirement['quantity']  # Use actual quantity
                     )
                     self.db.add(plan_order_link)
+                    self.db.flush()  # Ensure this record is committed before generating next frontend_id
             
             # OUTPUT 2: Create Production Orders for jumbo_rolls_needed
             if optimization_result.get('jumbo_rolls_needed', 0) > 0:
@@ -238,7 +247,9 @@ class WorkflowManager:
                             created_by_id=self.user_id
                         )
                         self.db.add(production_order)
+                        self.db.flush()  # Get ID
                         created_production.append(production_order)
+                        created_production_ids.append(str(production_order.id))  # Store ID immediately
             
             # OUTPUT 3: Create Pending Orders from pending_orders
             if optimization_result.get('pending_orders'):
@@ -271,15 +282,15 @@ class WorkflowManager:
                 )
                 created_pending.extend(created_pending_records)
             
+            # OUTPUT 5: Update status of resolved pending orders
+            # Compare input pending orders with output pending orders to identify which were resolved
+            self._update_resolved_pending_orders(pending_requirements, optimization_result.get('pending_orders', []))
+            
             # OUTPUT 4: No waste inventory creation (removed - waste >20" goes to pending)
             
-            # Update order statuses to "in_process" (ready for fulfillment)
-            for order_id in order_ids:
-                order = crud_operations.get_order(self.db, order_id)
-                if order:
-                    order.status = schemas.OrderStatus.IN_PROCESS.value
-                    order.updated_at = datetime.utcnow()
-                    updated_orders.append(str(order_id))
+            # IMPORTANT: Do NOT update order statuses during plan generation
+            # Status updates happen only when "Start Production" is clicked
+            # Keep orders in "created" status until production actually starts
             
             self.db.commit()
             
@@ -372,9 +383,9 @@ class WorkflowManager:
                     "high_trim_patterns": 0,  # TODO: Calculate from optimization result
                     "algorithm_note": "Updated: 1-20\" trim accepted, >20\" goes to pending, no waste inventory created"
                 },
-                "orders_updated": updated_orders,
-                "plans_created": [str(p.id) for p in created_plans],
-                "production_orders_created": [str(po.id) for po in created_production]
+                "orders_updated": [],  # No orders updated during plan generation
+                "plans_created": created_plan_ids,
+                "production_orders_created": created_production_ids
             }
             
         except Exception as e:
@@ -669,3 +680,105 @@ class WorkflowManager:
             recommendations.append("All orders are up to date - system is running smoothly")
         
         return recommendations
+    
+    def _update_resolved_pending_orders(self, input_pending: List[Dict], output_pending: List[Dict]):
+        """
+        Update status of pending orders that were resolved by optimization.
+        
+        Args:
+            input_pending: Pending orders that were input to optimization
+            output_pending: Pending orders that remain after optimization
+        """
+        logger.info("🚀 _update_resolved_pending_orders method called!")
+        try:
+            logger.info(f"🔍 PENDING STATUS DEBUG: Starting with {len(input_pending) if input_pending else 0} input and {len(output_pending) if output_pending else 0} output pending orders")
+            
+            if not input_pending:
+                logger.info("No input pending orders to check for resolution")
+                return
+            
+            # Debug: Log input pending orders
+            logger.info("🔍 INPUT PENDING ORDERS:")
+            for i, item in enumerate(input_pending):
+                logger.info(f"  {i+1}: width={item.get('width')}, gsm={item.get('gsm')}, bf={item.get('bf')}, shade={item.get('shade')}")
+                logger.info(f"       order_id={item.get('order_id')}, original_order_id={item.get('original_order_id')}")
+                logger.info(f"       all_keys={list(item.keys())}")
+            
+            # Debug: Log output pending orders  
+            logger.info("🔍 OUTPUT PENDING ORDERS:")
+            for i, item in enumerate(output_pending):
+                logger.info(f"  {i+1}: width={item.get('width')}, gsm={item.get('gsm')}, bf={item.get('bf')}, shade={item.get('shade')}, order_id={item.get('original_order_id')}")
+            
+            # Create lookup sets for comparison
+            # Use (width, gsm, bf, shade, original_order_id) as unique key
+            def make_key(pending_item):
+                return (
+                    float(pending_item.get('width', 0)),
+                    int(pending_item.get('gsm', 0)),
+                    float(pending_item.get('bf', 0)),
+                    str(pending_item.get('shade', '')),
+                    str(pending_item.get('original_order_id', ''))
+                )
+            
+            input_keys = set(make_key(item) for item in input_pending)
+            output_keys = set(make_key(item) for item in output_pending)
+            
+            # Debug: Log the keys
+            logger.info("🔍 INPUT KEYS:")
+            for key in input_keys:
+                logger.info(f"  {key}")
+            logger.info("🔍 OUTPUT KEYS:")
+            for key in output_keys:
+                logger.info(f"  {key}")
+            
+            # Find pending orders that were resolved (in input but not in output)
+            resolved_keys = input_keys - output_keys
+            
+            logger.info(f"🔍 RESOLVED KEYS:")
+            for key in resolved_keys:
+                logger.info(f"  {key}")
+            
+            logger.info(f"Pending orders analysis: {len(input_keys)} input, {len(output_keys)} output, {len(resolved_keys)} resolved")
+            
+            if not resolved_keys:
+                logger.info("No pending orders were resolved in this optimization")
+                return
+            
+            # Update status of resolved pending orders
+            updated_count = 0
+            for resolved_key in resolved_keys:
+                width, gsm, bf, shade, original_order_id = resolved_key
+                
+                # Find and update matching pending order records
+                from .. import models
+                
+                # Handle UUID conversion for original_order_id
+                try:
+                    order_id_uuid = uuid.UUID(original_order_id) if isinstance(original_order_id, str) else original_order_id
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid order_id format: {original_order_id}")
+                    continue
+                
+                resolved_items = self.db.query(models.PendingOrderItem).filter(
+                    models.PendingOrderItem.width_inches == width,
+                    models.PendingOrderItem.gsm == gsm,
+                    models.PendingOrderItem.bf == bf,
+                    models.PendingOrderItem.shade == shade,
+                    models.PendingOrderItem.original_order_id == order_id_uuid,
+                    models.PendingOrderItem.status == "pending"
+                ).all()
+                
+                for item in resolved_items:
+                    try:
+                        item.status = "included_in_plan"
+                        item.resolved_at = datetime.utcnow()
+                        updated_count += 1
+                        logger.info(f"Marked pending order {item.frontend_id} as resolved: {width}\" {shade} paper")
+                    except Exception as item_error:
+                        logger.warning(f"Failed to update pending order {item.frontend_id}: {item_error}")
+            
+            logger.info(f"Updated {updated_count} pending orders to 'included_in_plan' status")
+            
+        except Exception as e:
+            logger.error(f"Error updating resolved pending orders: {e}")
+            # Don't raise - this shouldn't break the main workflow

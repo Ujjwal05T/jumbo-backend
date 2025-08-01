@@ -146,11 +146,10 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         
         logger.info(f"Found {len(cut_rolls_via_link)} cut rolls via PlanInventoryLink")
         
-        # Method 2: Get all cut rolls created around the time of plan execution
-        # This is a fallback for when PlanInventoryLink is not properly maintained
+        # Method 2: Only use time-based fallback if no PlanInventoryLink records exist
         cut_rolls_by_time = []
-        if plan.executed_at:
-            # Get cut rolls created within a reasonable time window around plan execution
+        if not cut_rolls_via_link and plan.executed_at:
+            # Only use time-based method as fallback when no proper links exist
             from datetime import timedelta
             time_window = timedelta(hours=24)  # 24 hour window
             
@@ -160,22 +159,12 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 models.InventoryMaster.created_at <= plan.executed_at + time_window
             ).all()
             
-            logger.info(f"Found {len(cut_rolls_by_time)} cut rolls by time window around {plan.executed_at}")
+            logger.info(f"Using time-based fallback: Found {len(cut_rolls_by_time)} cut rolls around {plan.executed_at}")
+        elif cut_rolls_via_link:
+            logger.info(f"Using PlanInventoryLink: Found {len(cut_rolls_via_link)} plan-specific cut rolls")
         
-        # Method 3: If no specific linking exists, get recent cut rolls (last 7 days) as fallback
-        if not cut_rolls_via_link and not cut_rolls_by_time:
-            from datetime import datetime, timedelta
-            recent_cutoff = datetime.utcnow() - timedelta(days=7)
-            
-            cut_rolls_by_time = db.query(models.InventoryMaster).filter(
-                models.InventoryMaster.roll_type == "cut",
-                models.InventoryMaster.created_at >= recent_cutoff
-            ).order_by(models.InventoryMaster.created_at.desc()).limit(50).all()
-            
-            logger.info(f"Using fallback: Found {len(cut_rolls_by_time)} recent cut rolls")
-        
-        # Combine and deduplicate cut rolls
-        all_cut_rolls_raw = cut_rolls_via_link + cut_rolls_by_time
+        # Use only the appropriate method - prefer PlanInventoryLink over time-based
+        all_cut_rolls_raw = cut_rolls_via_link if cut_rolls_via_link else cut_rolls_by_time
         seen_ids = set()
         all_cut_rolls = []
         

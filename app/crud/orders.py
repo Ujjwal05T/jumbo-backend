@@ -58,9 +58,15 @@ class CRUDOrder(CRUDBase[models.OrderMaster, schemas.OrderMasterCreate, schemas.
         db.add(db_order)
         db.flush()  # Get order ID
         
-        # Create order items
+        # Create order items with unique frontend_id for each
+        from ..services.id_generator import FrontendIDGenerator
+        
         for item_data in order_data.get("order_items", []):
+            # Generate unique frontend_id for each order item
+            frontend_id = FrontendIDGenerator.generate_frontend_id("order_item", db)
+            
             db_item = models.OrderItem(
+                frontend_id=frontend_id,
                 order_id=db_order.id,
                 paper_id=UUID(item_data["paper_id"]),
                 width_inches=item_data["width_inches"],
@@ -70,6 +76,8 @@ class CRUDOrder(CRUDBase[models.OrderMaster, schemas.OrderMasterCreate, schemas.
                 amount=item_data["amount"]
             )
             db.add(db_item)
+            # Flush to commit this item so the next frontend_id generation sees it
+            db.flush()
         
         db.commit()
         db.refresh(db_order)

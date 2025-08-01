@@ -89,7 +89,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
     def start_production_for_plan(
         self, db: Session, *, plan_id: UUID, request_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Start production for a plan - NEW FLOW"""
+        """Start production for a plan - NEW FLOW with comprehensive status updates"""
         db_plan = self.get_plan(db, plan_id)
         if not db_plan:
             raise ValueError("Plan not found")
@@ -98,18 +98,31 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         db_plan.status = "in_progress"
         db_plan.executed_at = datetime.utcnow()
         
+        # Track updated entities
+        updated_orders = []
+        updated_order_items = []
+        updated_pending_orders = []
+        
         # Update related order statuses to "in_process"
         for plan_order in db_plan.plan_orders:
             order = plan_order.order
-            if order.status == "created":
+            if order and order.status == "created":
                 order.status = "in_process"
                 order.started_production_at = datetime.utcnow()
+                updated_orders.append(str(order.id))
                 
                 # Update order items status
                 for item in order.order_items:
                     if item.item_status == "created":
                         item.item_status = "in_process"
                         item.started_production_at = datetime.utcnow()
+                        updated_order_items.append(str(item.id))
+        
+        # TODO: Implement proper pending order resolution tracking
+        # Only mark pending orders as "included_in_plan" if they were actually 
+        # consumed by optimization to create cut rolls, not just because their
+        # parent order is in the plan. Items still pending due to high waste
+        # should remain with status "pending".
         
         # Create inventory records for cut rolls with status "cutting"
         selected_cut_rolls = request_data.get("selected_cut_rolls", [])
@@ -118,8 +131,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         for cut_roll in selected_cut_rolls:
             # Create inventory record
             inventory_item = models.InventoryMaster(
-                paper_id=cut_roll["paper_id"],
-                width_inches=cut_roll["width_inches"],
+                paper_id=cut_roll.get("paper_id"),
+                width_inches=cut_roll.get("width_inches", 0),
                 weight_kg=0,  # Will be updated via QR scan
                 roll_type="cut",
                 status="cutting",
@@ -127,6 +140,16 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 created_by_id=request_data.get("created_by_id")
             )
             db.add(inventory_item)
+            db.flush()  # Get inventory_item.id
+            
+            # Create plan-inventory link to associate this inventory item with the plan
+            plan_inventory_link = models.PlanInventoryLink(
+                plan_id=plan_id,
+                inventory_id=inventory_item.id,
+                quantity_used=1.0  # One roll used
+            )
+            db.add(plan_inventory_link)
+            
             created_inventory.append(inventory_item)
         
         db.commit()
@@ -135,9 +158,20 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         return {
             "plan_id": str(db_plan.id),
             "status": db_plan.status,
-            "orders_updated": len(db_plan.plan_orders),
-            "inventory_created": len(created_inventory),
-            "message": "Production started successfully"
+            "executed_at": db_plan.executed_at.isoformat() if db_plan.executed_at else None,
+            "summary": {
+                "orders_updated": len(updated_orders),
+                "order_items_updated": len(updated_order_items),
+                "pending_orders_updated": len(updated_pending_orders),
+                "inventory_created": len(created_inventory)
+            },
+            "details": {
+                "updated_orders": updated_orders,
+                "updated_order_items": updated_order_items,
+                "updated_pending_orders": updated_pending_orders,
+                "created_inventory": [str(inv.id) for inv in created_inventory]
+            },
+            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, and {len(updated_pending_orders)} pending orders"
         }
 
 

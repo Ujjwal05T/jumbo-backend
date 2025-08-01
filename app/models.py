@@ -521,7 +521,7 @@ models_with_frontend_id = [
     OrderMaster,
     OrderItem,
     PendingOrderMaster,
-    PendingOrderItem,
+    PendingOrderItem,  # Re-enabled with thread-safe ID generation
     InventoryMaster,
     PlanMaster,
     ProductionOrderMaster,
