@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
@@ -97,7 +98,7 @@ async def select_cut_rolls_for_production(
                     for order_item in order.order_items:
                         if order_item.item_status == "created":
                             order_item.item_status = "in_process"
-                            order_item.started_production_at = db.func.now()
+                            order_item.started_production_at = func.now()
                             logger.info(f"✅ Updated order item {order_item.id} item_status to 'in_process' (Step 3: Start Production)")
             
             db.commit()

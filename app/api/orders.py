@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
@@ -341,7 +342,7 @@ def create_dispatch_record(
                 
                 for order_item in matching_order_items:
                     order_item.item_status = "completed"
-                    order_item.dispatched_at = db.func.now()
+                    order_item.dispatched_at = func.now()
                     
                     # Check if order is complete
                     order = crud_operations.get_order(db, order_item.order_id)
@@ -405,21 +406,40 @@ def get_clients_for_dispatch(db: Session = Depends(get_db)):
 def get_warehouse_items(
     skip: int = 0,
     limit: int = 100,
+    client_id: str = None,
+    order_id: str = None,
     db: Session = Depends(get_db)
 ):
     """Get cut rolls (inventory items) that are ready for dispatch - weight added and status 'available'"""
     try:
         from sqlalchemy.orm import joinedload
+        import uuid
         
-        # Get inventory items (cut rolls) with status "available" and weight > 0.1 (real weight added)
-        warehouse_items = db.query(models.InventoryMaster).options(
+        # Base query for inventory items (cut rolls) with status "available" and weight > 0.1
+        query = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.created_by)
         ).filter(
             models.InventoryMaster.roll_type == "cut",
             models.InventoryMaster.status == "available",
             models.InventoryMaster.weight_kg > 0.1  # Real weight has been added
-        ).order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
+        )
+        
+        # Filter by client_id or order_id if provided
+        if client_id or order_id:
+            # Join through plan relationships to get items for specific client/order
+            query = query.join(models.PlanInventoryLink, models.InventoryMaster.id == models.PlanInventoryLink.inventory_id)
+            query = query.join(models.PlanMaster, models.PlanInventoryLink.plan_id == models.PlanMaster.id)
+            query = query.join(models.PlanOrderLink, models.PlanMaster.id == models.PlanOrderLink.plan_id)
+            query = query.join(models.OrderMaster, models.PlanOrderLink.order_id == models.OrderMaster.id)
+            
+            if client_id:
+                query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
+            
+            if order_id:
+                query = query.filter(models.OrderMaster.id == uuid.UUID(order_id))
+        
+        warehouse_items = query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
         
         items_data = []
         for item in warehouse_items:
@@ -436,12 +456,21 @@ def get_warehouse_items(
                 "created_at": item.created_at.isoformat()
             })
         
+        # Update filter criteria description
+        filter_criteria = "roll_type=cut, status=available, weight_kg > 0.1"
+        if client_id:
+            filter_criteria += f", client_id={client_id}"
+        if order_id:
+            filter_criteria += f", order_id={order_id}"
+        
         return {
             "warehouse_items": items_data,
             "total_items": len(items_data),
             "dispatch_info": {
                 "description": "Cut rolls with real weight added, ready for dispatch",
-                "filter_criteria": "roll_type=cut, status=available, weight_kg > 0.1"
+                "filter_criteria": filter_criteria,
+                "filtered_by_client": bool(client_id),
+                "filtered_by_order": bool(order_id)
             },
             "pagination": {
                 "skip": skip,

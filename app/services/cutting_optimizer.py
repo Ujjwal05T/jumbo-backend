@@ -50,6 +50,7 @@ class CuttingOptimizer:
         Generate all combos (1 to 3 rolls) with trim calculation.
         Returns combos sorted by: more rolls first, then lower trim.
         """
+        logger.info(f"🔍 COMBO DEBUG: Generating combos for sizes: {sizes}")
         valid_combos = []
         for r in range(1, MAX_ROLLS_PER_JUMBO + 1):
             for combo in product(sizes, repeat=r):
@@ -57,9 +58,16 @@ class CuttingOptimizer:
                 trim = round(JUMBO_WIDTH - total, 2)
                 if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION:
                     valid_combos.append((tuple(sorted(combo)), trim))
+                    logger.debug(f"🔍 COMBO DEBUG: Valid combo: {tuple(sorted(combo))} → {total}\" used, {trim}\" trim")
+                else:
+                    logger.debug(f"🔍 COMBO DEBUG: Rejected combo: {tuple(sorted(combo))} → {total}\" used, {trim}\" trim (outside 0-20\" range)")
         
         # Prefer: more rolls, then lower trim
-        return sorted(valid_combos, key=lambda x: (-len(x[0]), x[1]))
+        sorted_combos = sorted(valid_combos, key=lambda x: (-len(x[0]), x[1]))
+        logger.info(f"🔍 COMBO DEBUG: Generated {len(sorted_combos)} valid combos, showing first 10:")
+        for i, (combo, trim) in enumerate(sorted_combos[:10]):
+            logger.info(f"  {i+1}. {combo} → trim={trim}\" ({len(combo)} pieces)")
+        return sorted_combos
 
     def match_combos(self, orders: Dict[float, int], interactive: bool = False) -> Tuple[List[Tuple[Tuple[float, ...], float]], Dict[float, int], List[Tuple[Tuple[float, ...], float]]]:
         """
@@ -78,14 +86,24 @@ class CuttingOptimizer:
         high_trim_log = []
         pending = defaultdict(int)
         
-        for combo, trim in combos:
+        # DETAILED MATCHING: Let's see exactly what's happening
+        logger.info(f"🔧 DETAILED MATCHING: Starting with demand: {dict(order_counter)}")
+        
+        for combo_idx, (combo, trim) in enumerate(combos):
             combo_count = Counter(combo)
+            applications_this_combo = 0
+            
+            logger.info(f"  🔍 Trying combo #{combo_idx+1}: {combo} → trim={trim}\" (needs: {dict(combo_count)})")
+            
             while all(order_counter[k] >= v for k, v in combo_count.items()):
                 if trim <= MAX_TRIM:
                     # Accept directly (up to 20" trim)
                     for k in combo:
                         order_counter[k] -= 1
                     used.append((combo, trim))
+                    applications_this_combo += 1
+                    
+                    logger.info(f"    ✅ APPLIED #{applications_this_combo}: {combo} → remaining: {dict(order_counter)}")
                     
                     # Log trim decisions
                     if trim <= 6:
@@ -97,6 +115,11 @@ class CuttingOptimizer:
                     # >20" trim goes to pending orders
                     logger.warning(f"     ❌ REJECTED: {combo} → trim={trim}\" (>20\" - goes to pending)")
                     break
+            
+            if applications_this_combo == 0:
+                logger.info(f"    ❌ SKIPPED: {combo} (insufficient demand: need {dict(combo_count)}, have {dict(order_counter)})")
+            else:
+                logger.info(f"    📊 TOTAL APPLIED: {combo} used {applications_this_combo} times")
         
         # Remaining = pending
         for size, qty in order_counter.items():
@@ -274,6 +297,36 @@ class CuttingOptimizer:
                 used, pending, high_trims = self.match_combos(orders_copy, interactive)
                 logger.info(f"   📊 CUTTING RESULTS: {len(used)} patterns used, {len(list(pending.keys()))} pending widths")
                 
+                # Debug: Show what went to pending and why
+                if pending:
+                    logger.warning(f"   🔍 PENDING DEBUG: Items that couldn't be optimized:")
+                    for width, qty in pending.items():
+                        logger.warning(f"     • {width}\" x{qty} remaining - checking why this couldn't be optimized...")
+                        
+                        # Show some combinations that could work with this width
+                        test_combos = []
+                        for other_width in orders_copy.keys():
+                            if other_width != width:
+                                # Test 2-piece combo
+                                combo_2 = width + other_width
+                                trim_2 = 118 - combo_2
+                                if 0 <= trim_2 <= 20:
+                                    test_combos.append(f"({width}, {other_width}) = {combo_2}\", trim={trim_2}\"")
+                                
+                                # Test 3-piece combo
+                                for third_width in orders_copy.keys():
+                                    combo_3 = width + other_width + third_width
+                                    trim_3 = 118 - combo_3
+                                    if 0 <= trim_3 <= 20:
+                                        test_combos.append(f"({width}, {other_width}, {third_width}) = {combo_3}\", trim={trim_3}\"")
+                        
+                        if test_combos:
+                            logger.warning(f"       → Potential valid combos found:")
+                            for combo in test_combos[:3]:  # Show first 3 potential combos
+                                logger.warning(f"         {combo}")
+                        else:
+                            logger.warning(f"       → No valid combinations found within 0-20\" trim range")
+                
                 # Process successful cutting patterns (each pattern = 1 individual 118" roll)
                 for pattern_idx, (combo, trim) in enumerate(used):
                     individual_118_rolls_needed += 1
@@ -296,43 +349,23 @@ class CuttingOptimizer:
             else:
                 logger.info(f"   ✅ OPTIMIZER: All orders fulfilled from inventory, no cutting needed")
             
-            # CORRECTED JUMBO ROLL CALCULATION: 1 Jumbo Roll = 3 individual 118" rolls
-            # This is the critical fix from the implementation plan
-            complete_jumbo_rolls = individual_118_rolls_needed // 3
-            remaining_individual_rolls = individual_118_rolls_needed % 3
+            # JUMBO ROLL CALCULATION: Show ALL rolls to user, let them decide
+            # Don't auto-move anything to pending - USER CHOICE!
+            logger.info(f"   📊 JUMBO ROLL CALCULATION for spec {spec_key}:")
+            logger.info(f"     🎯 Individual 118\" rolls generated: {individual_118_rolls_needed}")
+            logger.info(f"     📦 Complete jumbo rolls possible: {individual_118_rolls_needed // 3}")
+            if individual_118_rolls_needed % 3 > 0:
+                logger.info(f"     ℹ️  Extra 118\" rolls available: {individual_118_rolls_needed % 3} (user can choose)")
+            logger.info(f"     👤 USER DECIDES: All {individual_118_rolls_needed} rolls shown to user for selection")
             
-            # Only count complete jumbo rolls for procurement
-            jumbo_rolls_needed += complete_jumbo_rolls
-            
-            # If there are remaining individual rolls, we need one more jumbo roll
-            if remaining_individual_rolls > 0:
-                jumbo_rolls_needed += 1
-                
-                # Calculate how many sets will be unused from this extra jumbo roll
-                unused_sets_from_extra_jumbo = 3 - remaining_individual_rolls
-                
-                logger.info(f"   📊 JUMBO CALCULATION for spec {spec_key}:")
-                logger.info(f"     🎯 Individual 118\" rolls needed: {individual_118_rolls_needed}")
-                logger.info(f"     📦 Complete jumbo rolls: {complete_jumbo_rolls}")
-                logger.info(f"     ⏳ Remaining individual rolls: {remaining_individual_rolls}")
-                logger.info(f"     ➕ Extra jumbo roll needed: {'Yes' if remaining_individual_rolls > 0 else 'No'}")
-                logger.info(f"     💡 Unused sets from extra jumbo: {unused_sets_from_extra_jumbo if remaining_individual_rolls > 0 else 0}")
-                logger.info(f"     🎯 Total jumbo rolls for this spec: {complete_jumbo_rolls + (1 if remaining_individual_rolls > 0 else 0)}")
-                
-                # The unused sets from the extra jumbo roll become available for future orders
-                # This is more accurate than sending them to pending orders
-                if unused_sets_from_extra_jumbo > 0:
-                    print(f"   ✅ {unused_sets_from_extra_jumbo} sets from extra jumbo roll will be available for future orders")
-                    # These don't go to pending orders - they're just extra capacity we'll have
-            else:
-                print(f"   📊 CORRECTED Jumbo calculation for spec {spec_key}:")
-                print(f"     Individual 118\" rolls needed: {individual_118_rolls_needed}")
-                print(f"     Complete jumbo rolls needed: {complete_jumbo_rolls}")
-                print(f"     Perfect fit - no extra jumbo roll needed")
+            # Note: We don't auto-calculate jumbo_rolls_needed here anymore
+            # It will be calculated based on user's actual selection in frontend
             
             # Add orders that couldn't be fulfilled to pending
             if orders_copy:
+                logger.info(f"🔍 PENDING CONVERSION DEBUG: pending dict = {dict(pending)}")
                 for width, qty in pending.items():
+                    logger.info(f"🔍 Creating pending order: {width}\" x{qty}")
                     new_pending_orders.append({
                         'width': width,
                         'quantity': qty,
@@ -356,11 +389,16 @@ class CuttingOptimizer:
         total_pending = sum(order['quantity'] for order in new_pending_orders)
         total_individual_118_rolls = len([roll for roll in cut_rolls_generated if roll['source'] == 'cutting'])
         
+        # Show total rolls available - user will decide how many to use
+        # Don't auto-calculate jumbo_rolls_needed, let frontend calculate based on selection
+        jumbo_rolls_needed = 0  # User choice - will be calculated when they select rolls
+        
         # Log final results
         logger.info(f"🎯 OPTIMIZER RESULTS:")
         logger.info(f"   📦 Total cut rolls generated: {total_cut_rolls}")
         logger.info(f"   🎯 Total individual 118\" rolls: {total_individual_118_rolls}")
-        logger.info(f"   📋 Total jumbo rolls needed: {jumbo_rolls_needed}")
+        logger.info(f"   👤 USER CHOICE: {total_individual_118_rolls} individual 118\" rolls available for selection")
+        logger.info(f"   📦 MAX JUMBOS POSSIBLE: {total_individual_118_rolls // 3} complete jumbo rolls")
         logger.info(f"   ⏳ Total pending orders: {len(new_pending_orders)}")
         logger.info(f"   📊 Total pending quantity: {total_pending}")
         logger.info(f"   🔧 Specification groups processed: {len(spec_groups)}")
@@ -371,11 +409,39 @@ class CuttingOptimizer:
         for i, roll in enumerate(cut_rolls_generated, 1):
             logger.info(f"   Roll {i}: {roll['width']}\" - GSM:{roll['gsm']}, BF:{roll['bf']}, Shade:{roll['shade']}, Source:{roll['source']}")
         
-        # Log pending orders if any
+        # Log pending orders if any (consolidated to avoid duplicates)
         if new_pending_orders:
             logger.warning(f"⏳ PENDING ORDERS (>20\" trim):")
-            for i, pending in enumerate(new_pending_orders, 1):
-                logger.warning(f"   Pending {i}: {pending['width']}\" x{pending['quantity']} - GSM:{pending['gsm']}, Reason:{pending.get('reason', 'high_trim')}")
+            logger.info(f"🔍 RAW PENDING ORDERS COUNT: {len(new_pending_orders)}")
+            for i, pending in enumerate(new_pending_orders):
+                logger.info(f"🔍 Raw pending {i+1}: {pending['width']}\" x{pending['quantity']}")
+            
+            # Consolidate pending orders by width, GSM, shade, BF to avoid duplicate logging
+            consolidated_pending = {}
+            for pending in new_pending_orders:
+                key = (pending['width'], pending['gsm'], pending['bf'], pending['shade'], pending.get('reason', 'high_trim'))
+                if key in consolidated_pending:
+                    logger.info(f"🔍 CONSOLIDATING: {pending['width']}\" x{pending['quantity']} added to existing x{consolidated_pending[key]['quantity']}")
+                    consolidated_pending[key]['quantity'] += pending['quantity']
+                else:
+                    logger.info(f"🔍 NEW PENDING: {pending['width']}\" x{pending['quantity']}")
+                    consolidated_pending[key] = {
+                        'width': pending['width'],
+                        'quantity': pending['quantity'],
+                        'gsm': pending['gsm'],
+                        'bf': pending['bf'],
+                        'shade': pending['shade'],
+                        'reason': pending.get('reason', 'high_trim')
+                    }
+            
+            # Log consolidated pending orders (no more duplicates!)
+            for i, (key, pending_info) in enumerate(consolidated_pending.items(), 1):
+                logger.warning(f"   Pending {i}: {pending_info['width']}\" x{pending_info['quantity']} - GSM:{pending_info['gsm']}, Reason:{pending_info['reason']}")
+                
+            # CRITICAL: Check what we're actually returning vs logging
+            logger.info(f"🔍 FINAL PENDING ORDERS TO RETURN: {len(new_pending_orders)} items")
+            for i, pending in enumerate(new_pending_orders):
+                logger.info(f"🔍 Final return {i+1}: {pending}")
         
         # NEW FLOW: Return 3 distinct outputs (removed waste inventory)
         result = {

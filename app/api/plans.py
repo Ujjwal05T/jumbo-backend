@@ -175,10 +175,10 @@ def complete_cutting_plan(
         logger.error(f"Error completing plan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/plans/{plan_id}/start-production", tags=["Plan Management"])
+@router.post("/plans/{plan_id}/start-production", response_model=schemas.StartProductionResponse, tags=["Plan Management"])
 def start_production(
     plan_id: str,
-    request_data: Dict[str, Any],
+    request_data: schemas.StartProductionRequest,
     db: Session = Depends(get_db)
 ):
     """Start production for a plan - NEW FLOW"""
@@ -187,7 +187,7 @@ def start_production(
         from datetime import datetime
         
         plan_uuid = uuid.UUID(plan_id)
-        result = crud_operations.start_production_for_plan(db=db, plan_id=plan_uuid, request_data=request_data)
+        result = crud_operations.start_production_for_plan(db=db, plan_id=plan_uuid, request_data=request_data.model_dump())
         
         return result
     except ValueError:

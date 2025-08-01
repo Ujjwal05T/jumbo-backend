@@ -124,12 +124,15 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # parent order is in the plan. Items still pending due to high waste
         # should remain with status "pending".
         
-        # Create inventory records for cut rolls with status "cutting"
+        # Process selected and unselected cut rolls
         selected_cut_rolls = request_data.get("selected_cut_rolls", [])
+        all_available_cuts = request_data.get("all_available_cuts", [])  # All cuts that were available for selection
         created_inventory = []
+        created_pending_items = []
         
+        # Create inventory records for SELECTED cut rolls with status "cutting"
         for cut_roll in selected_cut_rolls:
-            # Create inventory record
+            # Create inventory record for selected rolls
             inventory_item = models.InventoryMaster(
                 paper_id=cut_roll.get("paper_id"),
                 width_inches=cut_roll.get("width_inches", 0),
@@ -152,6 +155,54 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             created_inventory.append(inventory_item)
         
+        # Move UNSELECTED cut rolls to pending orders
+        if all_available_cuts:
+            selected_qr_codes = {cut.get("qr_code") for cut in selected_cut_rolls}
+            
+            for available_cut in all_available_cuts:
+                # If this cut was not selected, move it to pending orders
+                if available_cut.get("qr_code") not in selected_qr_codes:
+                    from ..services.id_generator import FrontendIDGenerator
+                    import logging
+                    
+                    logger = logging.getLogger(__name__)
+                    
+                    # Debug: Check if order_id is available
+                    order_id = available_cut.get("order_id")
+                    logger.info(f"🔍 PENDING DEBUG: Creating pending item for unselected cut: {available_cut}")
+                    logger.info(f"🔍 PENDING DEBUG: order_id = {order_id}")
+                    
+                    if not order_id:
+                        logger.warning(f"⚠️ PENDING WARNING: No order_id found for unselected cut roll. Available keys: {list(available_cut.keys())}")
+                        # Use the first order from plan_orders as fallback
+                        if db_plan.plan_orders:
+                            order_id = db_plan.plan_orders[0].order_id
+                            logger.info(f"🔧 PENDING FALLBACK: Using first plan order_id as fallback: {order_id}")
+                        else:
+                            logger.error(f"❌ PENDING ERROR: No plan orders available for fallback")
+                            continue  # Skip this item if no fallback available
+                    
+                    # Create pending order item for unselected cut
+                    frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
+                    
+                    pending_item = models.PendingOrderItem(
+                        frontend_id=frontend_id,
+                        original_order_id=order_id,
+                        width_inches=available_cut.get("width_inches", 0),
+                        quantity_pending=1,  # Each cut roll is quantity 1
+                        gsm=available_cut.get("gsm"),
+                        bf=available_cut.get("bf"),
+                        shade=available_cut.get("shade"),
+                        reason="unselected_for_production",
+                        status="pending",
+                        created_by_id=request_data.get("created_by_id")
+                    )
+                    db.add(pending_item)
+                    db.flush()
+                    
+                    created_pending_items.append(pending_item)
+                    updated_pending_orders.append(str(pending_item.id))
+        
         db.commit()
         db.refresh(db_plan)
         
@@ -163,15 +214,17 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "orders_updated": len(updated_orders),
                 "order_items_updated": len(updated_order_items),
                 "pending_orders_updated": len(updated_pending_orders),
-                "inventory_created": len(created_inventory)
+                "inventory_created": len(created_inventory),
+                "pending_items_created": len(created_pending_items)
             },
             "details": {
                 "updated_orders": updated_orders,
                 "updated_order_items": updated_order_items,
                 "updated_pending_orders": updated_pending_orders,
-                "created_inventory": [str(inv.id) for inv in created_inventory]
+                "created_inventory": [str(inv.id) for inv in created_inventory],
+                "created_pending_items": [str(pending.id) for pending in created_pending_items]
             },
-            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, and {len(updated_pending_orders)} pending orders"
+            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, {len(updated_pending_orders)} pending orders, and created {len(created_pending_items)} pending items from unselected rolls"
         }
 
 

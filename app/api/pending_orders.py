@@ -65,3 +65,35 @@ def get_consolidation_opportunities(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error getting consolidation opportunities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-order-items/optimize-preview", tags=["Pending Order Items"])
+def optimize_pending_orders_preview(db: Session = Depends(get_db)):
+    """
+    Run optimization on all pending orders to preview possible solutions.
+    Returns remaining pending orders, roll combinations, and roll suggestions.
+    No data is saved to database unless user accepts specific combinations.
+    """
+    try:
+        from ..services.pending_optimizer import PendingOptimizer
+        optimizer = PendingOptimizer(db=db)
+        return optimizer.preview_optimization()
+    except Exception as e:
+        logger.error(f"Error in pending order optimization preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-order-items/accept-combinations", tags=["Pending Order Items"])
+def accept_pending_combinations(
+    combinations: List[Dict[str, Any]],
+    db: Session = Depends(get_db)
+):
+    """
+    Accept selected roll combinations from optimization preview.
+    Creates a new plan with selected combinations and marks relevant pending orders as resolved.
+    """
+    try:
+        from ..services.pending_optimizer import PendingOptimizer
+        optimizer = PendingOptimizer(db=db)
+        return optimizer.accept_combinations(combinations)
+    except Exception as e:
+        logger.error(f"Error accepting pending combinations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

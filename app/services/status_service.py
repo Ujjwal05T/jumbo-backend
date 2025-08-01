@@ -1,5 +1,6 @@
 from typing import Any, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from datetime import datetime
 import uuid
 import logging
@@ -279,7 +280,7 @@ class StatusService:
             # Order statuses
             order_statuses = self.db.query(
                 models.OrderMaster.status,
-                self.db.func.count(models.OrderMaster.id)
+                func.count(models.OrderMaster.id)
             ).group_by(models.OrderMaster.status).all()
             
             for status, count in order_statuses:
@@ -288,7 +289,7 @@ class StatusService:
             # Plan statuses
             plan_statuses = self.db.query(
                 models.PlanMaster.status,
-                self.db.func.count(models.PlanMaster.id)
+                func.count(models.PlanMaster.id)
             ).group_by(models.PlanMaster.status).all()
             
             for status, count in plan_statuses:
@@ -297,7 +298,7 @@ class StatusService:
             # Inventory statuses
             inventory_statuses = self.db.query(
                 models.InventoryMaster.status,
-                self.db.func.count(models.InventoryMaster.id)
+                func.count(models.InventoryMaster.id)
             ).group_by(models.InventoryMaster.status).all()
             
             for status, count in inventory_statuses:
@@ -306,7 +307,7 @@ class StatusService:
             # Production order statuses
             production_statuses = self.db.query(
                 models.ProductionOrderMaster.status,
-                self.db.func.count(models.ProductionOrderMaster.id)
+                func.count(models.ProductionOrderMaster.id)
             ).group_by(models.ProductionOrderMaster.status).all()
             
             for status, count in production_statuses:
@@ -315,7 +316,7 @@ class StatusService:
             # Pending order statuses
             pending_statuses = self.db.query(
                 models.PendingOrderMaster.status,
-                self.db.func.count(models.PendingOrderMaster.id)
+                func.count(models.PendingOrderMaster.id)
             ).group_by(models.PendingOrderMaster.status).all()
             
             for status, count in pending_statuses:

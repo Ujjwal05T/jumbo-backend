@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from typing import Dict, Any
 import logging
 
@@ -77,12 +78,15 @@ def update_weight_via_qr(
         old_weight = matching_item.weight_kg
         matching_item.weight_kg = weight_update.weight_kg
         
-        # If provided, update location and status
+        # If provided, update location
         if weight_update.location:
             matching_item.location = weight_update.location
         
-        if weight_update.status:
-            matching_item.status = weight_update.status
+        # AUTOMATIC STATUS UPDATE: When weight is added, automatically set status to 'available'
+        # This means the cut roll is now ready for dispatch
+        if matching_item.weight_kg > 0.1:  # Real weight added
+            matching_item.status = "available"
+            logger.info(f"🔄 Auto-updated inventory {matching_item.id} status to 'available' after weight update")
         
         # STEP 4: When weight is added, find related order items and set them to "in_warehouse"
         # Find order items that match this cut roll's specifications
@@ -101,7 +105,7 @@ def update_weight_via_qr(
             if order_items:
                 order_item = order_items[0]
                 order_item.item_status = "in_warehouse"
-                order_item.moved_to_warehouse_at = db.func.now()
+                order_item.moved_to_warehouse_at = func.now()
                 logger.info(f"✅ Updated order item {order_item.id} item_status to 'in_warehouse' (Step 4: QR Weight Added)")
         
         db.commit()

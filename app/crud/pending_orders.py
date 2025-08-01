@@ -123,50 +123,35 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         self, db: Session, pending_orders: List[Dict[str, Any]], user_id: UUID
     ) -> List[models.PendingOrderItem]:
         """Create pending order items from optimization output - NEW FLOW"""
-        created_items = []
+        import uuid
+        from ..services.pending_order_service import PendingOrderService
         
+        # Use the pending order service with replace_existing=True for optimization results
+        service = PendingOrderService(db=db, user_id=user_id)
+        
+        # Group pending orders by original_order_id since service method expects this
+        grouped_pending = {}
         for pending in pending_orders:
-            # Check if similar pending item already exists
-            existing = db.query(models.PendingOrderItem).filter(
-                and_(
-                    models.PendingOrderItem.width_inches == pending['width'],
-                    models.PendingOrderItem.gsm == pending['gsm'],
-                    models.PendingOrderItem.bf == pending['bf'],
-                    models.PendingOrderItem.shade == pending['shade'],
-                    models.PendingOrderItem.status == "pending"
-                )
-            ).first()
+            original_order_id = pending.get('original_order_id')
+            if not original_order_id:
+                raise ValueError(f"original_order_id is required for pending order: {pending}")
             
-            if existing:
-                # Update existing quantity
-                existing.quantity_pending += pending['quantity']
-                created_items.append(existing)
-            else:
-                # Create new pending item (original_order_id should be provided by workflow manager)
-                original_order_id = pending.get('original_order_id')
-                if not original_order_id:
-                    raise ValueError(f"original_order_id is required for pending order: {pending}")
-                
-                frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
-                db_pending = models.PendingOrderItem(
-                    frontend_id=frontend_id,
-                    original_order_id=original_order_id,
-                    width_inches=pending['width'],
-                    gsm=pending['gsm'],
-                    bf=pending['bf'],
-                    shade=pending['shade'],
-                    quantity_pending=pending['quantity'],
-                    reason=pending.get('reason', 'waste_too_high'),
-                    created_by_id=user_id
-                )
-                db.add(db_pending)
-                db.flush()  # Ensure this record is committed before generating next frontend_id
-                created_items.append(db_pending)
+            if original_order_id not in grouped_pending:
+                grouped_pending[original_order_id] = []
+            grouped_pending[original_order_id].append(pending)
         
-        if created_items:
-            db.commit()
+        # Create pending items for each order using the service
+        all_created_items = []
+        for original_order_id, order_pending_list in grouped_pending.items():
+            created_items = service.create_pending_items(
+                pending_orders=order_pending_list,
+                original_order_id=uuid.UUID(original_order_id),
+                reason="optimization_result",
+                replace_existing=True  # CRITICAL FIX: Replace existing quantities from optimization
+            )
+            all_created_items.extend(created_items)
         
-        return created_items
+        return all_created_items
     
     def get_pending_items_summary(self, db: Session) -> Dict[str, Any]:
         """Get summary statistics for pending order items"""

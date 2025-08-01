@@ -688,11 +688,10 @@ class CuttingPlanWithSelectionRequest(CuttingPlanRequest):
     selection_criteria: Optional[Dict[str, Any]] = None
 
 class QRWeightUpdate(BaseModel):
-    """Schema for updating weight via QR code"""
+    """Schema for updating weight via QR code - status automatically set to 'available'"""
     qr_code: str
     weight_kg: float = Field(..., gt=0)
     location: Optional[str] = None
-    status: Optional[str] = None
 
 class QRGenerateRequest(BaseModel):
     """Schema for generating QR code"""
@@ -805,4 +804,43 @@ class DispatchRecord(BaseModel):
     
     class Config:
         from_attributes = True
+
+# ============================================================================
+# PRODUCTION START SCHEMAS - NEW FLOW
+# ============================================================================
+
+class SelectedCutRoll(BaseModel):
+    """Individual cut roll selected for production"""
+    paper_id: str = Field(..., description="Paper ID for this cut roll")
+    width_inches: float = Field(..., gt=0, description="Width in inches")
+    qr_code: str = Field(..., description="QR code for tracking")
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str = Field(..., max_length=50)
+    individual_roll_number: Optional[int] = Field(None, description="Roll number within jumbo")
+    trim_left: Optional[float] = Field(None, ge=0, description="Trim left in inches")
+    order_id: Optional[str] = Field(None, description="Source order ID")
+
+class StartProductionRequest(BaseModel):
+    """Request to start production with comprehensive roll handling"""
+    selected_cut_rolls: List[SelectedCutRoll] = Field(..., min_items=1, description="Cut rolls selected for production")
+    all_available_cuts: List[SelectedCutRoll] = Field(..., description="All cuts that were available for selection")
+    created_by_id: str = Field(..., description="ID of user starting production")
+
+class ProductionStartSummary(BaseModel):
+    """Summary of production start operation"""
+    orders_updated: int = Field(..., ge=0)
+    order_items_updated: int = Field(..., ge=0)
+    pending_orders_updated: int = Field(..., ge=0)
+    inventory_created: int = Field(..., ge=0)
+    pending_items_created: int = Field(..., ge=0)
+
+class StartProductionResponse(BaseModel):
+    """Response from start production operation"""
+    plan_id: str
+    status: str
+    executed_at: Optional[str] = None
+    summary: ProductionStartSummary
+    details: Dict[str, List[str]]
+    message: str
 

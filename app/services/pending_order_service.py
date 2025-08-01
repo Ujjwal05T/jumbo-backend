@@ -22,7 +22,7 @@ class PendingOrderService:
         self.user_id = user_id
         self.status_service = StatusService(db, user_id)
     
-    def create_pending_items(self, pending_orders: List[Dict], original_order_id: uuid.UUID, reason: str = "no_suitable_jumbo") -> List[models.PendingOrderItem]:
+    def create_pending_items(self, pending_orders: List[Dict], original_order_id: uuid.UUID, reason: str = "no_suitable_jumbo", replace_existing: bool = False) -> List[models.PendingOrderItem]:
         """
         Create pending order items from cutting optimizer output.
         
@@ -30,6 +30,7 @@ class PendingOrderService:
             pending_orders: List of pending order dicts from cutting optimizer
             original_order_id: ID of the original order that couldn't be fully fulfilled
             reason: Reason why these items are pending
+            replace_existing: If True, replace existing pending quantities instead of adding to them
             
         Returns:
             List of created PendingOrderItem objects
@@ -49,10 +50,17 @@ class PendingOrderService:
                 ).first()
                 
                 if existing_item:
-                    # Update existing item quantity
-                    existing_item.quantity_pending += pending['quantity']
-                    created_items.append(existing_item)
-                    logger.info(f"Updated existing pending item {existing_item.id} with additional {pending['quantity']} units")
+                    if replace_existing:
+                        # Replace existing quantity (from optimization algorithm)
+                        old_quantity = existing_item.quantity_pending
+                        existing_item.quantity_pending = pending['quantity']
+                        created_items.append(existing_item)
+                        logger.info(f"🔄 REPLACED existing pending item {existing_item.id}: {old_quantity} → {pending['quantity']} units")
+                    else:
+                        # Add to existing quantity (additional new pending)
+                        existing_item.quantity_pending += pending['quantity']
+                        created_items.append(existing_item)
+                        logger.info(f"➕ ADDED to existing pending item {existing_item.id} with additional {pending['quantity']} units")
                 else:
                     # Create new pending item
                     frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", self.db)
