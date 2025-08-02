@@ -142,18 +142,30 @@ class PendingOptimizer:
     def _process_roll_combinations(self, cut_rolls: List[Dict]) -> List[Dict]:
         """
         Process cut rolls into user-selectable combinations.
-        Groups rolls by jumbo and provides selection metadata.
+        The cutting optimizer already provides optimized combinations - we just need to format them properly.
         """
+        logger.info(f"🔍 PROCESSING {len(cut_rolls)} cut rolls for combinations")
         combinations = []
         
-        # Group cut rolls by their source jumbo roll or pattern
+        # Group cut rolls by their actual jumbo roll number (if provided by optimizer)
+        # The cutting optimizer should already provide proper groupings
         jumbo_groups = {}
+        
         for i, roll in enumerate(cut_rolls):
-            # Create a group key based on paper specs and pattern
-            group_key = f"{roll.get('gsm')}_{roll.get('shade')}_{roll.get('bf')}_pattern_{i//3}"  # Assume max 3 rolls per jumbo
+            logger.debug(f"  Roll {i+1}: {roll}")
             
-            if group_key not in jumbo_groups:
-                jumbo_groups[group_key] = {
+            # Use individual_roll_number from main algorithm for proper 118" grouping
+            jumbo_key = roll.get('individual_roll_number')
+            
+            # If no individual_roll_number, something is very wrong - create separate group
+            if jumbo_key is None:
+                logger.error(f"🚨 CRITICAL: Cut roll missing individual_roll_number: {roll}")
+                jumbo_key = f"ERROR_{roll.get('gsm')}_{roll.get('shade')}_{roll.get('bf')}_{len(jumbo_groups)}"
+            
+            logger.debug(f"  Using jumbo_key: {jumbo_key} for roll {roll.get('width')} inches")
+            
+            if jumbo_key not in jumbo_groups:
+                jumbo_groups[jumbo_key] = {
                     'combination_id': str(uuid.uuid4()),
                     'paper_specs': {
                         'gsm': roll.get('gsm'),
@@ -166,16 +178,33 @@ class PendingOptimizer:
                     'jumbo_width': 118
                 }
             
-            jumbo_groups[group_key]['rolls'].append({
+            jumbo_groups[jumbo_key]['rolls'].append({
                 'width': roll.get('width'),
                 'quantity': roll.get('quantity', 1),
                 'source': roll.get('source', 'cutting')
             })
-            jumbo_groups[group_key]['total_width'] += roll.get('width', 0)
+            jumbo_groups[jumbo_key]['total_width'] += roll.get('width', 0)
         
-        # Calculate trim for each combination
-        for group_data in jumbo_groups.values():
-            group_data['trim'] = round(118 - group_data['total_width'], 2)
+        # Calculate trim for each combination and validate 118" constraint
+        for group_key, group_data in jumbo_groups.items():
+            total_width = group_data['total_width']
+            
+            # 🚨 CRITICAL VALIDATION: Ensure no combination exceeds 118"
+            if total_width > 118:
+                logger.error(f"🚨 CRITICAL ERROR: Combination {group_key} exceeds 118\"!")
+                logger.error(f"   Total width: {total_width}\" (over 118\" limit)")
+                logger.error(f"   Rolls in combination: {group_data['rolls']}")
+                logger.error(f"   This should NEVER happen if main algorithm worked correctly!")
+                # Skip this invalid combination
+                continue
+            
+            group_data['trim'] = round(118 - total_width, 2)
+            
+            # Additional validation: trim should be positive
+            if group_data['trim'] < 0:
+                logger.error(f"🚨 NEGATIVE TRIM: Combination {group_key} has negative trim: {group_data['trim']}\"")
+                continue
+                
             combinations.append(group_data)
         
         # Sort by efficiency (lower trim first)
@@ -312,44 +341,181 @@ class PendingOptimizer:
                     }
                     cut_rolls_generated.append(cut_roll)
             
-            # Create plan master
+            # Create plan master - handle missing user_id by using system user
+            user_id_to_use = self.user_id
+            if user_id_to_use is None:
+                # Try to get a system user or create a default one
+                system_user = self.db.query(models.UserMaster).filter(
+                    models.UserMaster.name == "System"
+                ).first()
+                
+                if system_user:
+                    user_id_to_use = system_user.id
+                    logger.warning(f"⚠️ Using system user for pending orders plan: {system_user.id}")
+                else:
+                    # Create a temporary system user
+                    system_user = models.UserMaster(
+                        id=uuid.uuid4(),
+                        name="System",
+                        username="system",
+                        password_hash="system_hash",  # Not used for system user
+                        role="system",
+                        status="active"
+                    )
+                    self.db.add(system_user)
+                    self.db.flush()
+                    user_id_to_use = system_user.id
+                    logger.warning(f"⚠️ Created temporary system user for pending orders plan: {system_user.id}")
+            
             plan = models.PlanMaster(
                 name=plan_name,
                 cut_pattern=json.dumps(cut_rolls_generated),
                 expected_waste_percentage=0,  # Calculate if needed
                 status=schemas.PlanStatus.PLANNED.value,
-                created_by_id=self.user_id
+                created_by_id=user_id_to_use
             )
             
             self.db.add(plan)
             self.db.flush()  # Get plan ID
             
-            # Find and update pending orders that match the accepted combinations
-            resolved_pending_orders = []
+            # ✅ FIX: Create actual inventory items for each cut roll in the plan
+            from ..services.barcode_generator import BarcodeGenerator
+            created_inventory_items = []
+            
             for combo in combinations:
                 paper_specs = combo['paper_specs']
+                
+                # Find matching paper master record
+                paper = self.db.query(models.PaperMaster).filter(
+                    models.PaperMaster.gsm == paper_specs['gsm'],
+                    models.PaperMaster.bf == paper_specs['bf'],
+                    models.PaperMaster.shade == paper_specs['shade']
+                ).first()
+                
+                if not paper:
+                    logger.warning(f"No paper master found for {paper_specs}, skipping inventory creation")
+                    continue
+                
                 for roll_data in combo.get('rolls', []):
                     width = roll_data['width']
+                    quantity = roll_data.get('quantity', 1)
                     
-                    # Find matching pending orders
+                    # Create inventory items for each quantity
+                    for _ in range(quantity):
+                        # Generate barcode for this cut roll
+                        barcode_id = BarcodeGenerator.generate_cut_roll_barcode(self.db)
+                        qr_code = f"QR{plan.id.hex[:8].upper()}{len(created_inventory_items)+1:03d}"
+                        
+                        # Create inventory item
+                        inventory_item = models.InventoryMaster(
+                            id=uuid.uuid4(),
+                            paper_id=paper.id,
+                            width_inches=width,
+                            weight_kg=0.1,  # Placeholder weight (will be updated during production)
+                            roll_type="cut",
+                            location="production_floor",
+                            status="cutting",  # Start in cutting status
+                            qr_code=qr_code,
+                            barcode_id=barcode_id,
+                            production_date=datetime.utcnow(),
+                            created_by_id=user_id_to_use,
+                            created_at=datetime.utcnow()
+                        )
+                        
+                        self.db.add(inventory_item)
+                        self.db.flush()  # Get inventory item ID
+                        
+                        # Create plan inventory link
+                        plan_inventory_link = models.PlanInventoryLink(
+                            id=uuid.uuid4(),
+                            plan_id=plan.id,
+                            inventory_id=inventory_item.id,
+                            quantity_used=1.0  # One roll used
+                        )
+                        
+                        self.db.add(plan_inventory_link)
+                        created_inventory_items.append(inventory_item)
+                        
+            logger.info(f"✅ Created {len(created_inventory_items)} inventory items for plan {plan.id}")
+            logger.info(f"✅ Created {len(created_inventory_items)} plan inventory links")
+            
+            # Find and update pending orders that match the accepted combinations
+            resolved_pending_orders = []
+            logger.info(f"Processing {len(combinations)} combinations to reduce pending orders...")
+            
+            for combo_idx, combo in enumerate(combinations):
+                paper_specs = combo['paper_specs']
+                logger.info(f"   Combo {combo_idx + 1}: {paper_specs['shade']} {paper_specs['gsm']}GSM")
+                
+                for roll_idx, roll_data in enumerate(combo.get('rolls', [])):
+                    width = roll_data['width']
+                    roll_quantity = roll_data.get('quantity', 1)
+                    
+                    logger.info(f"     Processing roll {roll_idx + 1}: {width}\" x{roll_quantity}")
+                    
+                    # Find matching pending orders that need to be reduced
                     matching_pending = self.db.query(models.PendingOrderItem).filter(
                         models.PendingOrderItem.width_inches == width,
                         models.PendingOrderItem.gsm == paper_specs['gsm'],
                         models.PendingOrderItem.bf == paper_specs['bf'],
                         models.PendingOrderItem.shade == paper_specs['shade'],
-                        models.PendingOrderItem.status == "pending"
-                    ).limit(roll_data.get('quantity', 1)).all()
+                        models.PendingOrderItem.status == "pending",
+                        models.PendingOrderItem.quantity_pending > 0
+                    ).order_by(models.PendingOrderItem.created_at).all()
                     
-                    # Update status of matching pending orders
+                    logger.info(f"       Found {len(matching_pending)} matching pending orders")
+                    
+                    # Reduce quantities from pending orders
+                    remaining_to_fulfill = roll_quantity
                     for pending_item in matching_pending:
-                        pending_item.status = "included_in_plan"
-                        pending_item.resolved_at = datetime.utcnow()
-                        resolved_pending_orders.append({
-                            'pending_id': str(pending_item.id),
-                            'frontend_id': pending_item.frontend_id,
-                            'width': float(pending_item.width_inches),
-                            'paper_specs': paper_specs
-                        })
+                        if remaining_to_fulfill <= 0:
+                            break
+                            
+                        current_pending = pending_item.quantity_pending
+                        logger.info(f"         Pending item {pending_item.frontend_id}: has {current_pending}, need to reduce by {remaining_to_fulfill}")
+                        
+                        if current_pending <= remaining_to_fulfill:
+                            # This pending order is fully resolved
+                            logger.info(f"         FULLY RESOLVED: {pending_item.frontend_id} ({current_pending} rolls)")
+                            pending_item.status = "resolved"
+                            pending_item.quantity_pending = 0
+                            pending_item.resolved_at = datetime.utcnow()
+                            remaining_to_fulfill -= current_pending
+                            
+                            resolved_pending_orders.append({
+                                'pending_id': str(pending_item.id),
+                                'frontend_id': pending_item.frontend_id,
+                                'width': float(pending_item.width_inches),
+                                'quantity_resolved': current_pending,
+                                'paper_specs': paper_specs,
+                                'status': 'fully_resolved'
+                            })
+                        else:
+                            # This pending order is partially resolved
+                            logger.info(f"         PARTIALLY RESOLVED: {pending_item.frontend_id} ({remaining_to_fulfill} of {current_pending} rolls)")
+                            pending_item.quantity_pending -= remaining_to_fulfill
+                            # Keep status as pending since some quantity remains
+                            
+                            resolved_pending_orders.append({
+                                'pending_id': str(pending_item.id),
+                                'frontend_id': pending_item.frontend_id,
+                                'width': float(pending_item.width_inches),
+                                'quantity_resolved': remaining_to_fulfill,
+                                'quantity_remaining': pending_item.quantity_pending,
+                                'paper_specs': paper_specs,
+                                'status': 'partially_resolved'
+                            })
+                            remaining_to_fulfill = 0
+                    
+                    if remaining_to_fulfill > 0:
+                        logger.warning(f"Could not fully fulfill {width}\" roll requirement. {remaining_to_fulfill} rolls still needed but no matching pending orders found.")
+            
+            logger.info(f"PENDING ORDER REDUCTION SUMMARY:")
+            logger.info(f"   Total resolved/reduced: {len(resolved_pending_orders)} items")
+            for item in resolved_pending_orders:
+                logger.info(f"   - {item['frontend_id']}: {item['width']}\" - {item['quantity_resolved']} rolls {item['status']}")
+                if item.get('quantity_remaining'):
+                    logger.info(f"     -> {item['quantity_remaining']} rolls still pending")
             
             self.db.commit()
             
@@ -358,9 +524,11 @@ class PendingOptimizer:
                 "plan_id": str(plan.id),
                 "plan_name": plan_name,
                 "resolved_pending_orders": resolved_pending_orders,
+                "inventory_items_created": len(created_inventory_items),
                 "summary": {
                     "combinations_accepted": len(combinations),
                     "pending_orders_resolved": len(resolved_pending_orders),
+                    "inventory_items_created": len(created_inventory_items),
                     "plan_created": True
                 }
             }

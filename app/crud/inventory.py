@@ -135,6 +135,7 @@ class CRUDInventory(CRUDBase[models.InventoryMaster, schemas.InventoryMasterCrea
             roll_type=inventory.roll_type,
             location=inventory.location,
             qr_code=inventory.qr_code,
+            barcode_id=inventory.barcode_id,
             created_by_id=inventory.created_by_id
         )
         db.add(db_inventory)

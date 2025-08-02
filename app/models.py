@@ -274,7 +274,8 @@ class InventoryMaster(Base):
     roll_type = Column(String(20), nullable=False, index=True)  # jumbo, cut
     location = Column(String(100), nullable=True)
     status = Column(String(50), default=InventoryStatus.AVAILABLE, nullable=False, index=True)
-    qr_code = Column(String(255), unique=True, nullable=True, index=True)
+    qr_code = Column(String(255), unique=True, nullable=True, index=True)  # Kept for compatibility
+    barcode_id = Column(String(50), unique=True, nullable=True, index=True)  # Human-readable barcode ID
     production_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     allocated_to_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True)
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
@@ -376,7 +377,8 @@ class CutRollProduction(Base):
     
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # CRP-001, CRP-002, etc.
-    qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code
+    qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code (kept for compatibility)
+    barcode_id = Column(String(50), unique=False, nullable=True, index=True)  # Human-readable barcode ID (CR_00001)
     
     # Cut roll specifications
     width_inches = Column(Numeric(6, 2), nullable=False)
@@ -475,6 +477,7 @@ class DispatchItem(Base):
     
     # Cut roll details (denormalized for tracking)
     qr_code = Column(String(255), nullable=False)
+    barcode_id = Column(String(50), nullable=True)
     width_inches = Column(Numeric(6, 2), nullable=False)
     weight_kg = Column(Numeric(8, 2), nullable=False)
     paper_spec = Column(String(255), nullable=False)  # "90gsm, 18.0bf, white"

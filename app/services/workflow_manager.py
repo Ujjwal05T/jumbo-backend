@@ -205,11 +205,27 @@ class WorkflowManager:
                 # Link order items to plan using the processed requirements
                 for requirement in self.processed_order_requirements:
                     frontend_id = FrontendIDGenerator.generate_frontend_id("plan_order_link", self.db)
+                    
+                    # Handle UUID conversion safely
+                    order_id = requirement['order_id']
+                    if isinstance(order_id, str):
+                        order_id = uuid.UUID(order_id)
+                    elif not isinstance(order_id, uuid.UUID):
+                        logger.error(f"Invalid order_id type: {type(order_id)} - {order_id}")
+                        continue
+                    
+                    order_item_id = requirement['order_item_id']
+                    if isinstance(order_item_id, str):
+                        order_item_id = uuid.UUID(order_item_id)
+                    elif not isinstance(order_item_id, uuid.UUID):
+                        logger.error(f"Invalid order_item_id type: {type(order_item_id)} - {order_item_id}")
+                        continue
+                    
                     plan_order_link = models.PlanOrderLink(
                         frontend_id=frontend_id,
                         plan_id=plan.id,
-                        order_id=uuid.UUID(requirement['order_id']),
-                        order_item_id=uuid.UUID(requirement['order_item_id']),
+                        order_id=order_id,
+                        order_item_id=order_item_id,
                         quantity_allocated=requirement['quantity']  # Use actual quantity
                     )
                     self.db.add(plan_order_link)
@@ -251,36 +267,10 @@ class WorkflowManager:
                         created_production.append(production_order)
                         created_production_ids.append(str(production_order.id))  # Store ID immediately
             
-            # OUTPUT 3: Create Pending Orders from pending_orders
-            if optimization_result.get('pending_orders'):
-                # Enhance pending orders with original order information
-                enhanced_pending_orders = []
-                for pending in optimization_result['pending_orders']:
-                    # Find matching order requirement to get original_order_id
-                    matching_requirement = None
-                    for req in self.processed_order_requirements:
-                        if (req['gsm'] == pending['gsm'] and 
-                            req['bf'] == pending['bf'] and 
-                            req['shade'] == pending['shade'] and
-                            abs(req['width'] - pending['width']) < 0.1):  # Allow small width differences
-                            matching_requirement = req
-                            break
-                    
-                    enhanced_pending = pending.copy()
-                    if matching_requirement:
-                        enhanced_pending['original_order_id'] = matching_requirement['order_id']
-                    else:
-                        # Use the first order ID as fallback
-                        enhanced_pending['original_order_id'] = order_ids[0] if order_ids else None
-                    
-                    enhanced_pending_orders.append(enhanced_pending)
-                
-                created_pending_records = crud_operations.bulk_create_pending_orders(
-                    self.db,
-                    enhanced_pending_orders,
-                    self.user_id
-                )
-                created_pending.extend(created_pending_records)
+            # OUTPUT 3: Do NOT automatically create pending orders here
+            # Pending orders should only be created when user explicitly doesn't select certain rolls
+            # This happens later in the start_production_for_plan method when user makes selections
+            logger.info(f"Skipping automatic pending order creation - will be handled during roll selection")
             
             # OUTPUT 5: Update status of resolved pending orders
             # Compare input pending orders with output pending orders to identify which were resolved
@@ -349,8 +339,21 @@ class WorkflowManager:
                 else:
                     logger.error(f"❌ DEBUG WF: Cut roll missing paper specs: gsm={cut_roll.get('gsm')}, bf={cut_roll.get('bf')}, shade={cut_roll.get('shade')}")
                     enhanced_roll['paper_id'] = ''
+                
+                # Generate barcode for this cut roll (NEW: Using barcode instead of QR)
+                try:
+                    from ..services.barcode_generator import BarcodeGenerator
+                    barcode_id = BarcodeGenerator.generate_cut_roll_barcode(self.db)
+                    enhanced_roll['barcode_id'] = barcode_id
+                    logger.info(f"✅ DEBUG WF: Generated barcode for roll {i+1}: {barcode_id}")
+                except Exception as barcode_error:
+                    logger.error(f"❌ DEBUG WF: Error generating barcode for cut roll {i+1}: {barcode_error}")
+                    # Fallback to a timestamp-based ID
+                    import time
+                    enhanced_roll['barcode_id'] = f"CUT_ROLL_{int(time.time() * 1000)}_{i+1}"
+                    logger.warning(f"⚠️ DEBUG WF: Using fallback barcode: {enhanced_roll['barcode_id']}")
                     
-                logger.info(f"🔍 DEBUG WF: Enhanced roll {i+1} paper_id: '{enhanced_roll.get('paper_id', 'MISSING')}'")
+                logger.info(f"🔍 DEBUG WF: Enhanced roll {i+1} paper_id: '{enhanced_roll.get('paper_id', 'MISSING')}', barcode_id: '{enhanced_roll.get('barcode_id', 'MISSING')}'")
                 enhanced_cut_rolls.append(enhanced_roll)
             
             logger.info(f"🔍 DEBUG WF: Finished enhancing {len(enhanced_cut_rolls)} cut rolls")

@@ -7,6 +7,7 @@ import logging
 
 from .base import get_db
 from .. import crud_operations, schemas
+from ..services.barcode_generator import BarcodeGenerator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ async def select_cut_rolls_for_production(
         inventory_items_created = []
         
         for roll_selection in selection_request.selected_rolls:
+            # Generate barcode for this cut roll
+            barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
+            
             # Create inventory item for each selected cut roll
             inventory_data = schemas.InventoryMasterCreate(
                 paper_id=roll_selection.paper_id,
@@ -56,6 +60,7 @@ async def select_cut_rolls_for_production(
                 roll_type="cut",
                 location="production_floor",
                 qr_code=roll_selection.qr_code,
+                barcode_id=barcode_id,
                 created_by_id=selection_request.created_by_id
             )
             
@@ -67,6 +72,7 @@ async def select_cut_rolls_for_production(
                 "width_inches": float(inventory_item.width_inches),
                 "paper_id": str(inventory_item.paper_id),
                 "qr_code": inventory_item.qr_code,
+                "barcode_id": inventory_item.barcode_id,
                 "status": inventory_item.status,
                 "expected_pattern": roll_selection.cutting_pattern
             })
@@ -134,7 +140,15 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
         
-        logger.info(f"Getting cut roll summary for plan {plan_id}")
+        logger.info(f"🔍 Getting cut roll summary for plan {plan_id}")
+        
+        # Debug: Check if PlanInventoryLink records exist for this plan
+        plan_links = db.query(models.PlanInventoryLink).filter(
+            models.PlanInventoryLink.plan_id == plan_id
+        ).all()
+        logger.info(f"🔍 DEBUG: Found {len(plan_links)} PlanInventoryLink records for plan {plan_id}")
+        for link in plan_links:
+            logger.info(f"🔍 DEBUG: Link {link.id} -> inventory_id: {link.inventory_id}")
         
         # Method 1: Get cut rolls linked to this plan via PlanInventoryLink
         cut_rolls_via_link = db.query(models.InventoryMaster).join(
@@ -145,27 +159,26 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             models.InventoryMaster.roll_type == "cut"
         ).all()
         
-        logger.info(f"Found {len(cut_rolls_via_link)} cut rolls via PlanInventoryLink")
+        logger.info(f"🔍 Found {len(cut_rolls_via_link)} cut rolls via PlanInventoryLink for plan {plan_id}")
+        for roll in cut_rolls_via_link:
+            logger.info(f"🔍 DEBUG: Cut roll {roll.id} - {roll.barcode_id} - {roll.width_inches}\")")
         
-        # Method 2: Only use time-based fallback if no PlanInventoryLink records exist
+        # Method 2: DISABLED time-based fallback to force proper plan-inventory linking
         cut_rolls_by_time = []
-        if not cut_rolls_via_link and plan.executed_at:
-            # Only use time-based method as fallback when no proper links exist
-            from datetime import timedelta
-            time_window = timedelta(hours=24)  # 24 hour window
-            
-            cut_rolls_by_time = db.query(models.InventoryMaster).filter(
-                models.InventoryMaster.roll_type == "cut",
-                models.InventoryMaster.created_at >= plan.executed_at - time_window,
-                models.InventoryMaster.created_at <= plan.executed_at + time_window
-            ).all()
-            
-            logger.info(f"Using time-based fallback: Found {len(cut_rolls_by_time)} cut rolls around {plan.executed_at}")
+        if not cut_rolls_via_link:
+            logger.warning(f"🚨 NO INVENTORY LINKS FOUND for plan {plan_id}! Plan should have PlanInventoryLink records.")
+            logger.warning(f"🚨 This plan will show NO ITEMS until proper inventory links are created.")
+            logger.warning(f"🚨 Time-based fallback is DISABLED to prevent showing wrong items.")
+            # Intentionally return empty list instead of using time-based fallback
         elif cut_rolls_via_link:
-            logger.info(f"Using PlanInventoryLink: Found {len(cut_rolls_via_link)} plan-specific cut rolls")
+            logger.info(f"✅ Using PlanInventoryLink: Found {len(cut_rolls_via_link)} plan-specific cut rolls")
         
         # Use only the appropriate method - prefer PlanInventoryLink over time-based
         all_cut_rolls_raw = cut_rolls_via_link if cut_rolls_via_link else cut_rolls_by_time
+        
+        logger.info(f"🔍 FINAL DECISION: Using {'PlanInventoryLink' if cut_rolls_via_link else 'time-based fallback'} method")
+        logger.info(f"🔍 FINAL RESULT: {len(all_cut_rolls_raw)} cut rolls will be returned for plan {plan_id}")
+        
         seen_ids = set()
         all_cut_rolls = []
         
@@ -193,6 +206,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 all_cut_rolls.append({
                     "inventory_id": str(inventory_item.id),
                     "qr_code": inventory_item.qr_code or f"QR{str(inventory_item.id)[:8].upper()}",
+                    "barcode_id": inventory_item.barcode_id or f"CR_{str(inventory_item.id)[:5].upper()}",
                     "width_inches": float(inventory_item.width_inches),
                     "weight_kg": float(inventory_item.weight_kg),
                     "status": inventory_item.status,
@@ -276,6 +290,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                     "status": item["status"],
                     "location": item["location"],
                     "qr_code": item["qr_code"],
+                    "barcode_id": item["barcode_id"],
                     "created_at": item["created_at"].isoformat() if hasattr(item["created_at"], 'isoformat') else str(item["created_at"]),
                     "paper_specs": item["paper_specs"],
                     "client_name": item["client_name"],
@@ -322,6 +337,7 @@ def update_cut_roll_status(
         return {
             "inventory_id": str(updated_item.id),
             "qr_code": updated_item.qr_code,
+            "barcode_id": updated_item.barcode_id,
             "status_change": {
                 "old_status": old_status,
                 "new_status": updated_item.status
@@ -377,6 +393,7 @@ def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
         
         for i in range(10):  # Create 10 sample rolls
             qr_code = f"QR{plan_id.hex[:8].upper()}{i+1:03d}"
+            barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
             width = widths[i % len(widths)]
             status = statuses[i % len(statuses)]
             location = locations[i % len(locations)]
@@ -391,6 +408,7 @@ def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
                 location=location,
                 status=status,
                 qr_code=qr_code,
+                barcode_id=barcode_id,
                 production_date=datetime.utcnow(),
                 allocated_to_order_id=order.id if order and status == "allocated" else None,
                 created_by_id=user.id,
@@ -412,6 +430,7 @@ def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
             sample_rolls.append({
                 "inventory_id": str(inventory_item.id),
                 "qr_code": qr_code,
+                "barcode_id": barcode_id,
                 "width_inches": width,
                 "weight_kg": width * 13.5,
                 "status": status,

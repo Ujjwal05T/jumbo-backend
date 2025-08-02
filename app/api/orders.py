@@ -320,6 +320,7 @@ def create_dispatch_record(
                 dispatch_record_id=dispatch_record.id,
                 inventory_id=item.id,
                 qr_code=item.qr_code,
+                barcode_id=item.barcode_id,
                 width_inches=float(item.width_inches),
                 weight_kg=float(item.weight_kg),
                 paper_spec=f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "Unknown"
@@ -446,6 +447,7 @@ def get_warehouse_items(
             items_data.append({
                 "inventory_id": str(item.id),
                 "qr_code": item.qr_code,
+                "barcode_id": item.barcode_id,
                 "paper_spec": f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "N/A",
                 "width_inches": float(item.width_inches),
                 "weight_kg": float(item.weight_kg),

@@ -333,6 +333,7 @@ class InventoryMasterBase(BaseModel):
     roll_type: RollType = Field(..., description="Roll type: jumbo or cut")
     location: Optional[str] = Field(None, max_length=100)
     qr_code: Optional[str] = Field(None, max_length=255)
+    barcode_id: Optional[str] = Field(None, description="Human-readable barcode ID")
     production_date: datetime = Field(default_factory=datetime.utcnow)
 
 class InventoryMasterCreate(InventoryMasterBase):
@@ -610,6 +611,7 @@ class CutRollProduction(CutRollProductionBase):
     id: UUID
     frontend_id: Optional[str] = Field(None, description="Human-readable cut roll production ID (e.g., CRP-001)")
     qr_code: str
+    barcode_id: Optional[str] = Field(None, description="Human-readable barcode ID (e.g., CR_00001)")
     paper_id: UUID
     plan_id: UUID
     order_id: Optional[UUID]
@@ -690,6 +692,12 @@ class CuttingPlanWithSelectionRequest(CuttingPlanRequest):
 class QRWeightUpdate(BaseModel):
     """Schema for updating weight via QR code - status automatically set to 'available'"""
     qr_code: str
+    weight_kg: float = Field(..., gt=0)
+    location: Optional[str] = None
+
+class BarcodeWeightUpdate(BaseModel):
+    """Schema for updating weight via barcode - status automatically set to 'available'"""
+    barcode_id: str
     weight_kg: float = Field(..., gt=0)
     location: Optional[str] = None
 

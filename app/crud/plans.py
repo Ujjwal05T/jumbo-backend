@@ -132,6 +132,10 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         
         # Create inventory records for SELECTED cut rolls with status "cutting"
         for cut_roll in selected_cut_rolls:
+            # Generate barcode for this cut roll
+            from ..services.barcode_generator import BarcodeGenerator
+            barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
+            
             # Create inventory record for selected rolls
             inventory_item = models.InventoryMaster(
                 paper_id=cut_roll.get("paper_id"),
@@ -140,6 +144,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 roll_type="cut",
                 status="cutting",
                 qr_code=cut_roll.get("qr_code"),
+                barcode_id=barcode_id,
                 created_by_id=request_data.get("created_by_id")
             )
             db.add(inventory_item)
@@ -157,16 +162,70 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         
         # Move UNSELECTED cut rolls to pending orders
         if all_available_cuts:
-            selected_qr_codes = {cut.get("qr_code") for cut in selected_cut_rolls}
+            # Debug: Log the selected and available cut rolls data structure
+            from ..services.id_generator import FrontendIDGenerator
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info(f"🔍 ROLL COMPARISON DEBUG: Number of selected cut rolls: {len(selected_cut_rolls)}")
+            logger.info(f"🔍 ROLL COMPARISON DEBUG: Number of available cuts: {len(all_available_cuts)}")
+            
+            # Debug: Log sample data structure
+            if selected_cut_rolls:
+                logger.info(f"🔍 SAMPLE SELECTED CUT ROLL: {selected_cut_rolls[0]}")
+            if all_available_cuts:
+                logger.info(f"🔍 SAMPLE AVAILABLE CUT: {all_available_cuts[0]}")
+            
+            # Create multiple sets for different comparison methods
+            selected_barcodes = {cut.get("barcode_id") for cut in selected_cut_rolls if cut.get("barcode_id")}
+            selected_qr_codes = {cut.get("qr_code") for cut in selected_cut_rolls if cut.get("qr_code")}
+            
+            # Also create composite identifiers as fallback
+            selected_cut_identifiers = set()
+            for cut in selected_cut_rolls:
+                # Create a unique identifier from available fields
+                identifier = (
+                    cut.get("width_inches", cut.get("width", 0)),
+                    cut.get("gsm", 0),
+                    cut.get("bf", 0),
+                    cut.get("shade", ""),
+                    cut.get("individual_roll_number", 0),
+                    cut.get("paper_id", "")
+                )
+                selected_cut_identifiers.add(identifier)
+                logger.info(f"🔍 SELECTED IDENTIFIER: {identifier}")
+            
+            logger.info(f"🔍 SELECTED BARCODES: {selected_barcodes}")
+            logger.info(f"🔍 SELECTED QR CODES: {selected_qr_codes}")
+            logger.info(f"🔍 TOTAL SELECTED IDENTIFIERS: {len(selected_cut_identifiers)}")
             
             for available_cut in all_available_cuts:
+                # Try multiple comparison methods
+                available_barcode = available_cut.get("barcode_id")
+                available_qr = available_cut.get("qr_code")
+                
+                # Create the same identifier for available cut
+                available_identifier = (
+                    available_cut.get("width_inches", available_cut.get("width", 0)),
+                    available_cut.get("gsm", 0),
+                    available_cut.get("bf", 0),
+                    available_cut.get("shade", ""),
+                    available_cut.get("individual_roll_number", 0),
+                    available_cut.get("paper_id", "")
+                )
+                
+                # Check if selected using any method
+                is_selected_by_barcode = available_barcode and available_barcode in selected_barcodes
+                is_selected_by_qr = available_qr and available_qr in selected_qr_codes
+                is_selected_by_identifier = available_identifier in selected_cut_identifiers
+                
+                is_selected = is_selected_by_barcode or is_selected_by_qr or is_selected_by_identifier
+                
+                logger.info(f"🔍 AVAILABLE CUT: barcode='{available_barcode}', qr='{available_qr}', identifier={available_identifier}")
+                logger.info(f"🔍 SELECTION CHECK: by_barcode={is_selected_by_barcode}, by_qr={is_selected_by_qr}, by_identifier={is_selected_by_identifier} -> SELECTED: {is_selected}")
+                
                 # If this cut was not selected, move it to pending orders
-                if available_cut.get("qr_code") not in selected_qr_codes:
-                    from ..services.id_generator import FrontendIDGenerator
-                    import logging
-                    
-                    logger = logging.getLogger(__name__)
-                    
+                if not is_selected:
                     # Debug: Check if order_id is available
                     order_id = available_cut.get("order_id")
                     logger.info(f"🔍 PENDING DEBUG: Creating pending item for unselected cut: {available_cut}")
