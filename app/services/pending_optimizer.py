@@ -225,7 +225,7 @@ class PendingOptimizer:
                         'existing_width': width,
                         'needed_width': remaining_width,
                         'possible_combinations': self._suggest_width_combinations(remaining_width),
-                        'description': f"To complete {width}\" roll, need {remaining_width}\" more"
+                        'description': f"Available: {width}\" | Required: {remaining_width}\""
                     }
                     suggestions.append(suggestion)
         
@@ -270,6 +270,8 @@ class PendingOptimizer:
         Accept selected roll combinations from optimization preview.
         Creates a new plan with selected combinations and marks relevant pending orders as resolved.
         
+        Machine constraint: Only multiples of 3 combinations allowed (1 jumbo = 3 x 118" rolls).
+        
         Args:
             combinations: List of combination objects with combination_id and other details
             
@@ -286,6 +288,11 @@ class PendingOptimizer:
                     "resolved_pending_orders": [],
                     "summary": {"combinations_accepted": 0}
                 }
+            
+            # Validate multiple of 3 constraint (machine limitation)
+            if len(combinations) % 3 != 0:
+                logger.warning(f"❌ Invalid combination count: {len(combinations)} (must be multiple of 3)")
+                raise ValueError("Only multiple of 3 roll combinations can be selected. Machine creates 1 jumbo roll = 3 x 118 inch rolls.")
             
             # Create a new plan for accepted combinations
             plan_name = f"Pending Orders Plan {datetime.now().strftime('%Y%m%d_%H%M%S')}"

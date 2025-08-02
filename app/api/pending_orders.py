@@ -89,11 +89,21 @@ def accept_pending_combinations(
     """
     Accept selected roll combinations from optimization preview.
     Creates a new plan with selected combinations and marks relevant pending orders as resolved.
+    Machine constraint: Only multiples of 3 combinations allowed (1 jumbo = 3 x 118" rolls).
     """
     try:
+        # Validate multiple of 3 constraint (machine limitation)
+        if len(combinations) % 3 != 0:
+            raise HTTPException(
+                status_code=400, 
+                detail="Only multiple of 3 roll combinations can be selected. Machine creates 1 jumbo roll = 3 x 118 inch rolls."
+            )
+        
         from ..services.pending_optimizer import PendingOptimizer
         optimizer = PendingOptimizer(db=db)
         return optimizer.accept_combinations(combinations)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error accepting pending combinations: {e}")
         raise HTTPException(status_code=500, detail=str(e))

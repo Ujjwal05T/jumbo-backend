@@ -426,17 +426,17 @@ def get_warehouse_items(
         )
         
         # Filter by client_id or order_id if provided
-        if client_id or order_id:
+        if (client_id and client_id.strip() and client_id != "none") or (order_id and order_id.strip() and order_id != "none"):
             # Join through plan relationships to get items for specific client/order
             query = query.join(models.PlanInventoryLink, models.InventoryMaster.id == models.PlanInventoryLink.inventory_id)
             query = query.join(models.PlanMaster, models.PlanInventoryLink.plan_id == models.PlanMaster.id)
             query = query.join(models.PlanOrderLink, models.PlanMaster.id == models.PlanOrderLink.plan_id)
             query = query.join(models.OrderMaster, models.PlanOrderLink.order_id == models.OrderMaster.id)
             
-            if client_id:
+            if client_id and client_id.strip() and client_id != "none":
                 query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
             
-            if order_id:
+            if order_id and order_id.strip() and order_id != "none":
                 query = query.filter(models.OrderMaster.id == uuid.UUID(order_id))
         
         warehouse_items = query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
@@ -458,9 +458,9 @@ def get_warehouse_items(
         
         # Update filter criteria description
         filter_criteria = "roll_type=cut, status=available, weight_kg > 0.1"
-        if client_id:
+        if client_id and client_id.strip() and client_id != "none":
             filter_criteria += f", client_id={client_id}"
-        if order_id:
+        if order_id and order_id.strip() and order_id != "none":
             filter_criteria += f", order_id={order_id}"
         
         return {
@@ -469,8 +469,8 @@ def get_warehouse_items(
             "dispatch_info": {
                 "description": "Cut rolls with real weight added, ready for dispatch",
                 "filter_criteria": filter_criteria,
-                "filtered_by_client": bool(client_id),
-                "filtered_by_order": bool(order_id)
+                "filtered_by_client": bool(client_id and client_id.strip() and client_id != "none"),
+                "filtered_by_order": bool(order_id and order_id.strip() and order_id != "none")
             },
             "pagination": {
                 "skip": skip,
