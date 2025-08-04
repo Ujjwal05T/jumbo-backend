@@ -103,7 +103,7 @@ def update_weight_via_qr(
             # Find order items with matching paper and width that are still "in_process"
             order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
                 models.OrderItem.paper_id == paper.id,
-                models.OrderItem.width_inches == int(matching_item.width_inches),
+                models.OrderItem.width_inches == float(matching_item.width_inches),
                 models.OrderMaster.status == "in_process",
                 models.OrderItem.item_status == "in_process"
             ).all()

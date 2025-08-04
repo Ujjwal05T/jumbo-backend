@@ -204,12 +204,12 @@ class OrderItem(Base):
         return self.quantity_fulfilled >= self.quantity_rolls
     
     @staticmethod
-    def calculate_quantity_kg(width_inches: int, quantity_rolls: int) -> float:
+    def calculate_quantity_kg(width_inches: float, quantity_rolls: int) -> float:
         """Calculate weight in kg based on width and number of rolls (1 inch roll = 13kg)"""
         return float(width_inches * quantity_rolls * 13)
     
     @staticmethod
-    def calculate_quantity_rolls(width_inches: int, quantity_kg: float) -> int:
+    def calculate_quantity_rolls(width_inches: float, quantity_kg: float) -> int:
         """Calculate number of rolls based on width and weight"""
         if width_inches <= 0:
             return 0

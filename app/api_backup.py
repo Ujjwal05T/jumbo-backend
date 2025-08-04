@@ -932,7 +932,7 @@ def get_cut_rolls(
 @router.get("/inventory/available/{paper_id}", response_model=List[schemas.InventoryMaster], tags=["Inventory Master"])
 def get_available_inventory(
     paper_id: UUID,
-    width_inches: Optional[int] = None,
+    width_inches: Optional[float] = None,
     roll_type: Optional[str] = None,
     db: Session = Depends(get_db)
 ):

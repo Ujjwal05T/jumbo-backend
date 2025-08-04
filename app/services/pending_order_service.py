@@ -67,7 +67,7 @@ class PendingOrderService:
                     pending_item = models.PendingOrderItem(
                         frontend_id=frontend_id,
                         original_order_id=original_order_id,
-                        width_inches=int(pending['width']),
+                        width_inches=float(pending['width']),
                         gsm=pending['gsm'],
                         bf=pending['bf'],
                         shade=pending['shade'],

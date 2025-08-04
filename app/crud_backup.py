@@ -651,7 +651,7 @@ def update_inventory_item(db: Session, inventory_id: uuid.UUID, inventory_update
     db.refresh(db_inventory)
     return db_inventory
 
-def get_available_inventory(db: Session, paper_id: uuid.UUID, width_inches: int = None, roll_type: str = None) -> List[models.InventoryMaster]:
+def get_available_inventory(db: Session, paper_id: uuid.UUID, width_inches: float = None, roll_type: str = None) -> List[models.InventoryMaster]:
     """Get available inventory for cutting optimization"""
     query = db.query(models.InventoryMaster).filter(
         models.InventoryMaster.paper_id == paper_id,
@@ -982,7 +982,7 @@ def create_inventory_from_waste(
         # Create inventory item
         inventory_item = models.InventoryMaster(
             paper_id=paper.id,
-            width_inches=int(waste_item['width']),
+            width_inches=float(waste_item['width']),
             weight_kg=100.0,  # Estimated weight for waste rolls
             roll_type="cut",
             location="waste_storage",
@@ -1034,7 +1034,7 @@ def bulk_create_pending_orders(
         pending_order = models.PendingOrderMaster(
             order_id=original_order_id,
             paper_id=paper.id,
-            width_inches=int(pending_item['width']),
+            width_inches=float(pending_item['width']),
             quantity_pending=pending_item['quantity'],
             reason=pending_item.get('reason', 'optimization_pending'),
             status="pending"
@@ -1638,7 +1638,7 @@ def generate_cut_roll_qr_code(cut_roll_id: uuid.UUID, width: float, gsm: int) ->
     """Generate unique QR code for cut roll production"""
     # Format: CR_<width>_<gsm>_<short_id>
     short_id = str(cut_roll_id).replace('-', '').upper()[:8]
-    return f"CR_{int(width)}_{gsm}_{short_id}"
+    return f"CR_{width:.1f}_{gsm}_{short_id}"
 
 def create_cut_roll_production(
     db: Session, 

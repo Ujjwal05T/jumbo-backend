@@ -55,7 +55,7 @@ async def select_cut_rolls_for_production(
             # Create inventory item for each selected cut roll
             inventory_data = schemas.InventoryMasterCreate(
                 paper_id=roll_selection.paper_id,
-                width_inches=int(roll_selection.width_inches),
+                width_inches=float(roll_selection.width_inches),
                 weight_kg=0.1,  # Small placeholder weight (will be updated during production)
                 roll_type="cut",
                 location="production_floor",

@@ -336,7 +336,7 @@ def create_dispatch_record(
             if item.paper:
                 matching_order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
                     models.OrderItem.paper_id == item.paper_id,
-                    models.OrderItem.width_inches == int(item.width_inches),
+                    models.OrderItem.width_inches == float(item.width_inches),
                     models.OrderMaster.status == "in_process",
                     models.OrderItem.item_status == "in_warehouse"
                 ).limit(1).all()

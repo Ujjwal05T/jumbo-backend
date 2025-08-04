@@ -68,6 +68,7 @@ class UserRole(str, Enum):
     PLANNER = "planner"
     SUPERVISOR = "supervisor"
     ADMIN = "admin"
+    SYSTEM = "system"
 
 class PaperType(str, Enum):
     STANDARD = "standard"
@@ -187,7 +188,7 @@ class PaperMaster(PaperMasterBase):
 # Order Item Schemas
 class OrderItemBase(BaseModel):
     paper_id: UUID
-    width_inches: int = Field(..., gt=0)
+    width_inches: float = Field(..., gt=0)
     quantity_rolls: Optional[int] = Field(None, gt=0)
     quantity_kg: Optional[float] = Field(None, gt=0)
     rate: float = Field(..., gt=0)
@@ -200,7 +201,7 @@ class OrderItemCreate(OrderItemBase):
 
 class OrderItemUpdate(BaseModel):
     paper_id: Optional[UUID] = None
-    width_inches: Optional[int] = Field(None, gt=0)
+    width_inches: Optional[float] = Field(None, gt=0)
     quantity_rolls: Optional[int] = Field(None, gt=0)
     quantity_kg: Optional[float] = Field(None, gt=0)
     rate: Optional[float] = Field(None, gt=0)
@@ -264,7 +265,7 @@ class PendingOrderMasterBase(BaseModel):
     order_id: UUID
     order_item_id: UUID
     paper_id: UUID
-    width_inches: int = Field(..., gt=0)
+    width_inches: float = Field(..., gt=0)
     quantity_pending: int = Field(..., gt=0)
     reason: str = Field(..., max_length=100)
 
@@ -294,7 +295,7 @@ class PendingOrderMaster(PendingOrderMasterBase):
 # Pending Order Item Schemas - New model for service compatibility
 class PendingOrderItemBase(BaseModel):
     original_order_id: UUID
-    width_inches: int = Field(..., gt=0)
+    width_inches: float = Field(..., gt=0)
     gsm: int = Field(..., gt=0)
     bf: float = Field(..., gt=0)
     shade: str = Field(..., max_length=50)
@@ -328,7 +329,7 @@ class PendingOrderItem(PendingOrderItemBase):
 # Inventory Master Schemas
 class InventoryMasterBase(BaseModel):
     paper_id: UUID
-    width_inches: int = Field(..., gt=0)
+    width_inches: float = Field(..., gt=0)
     weight_kg: float = Field(..., gt=0)
     roll_type: RollType = Field(..., description="Roll type: jumbo or cut")
     location: Optional[str] = Field(None, max_length=100)
