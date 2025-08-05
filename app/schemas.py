@@ -844,6 +844,16 @@ class ProductionStartSummary(BaseModel):
     inventory_created: int = Field(..., ge=0)
     pending_items_created: int = Field(..., ge=0)
 
+class InventoryDetail(BaseModel):
+    """Inventory item details for production response"""
+    id: str
+    barcode_id: str
+    qr_code: str
+    width_inches: float
+    paper_id: str
+    status: str
+    created_at: Optional[str] = None
+
 class StartProductionResponse(BaseModel):
     """Response from start production operation"""
     plan_id: str
@@ -851,5 +861,6 @@ class StartProductionResponse(BaseModel):
     executed_at: Optional[str] = None
     summary: ProductionStartSummary
     details: Dict[str, List[str]]
+    created_inventory_details: List[InventoryDetail] = Field(default_factory=list)
     message: str
 

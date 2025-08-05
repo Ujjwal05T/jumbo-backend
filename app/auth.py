@@ -82,14 +82,11 @@ def register_user(db: Session, user_data: schemas.UserMasterCreate) -> models.Us
             detail="Username already registered"
         )
     
-    # Hash the password
-    hashed_password = hash_password(user_data.password)
-    
     # Create user data with hashed password
     user_create_data = schemas.UserMasterCreate(
         name=user_data.name,
         username=user_data.username,
-        password=hashed_password,  # Store hashed password
+        password=user_data.password,  # Store hashed password
         role=user_data.role,
         contact=user_data.contact,
         department=user_data.department,

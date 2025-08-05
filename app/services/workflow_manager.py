@@ -272,9 +272,10 @@ class WorkflowManager:
             # This happens later in the start_production_for_plan method when user makes selections
             logger.info(f"Skipping automatic pending order creation - will be handled during roll selection")
             
-            # OUTPUT 5: Update status of resolved pending orders
-            # Compare input pending orders with output pending orders to identify which were resolved
-            self._update_resolved_pending_orders(pending_requirements, optimization_result.get('pending_orders', []))
+            # OUTPUT 5: DO NOT update pending order status during plan generation
+            # Status updates happen only when "Start Production" is clicked
+            # Store the resolved pending order information for later use during production start
+            logger.info("Skipping pending order status updates during plan generation - will be handled during production start")
             
             # OUTPUT 4: No waste inventory creation (removed - waste >20" goes to pending)
             
@@ -305,7 +306,8 @@ class WorkflowManager:
                             req.get('bf') == cut_roll['bf'] and 
                             req.get('shade') == cut_roll['shade']):
                             enhanced_roll['paper_id'] = req['paper_id']
-                            logger.info(f"✅ DEBUG WF: Found paper_id from order requirement: {req['paper_id']}")
+                            enhanced_roll['order_id'] = req['order_id']  # Add the order_id so it can match pending orders
+                            logger.info(f"✅ DEBUG WF: Found paper_id and order_id from order requirement: paper_id={req['paper_id']}, order_id={req['order_id']}")
                             paper_id_found = True
                             break
                     
@@ -322,13 +324,24 @@ class WorkflowManager:
                             if paper:
                                 enhanced_roll['paper_id'] = str(paper.id)
                                 logger.info(f"✅ DEBUG WF: Found existing paper in DB with ID: {paper.id}")
+                                
+                                # Also try to find matching pending order for order_id
+                                for pending_req in pending_requirements:
+                                    if (pending_req.get('gsm') == cut_roll['gsm'] and 
+                                        pending_req.get('bf') == cut_roll['bf'] and 
+                                        pending_req.get('shade') == cut_roll['shade']):
+                                        enhanced_roll['order_id'] = pending_req['original_order_id']
+                                        logger.info(f"✅ DEBUG WF: Found order_id from pending requirement: {pending_req['original_order_id']}")
+                                        break
+                                
                                 paper_id_found = True
                             else:
                                 logger.info(f"📝 DEBUG WF: Paper not found in DB, using first order requirement paper_id as fallback")
                                 # Use first order requirement's paper_id as fallback
                                 if self.processed_order_requirements:
                                     enhanced_roll['paper_id'] = self.processed_order_requirements[0]['paper_id']
-                                    logger.info(f"✅ DEBUG WF: Using fallback paper_id: {enhanced_roll['paper_id']}")
+                                    enhanced_roll['order_id'] = self.processed_order_requirements[0]['order_id']
+                                    logger.info(f"✅ DEBUG WF: Using fallback paper_id and order_id: paper_id={enhanced_roll['paper_id']}, order_id={enhanced_roll['order_id']}")
                                     paper_id_found = True
                         except Exception as paper_error:
                             logger.error(f"❌ DEBUG WF: Error in paper lookup: {paper_error}")
@@ -762,13 +775,18 @@ class WorkflowManager:
                     logger.warning(f"Invalid order_id format: {original_order_id}")
                     continue
                 
+                # Convert to Decimal to match database types exactly
+                from decimal import Decimal
+                width_decimal = Decimal(str(width))
+                bf_decimal = Decimal(str(bf))
+                
                 resolved_items = self.db.query(models.PendingOrderItem).filter(
-                    models.PendingOrderItem.width_inches == width,
+                    models.PendingOrderItem.width_inches == width_decimal,
                     models.PendingOrderItem.gsm == gsm,
-                    models.PendingOrderItem.bf == bf,
+                    models.PendingOrderItem.bf == bf_decimal,
                     models.PendingOrderItem.shade == shade,
                     models.PendingOrderItem.original_order_id == order_id_uuid,
-                    models.PendingOrderItem.status == "pending"
+                    models.PendingOrderItem._status == "pending"
                 ).all()
                 
                 for item in resolved_items:

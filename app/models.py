@@ -250,9 +250,47 @@ class PendingOrderItem(Base):
     bf = Column(Numeric(4, 2), nullable=False)
     shade = Column(String(50), nullable=False)
     quantity_pending = Column(Integer, nullable=False)
+    quantity_fulfilled = Column(Integer, default=0, nullable=False)
     reason = Column(String(100), nullable=False, default="no_suitable_jumbo")
-    status = Column(String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
+    _status = Column("status", String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
     production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_order_master.id"), nullable=True)
+    
+    @property
+    def status(self):
+        """Get the status of the pending order item."""
+        return self._status
+    
+    @status.setter
+    def status(self, value):
+        """
+        Set status with validation to prevent improper transitions to included_in_plan.
+        This helps catch accidental direct status assignments that bypass proper workflow.
+        """
+        import logging
+        import inspect
+        
+        # Allow initial setting during object creation
+        if not hasattr(self, '_status') or self._status is None:
+            self._status = value
+            return
+            
+        # Get caller information for debugging
+        frame = inspect.currentframe()
+        caller_info = "unknown"
+        if frame and frame.f_back:
+            caller_info = f"{frame.f_back.f_code.co_filename}:{frame.f_back.f_lineno}"
+        
+        logger = logging.getLogger(__name__)
+        
+        # Warn if someone tries to set included_in_plan directly
+        if value == "included_in_plan" and self._status != "included_in_plan":
+            logger.warning(f"Direct status assignment to 'included_in_plan' detected for pending order {getattr(self, 'frontend_id', 'unknown')} from {caller_info}. Consider using mark_as_included_in_plan() method instead.")
+        
+        # Log all status changes for audit trail
+        if self._status != value:
+            logger.info(f"Pending order {getattr(self, 'frontend_id', 'unknown')} status changed from '{self._status}' to '{value}' (called from {caller_info})")
+        
+        self._status = value
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     resolved_at = Column(DateTime, nullable=True)
@@ -261,6 +299,48 @@ class PendingOrderItem(Base):
     original_order = relationship("OrderMaster", foreign_keys=[original_order_id])
     production_order = relationship("ProductionOrderMaster", back_populates="pending_order_items")
     created_by = relationship("UserMaster")
+    
+    # Status validation methods
+    def can_transition_to_included_in_plan(self) -> bool:
+        """
+        Check if this pending order can be marked as included_in_plan.
+        Only allow this transition during production start, not during plan generation.
+        """
+        return self.status == "pending"
+    
+    def mark_as_included_in_plan(self, session: Session, resolved_by_production: bool = False) -> bool:
+        """
+        Safely mark pending order as included_in_plan with validation.
+        
+        Args:
+            session: Database session for logging
+            resolved_by_production: True if this is being called during production start
+        
+        Returns:
+            bool: True if status was updated, False if transition not allowed
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"🔧 DEBUG: mark_as_included_in_plan called for {self.frontend_id}")
+        logger.info(f"🔧 DEBUG: resolved_by_production = {resolved_by_production}")
+        logger.info(f"🔧 DEBUG: current status = {self.status}")
+        logger.info(f"🔧 DEBUG: can_transition = {self.can_transition_to_included_in_plan()}")
+        
+        if not resolved_by_production:
+            # Log warning and prevent status change during plan generation
+            logger.warning(f"PREVENTED: Attempted to mark pending order {self.frontend_id} as included_in_plan during plan generation. This should only happen during production start.")
+            return False
+            
+        if self.can_transition_to_included_in_plan():
+            logger.info(f"🔧 DEBUG: Setting status to included_in_plan for {self.frontend_id}")
+            self.status = "included_in_plan"
+            self.resolved_at = datetime.utcnow()
+            logger.info(f"🔧 DEBUG: Status after update = {self.status}")
+            return True
+        else:
+            logger.warning(f"🔧 DEBUG: Cannot transition to included_in_plan for {self.frontend_id} - current status is {self.status}")
+            return False
 
 # Inventory Master - Manages both jumbo and cut rolls
 class InventoryMaster(Base):

@@ -31,14 +31,14 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         
         # Pending Order Items Summary
         pending_items = db.query(models.PendingOrderItem).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).count()
         pending_quantity = db.query(func.sum(models.PendingOrderItem.quantity_pending)).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).scalar() or 0
         
         high_priority_pending = db.query(models.PendingOrderItem).filter(
-            models.PendingOrderItem.status == "pending",
+            models.PendingOrderItem._status == "pending",
             models.PendingOrderItem.created_at < datetime.utcnow() - timedelta(days=3)
         ).count()
         
@@ -238,7 +238,7 @@ def get_dashboard_alerts(db: Session = Depends(get_db)):
         
         # High priority pending orders
         high_priority = db.query(models.PendingOrderItem).filter(
-            models.PendingOrderItem.status == "pending",
+            models.PendingOrderItem._status == "pending",
             models.PendingOrderItem.created_at < datetime.utcnow() - timedelta(days=3)
         ).count()
         

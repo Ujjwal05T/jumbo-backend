@@ -23,7 +23,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         query = (
             db.query(models.PendingOrderItem)
             .options(joinedload(models.PendingOrderItem.original_order).joinedload(models.OrderMaster.client))
-            .filter(models.PendingOrderItem.status == status)
+            .filter(models.PendingOrderItem._status == status)
         )
         
         # If requesting "pending" items, exclude those already used in active plans
@@ -31,7 +31,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
             query = query.filter(
                 ~models.PendingOrderItem.id.in_(
                     db.query(models.PendingOrderItem.id)
-                    .filter(models.PendingOrderItem.status == "included_in_plan")
+                    .filter(models.PendingOrderItem._status == "included_in_plan")
                     .subquery()
                 )
             )
@@ -69,12 +69,12 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
             db.query(models.PendingOrderItem)
             .filter(
                 and_(
-                    models.PendingOrderItem.status == "pending",
+                    models.PendingOrderItem._status == "pending",
                     paper_filter,
                     # Exclude items that are already included in active plans
                     ~models.PendingOrderItem.id.in_(
                         db.query(models.PendingOrderItem.id)
-                        .filter(models.PendingOrderItem.status == "included_in_plan")
+                        .filter(models.PendingOrderItem._status == "included_in_plan")
                         .subquery()
                     )
                 )
@@ -157,12 +157,12 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         """Get summary statistics for pending order items"""
         # Total pending items
         total_pending = db.query(models.PendingOrderItem).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).count()
         
         # Total pending quantity
         total_quantity = db.query(func.sum(models.PendingOrderItem.quantity_pending)).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).scalar() or 0
         
         # Group by paper specs
@@ -173,7 +173,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
             func.count(models.PendingOrderItem.id).label('count'),
             func.sum(models.PendingOrderItem.quantity_pending).label('total_quantity')
         ).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).group_by(
             models.PendingOrderItem.gsm,
             models.PendingOrderItem.bf,
@@ -202,7 +202,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         pending_groups = defaultdict(list)
         
         pending_items = db.query(models.PendingOrderItem).filter(
-            models.PendingOrderItem.status == "pending"
+            models.PendingOrderItem._status == "pending"
         ).all()
         
         for item in pending_items:

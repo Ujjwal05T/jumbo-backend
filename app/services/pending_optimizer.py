@@ -400,6 +400,27 @@ class PendingOptimizer:
                     width = roll_data['width']
                     quantity = roll_data.get('quantity', 1)
                     
+                    # Find the best matching original order for this cut roll
+                    best_order_id = None
+                    
+                    # Query pending items to find matching specifications and get original_order_id
+                    # Convert to Decimal to match database types exactly
+                    from decimal import Decimal
+                    width_decimal = Decimal(str(width))
+                    bf_decimal = Decimal(str(paper_specs['bf']))
+                    
+                    matching_pending = self.db.query(models.PendingOrderItem).filter(
+                        models.PendingOrderItem.width_inches == width_decimal,
+                        models.PendingOrderItem.gsm == paper_specs['gsm'],
+                        models.PendingOrderItem.bf == bf_decimal,
+                        models.PendingOrderItem.shade == paper_specs['shade'],
+                        models.PendingOrderItem.status == "pending",
+                        models.PendingOrderItem.original_order_id.isnot(None)
+                    ).first()
+                    
+                    if matching_pending:
+                        best_order_id = matching_pending.original_order_id
+                    
                     # Create inventory items for each quantity
                     for _ in range(quantity):
                         # Generate barcode for this cut roll
@@ -418,6 +439,7 @@ class PendingOptimizer:
                             qr_code=qr_code,
                             barcode_id=barcode_id,
                             production_date=datetime.utcnow(),
+                            allocated_to_order_id=best_order_id,
                             created_by_id=user_id_to_use,
                             created_at=datetime.utcnow()
                         )
@@ -454,10 +476,15 @@ class PendingOptimizer:
                     logger.info(f"     Processing roll {roll_idx + 1}: {width}\" x{roll_quantity}")
                     
                     # Find matching pending orders that need to be reduced
+                    # Convert to Decimal to match database types exactly
+                    from decimal import Decimal
+                    width_decimal = Decimal(str(width))
+                    bf_decimal = Decimal(str(paper_specs['bf']))
+                    
                     matching_pending = self.db.query(models.PendingOrderItem).filter(
-                        models.PendingOrderItem.width_inches == width,
+                        models.PendingOrderItem.width_inches == width_decimal,
                         models.PendingOrderItem.gsm == paper_specs['gsm'],
-                        models.PendingOrderItem.bf == paper_specs['bf'],
+                        models.PendingOrderItem.bf == bf_decimal,
                         models.PendingOrderItem.shade == paper_specs['shade'],
                         models.PendingOrderItem.status == "pending",
                         models.PendingOrderItem.quantity_pending > 0

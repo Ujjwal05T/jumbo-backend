@@ -410,7 +410,7 @@ def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
                 qr_code=qr_code,
                 barcode_id=barcode_id,
                 production_date=datetime.utcnow(),
-                allocated_to_order_id=order.id if order and status == "allocated" else None,
+                allocated_to_order_id=order.id if order else None,
                 created_by_id=user.id,
                 created_at=datetime.utcnow()
             )

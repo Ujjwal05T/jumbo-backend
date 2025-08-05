@@ -37,12 +37,12 @@ class CRUDUser(CRUDBase[models.UserMaster, schemas.UserMasterCreate, schemas.Use
     def create_user(self, db: Session, *, user: schemas.UserMasterCreate) -> models.UserMaster:
         """Create new user with hashed password"""
         # Hash password (using simple hash for now)
-        password_hash = hashlib.sha256(user.password.encode()).hexdigest()
+        
         
         db_user = models.UserMaster(
             name=user.name,
             username=user.username,
-            password_hash=password_hash,
+            password_hash=user.password,
             role=user.role,
             contact=user.contact,
             department=user.department

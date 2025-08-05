@@ -21,7 +21,8 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
         # Find inventory item by QR code or barcode ID with relationships loaded
         matching_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
-            joinedload(models.InventoryMaster.created_by)
+            joinedload(models.InventoryMaster.created_by),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
         ).filter(
             (models.InventoryMaster.qr_code == qr_code) |
             (models.InventoryMaster.barcode_id == qr_code)
@@ -32,6 +33,28 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
         
         # Paper and created_by are already loaded via relationships
         paper = matching_item.paper
+        
+        # Get client information from multiple sources
+        client_name = None
+        
+        # Method 1: Check allocated order
+        if matching_item.allocated_order and matching_item.allocated_order.client:
+            client_name = matching_item.allocated_order.client.company_name
+        
+        # Method 2: Check if there are any related orders through same paper and width
+        if not client_name:
+            try:
+                # Find orders with matching paper and width that might be related
+                related_order = db.query(models.OrderMaster).join(models.OrderItem).filter(
+                    models.OrderItem.paper_id == matching_item.paper_id,
+                    models.OrderItem.width_inches == float(matching_item.width_inches),
+                    models.OrderMaster.status.in_(["in_process", "created"])
+                ).first()
+                
+                if related_order and related_order.client:
+                    client_name = f"{related_order.client.company_name} (Inferred)"
+            except Exception as e:
+                logger.warning(f"Could not infer client from related orders: {e}")
         
         return {
             "inventory_id": str(matching_item.id),
@@ -53,6 +76,9 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
             "production_info": {
                 "created_at": matching_item.created_at.isoformat(),
                 "created_by": matching_item.created_by.name if matching_item.created_by else None
+            },
+            "client_info": {
+                "client_name": client_name
             },
             "scan_timestamp": matching_item.created_at.isoformat()
         }
@@ -196,7 +222,8 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
         # Find inventory item by barcode ID with relationships loaded
         matching_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
-            joinedload(models.InventoryMaster.created_by)
+            joinedload(models.InventoryMaster.created_by),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
         ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
         
         if not matching_item:
@@ -204,6 +231,28 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
         
         # Paper and created_by are already loaded via relationships
         paper = matching_item.paper
+        
+        # Get client information from multiple sources
+        client_name = None
+        
+        # Method 1: Check allocated order
+        if matching_item.allocated_order and matching_item.allocated_order.client:
+            client_name = matching_item.allocated_order.client.company_name
+        
+        # Method 2: Check if there are any related orders through same paper and width
+        if not client_name:
+            try:
+                # Find orders with matching paper and width that might be related
+                related_order = db.query(models.OrderMaster).join(models.OrderItem).filter(
+                    models.OrderItem.paper_id == matching_item.paper_id,
+                    models.OrderItem.width_inches == float(matching_item.width_inches),
+                    models.OrderMaster.status.in_(["in_process", "created"])
+                ).first()
+                
+                if related_order and related_order.client:
+                    client_name = f"{related_order.client.company_name} (Inferred)"
+            except Exception as e:
+                logger.warning(f"Could not infer client from related orders: {e}")
         
         return {
             "inventory_id": str(matching_item.id),
@@ -225,6 +274,9 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
             "production_info": {
                 "created_at": matching_item.created_at.isoformat(),
                 "created_by": matching_item.created_by.name if matching_item.created_by else None
+            },
+            "client_info": {
+                "client_name": client_name
             },
             "scan_timestamp": matching_item.created_at.isoformat()
         }
