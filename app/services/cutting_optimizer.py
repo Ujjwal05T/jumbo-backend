@@ -172,8 +172,28 @@ class CuttingOptimizer:
         logger.debug(f"📋 INPUT DETAILS: Pending Orders: {pending_orders}")
         logger.debug(f"📋 INPUT DETAILS: Available Inventory: {available_inventory}")
         
-        # Combine all requirements (new orders + pending orders)
-        all_requirements = order_requirements + pending_orders
+        # Combine all requirements but preserve source information
+        # Tag each requirement with its source (regular order vs pending order)
+        all_requirements = []
+        
+        # Add regular orders with source tag
+        for req in order_requirements:
+            req_with_source = req.copy()
+            req_with_source['source_type'] = 'regular_order'
+            req_with_source['source_order_id'] = req.get('order_id')
+            all_requirements.append(req_with_source)
+        
+        # Add pending orders with source tag
+        logger.info(f"🔍 OPTIMIZER DEBUG: Processing {len(pending_orders)} pending orders for source tracking")
+        for i, req in enumerate(pending_orders):
+            logger.info(f"🔍 OPTIMIZER DEBUG: Pending order {i+1}: {req}")
+            req_with_source = req.copy()
+            req_with_source['source_type'] = 'pending_order'
+            req_with_source['source_order_id'] = req.get('original_order_id')  # Pending orders use original_order_id
+            req_with_source['source_pending_id'] = req.get('pending_id')  # Direct link to pending order
+            logger.info(f"🔍 OPTIMIZER DEBUG: Enhanced pending order {i+1}: source_type={req_with_source['source_type']}, source_pending_id={req_with_source['source_pending_id']}")
+            all_requirements.append(req_with_source)
+        
         logger.info(f"🔄 OPTIMIZER: Combined all_requirements: {len(all_requirements)} total items")
         logger.debug(f"📋 COMBINED REQUIREMENTS: {all_requirements}")
         
@@ -193,7 +213,8 @@ class CuttingOptimizer:
                 spec_groups[spec_key] = {
                     'orders': {},
                     'inventory': [],
-                    'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']}
+                    'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']},
+                    'source_tracking': {}  # NEW: Track which widths came from which sources
                 }
                 logger.info(f"  ✨ Created new spec group for {spec_key}")
             
@@ -206,6 +227,18 @@ class CuttingOptimizer:
             else:
                 spec_groups[spec_key]['orders'][width] = req['quantity']
                 logger.debug(f"  🆕 Added new width {width}\" with quantity {req['quantity']}")
+            
+            # NEW: Track source information for this width
+            if width not in spec_groups[spec_key]['source_tracking']:
+                spec_groups[spec_key]['source_tracking'][width] = []
+            source_entry = {
+                'source_type': req['source_type'],
+                'source_order_id': req.get('source_order_id'),
+                'source_pending_id': req.get('source_pending_id'),
+                'quantity': req['quantity']
+            }
+            spec_groups[spec_key]['source_tracking'][width].append(source_entry)
+            logger.info(f"  📋 SOURCE TRACKING: width={width}\", type={req['source_type']}, pending_id={req.get('source_pending_id')}")
         
         logger.info(f"📊 OPTIMIZER: Final spec_groups structure:")
         for spec_key, group_data in spec_groups.items():
@@ -334,6 +367,9 @@ class CuttingOptimizer:
                     
                     # Add cut rolls from this pattern
                     for width in combo:
+                        # NEW: Determine source information for this width
+                        source_info = self._get_source_info_for_width(width, spec_groups[spec_key]['source_tracking'])
+                        
                         cut_roll = {
                             'width': width,
                             'quantity': 1,
@@ -342,10 +378,14 @@ class CuttingOptimizer:
                             'shade': spec['shade'],
                             'source': 'cutting',
                             'individual_roll_number': individual_118_rolls_needed,
-                            'trim_left': trim
+                            'trim_left': trim,
+                            # NEW: Add source tracking fields
+                            'source_type': source_info.get('source_type', 'regular_order'),
+                            'source_order_id': source_info.get('source_order_id'),
+                            'source_pending_id': source_info.get('source_pending_id'),
+                            'order_id': source_info.get('source_order_id')  # Keep existing field for backward compatibility
                         }
                         cut_rolls_generated.append(cut_roll)
-                        logger.debug(f"       ➕ Added cut roll: {width}\" from roll #{individual_118_rolls_needed}")
             else:
                 logger.info(f"   ✅ OPTIMIZER: All orders fulfilled from inventory, no cutting needed")
             
@@ -487,6 +527,27 @@ class CuttingOptimizer:
             interactive=interactive
         )
 
+    def _get_source_info_for_width(self, width: float, source_tracking: Dict) -> Dict:
+        """
+        Get source information for a specific width from the source tracking data.
+        PRIORITIZES pending orders when multiple sources exist for the same width.
+        """
+        if width in source_tracking and source_tracking[width]:
+            sources = source_tracking[width]
+            
+            # PRIORITIZE pending orders - check if any source is from pending orders
+            for source in sources:
+                if source.get('source_type') == 'pending_order':
+                    return source
+            
+            # If no pending order source, use the first available (regular order)
+            return sources[0]
+        
+        return {
+            'source_type': 'regular_order',
+            'source_order_id': None,
+            'source_pending_id': None
+        }
 
     def create_plan_from_orders(
         self,

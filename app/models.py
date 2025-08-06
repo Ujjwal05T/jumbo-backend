@@ -255,6 +255,11 @@ class PendingOrderItem(Base):
     _status = Column("status", String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
     production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_order_master.id"), nullable=True)
     
+    # NEW FIELDS: Plan generation tracking
+    included_in_plan_generation = Column(Boolean, default=False, nullable=False, index=True)  # Was this pending order included in plan generation?
+    generated_cut_rolls_count = Column(Integer, default=0, nullable=False)  # How many cut rolls were generated from this pending order?
+    plan_generation_date = Column(DateTime, nullable=True)  # When was this included in plan generation?
+    
     @property
     def status(self):
         """Get the status of the pending order item."""
@@ -358,6 +363,11 @@ class InventoryMaster(Base):
     barcode_id = Column(String(50), unique=True, nullable=True, index=True)  # Human-readable barcode ID
     production_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     allocated_to_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True)
+    
+    # Source tracking fields for pending order resolution
+    source_type = Column(String(50), nullable=True, index=True)  # 'regular_order' or 'pending_order'
+    source_pending_id = Column(UNIQUEIDENTIFIER, ForeignKey("pending_order_item.id"), nullable=True, index=True)
+    
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     
@@ -365,6 +375,7 @@ class InventoryMaster(Base):
     paper = relationship("PaperMaster", back_populates="inventory_items")
     created_by = relationship("UserMaster", back_populates="inventory_created")
     allocated_order = relationship("OrderMaster")
+    source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
     plan_inventory = relationship("PlanInventoryLink", back_populates="inventory")
 
 # Plan Master - Cutting optimization plans
@@ -481,6 +492,10 @@ class CutRollProduction(Base):
     individual_roll_number = Column(Integer, nullable=True)  # From cutting algorithm
     trim_left = Column(Numeric(6, 2), nullable=True)  # Waste from cutting pattern
     
+    # Source tracking fields for pending order resolution
+    source_type = Column(String(50), nullable=True, index=True)  # 'regular_order' or 'pending_order'
+    source_pending_id = Column(UNIQUEIDENTIFIER, ForeignKey("pending_order_item.id"), nullable=True, index=True)
+    
     # Timestamps
     selected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     production_started_at = Column(DateTime, nullable=True)
@@ -498,6 +513,7 @@ class CutRollProduction(Base):
     client = relationship("ClientMaster")
     created_by = relationship("UserMaster", foreign_keys=[created_by_id])
     weight_recorded_by = relationship("UserMaster", foreign_keys=[weight_recorded_by_id])
+    source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
 
 # ============================================================================
 # DISPATCH TRACKING

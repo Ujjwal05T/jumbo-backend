@@ -81,6 +81,10 @@ class WorkflowManager:
             
             logger.info(f"📊 DEBUG WF: Final pending_requirements: {pending_requirements}")
             
+            # DEBUG: Log the pending_id values being passed to optimizer
+            for i, req in enumerate(pending_requirements):
+                logger.info(f"🔍 DEBUG PENDING INPUT {i+1}: pending_id='{req.get('pending_id')}', width={req.get('width')}, quantity={req.get('quantity')}")
+            
             # NEW FLOW: Fetch available inventory (20-25" waste rolls)
             available_inventory_items = crud_operations.get_available_inventory_by_paper_specs(self.db, paper_specs)
             available_inventory = []
@@ -267,21 +271,73 @@ class WorkflowManager:
                         created_production.append(production_order)
                         created_production_ids.append(str(production_order.id))  # Store ID immediately
             
-            # OUTPUT 3: Do NOT automatically create pending orders here
-            # Pending orders should only be created when user explicitly doesn't select certain rolls
-            # This happens later in the start_production_for_plan method when user makes selections
-            logger.info(f"Skipping automatic pending order creation - will be handled during roll selection")
+            # OUTPUT 3: Create pending orders for unfulfillable requirements (PHASE 1 per documentation)
+            # These are algorithm limitations where cutting efficiency is insufficient
+            logger.info("Creating pending orders for unfulfillable requirements (algorithm limitations)")
             
-            # OUTPUT 5: DO NOT update pending order status during plan generation
-            # Status updates happen only when "Start Production" is clicked
-            # Store the resolved pending order information for later use during production start
-            logger.info("Skipping pending order status updates during plan generation - will be handled during production start")
+            pending_orders_from_algorithm = optimization_result.get('pending_orders', [])
+            for pending_order_data in pending_orders_from_algorithm:
+                try:
+                    # Find the original order this pending requirement came from
+                    original_order_id = None
+                    paper_id = None
+                    
+                    # Match with order requirements to get original order ID
+                    for req in self.processed_order_requirements:
+                        if (req.get('gsm') == pending_order_data.get('gsm') and
+                            req.get('bf') == pending_order_data.get('bf') and 
+                            req.get('shade') == pending_order_data.get('shade')):
+                            original_order_id = req['order_id']
+                            break
+                    
+                    if original_order_id:
+                        # Convert string UUID to UUID object if needed
+                        if isinstance(original_order_id, str):
+                            original_order_id = uuid.UUID(original_order_id)
+                        
+                        # Generate frontend ID for the pending order
+                        frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", self.db)
+                        
+                        # Create pending order with PHASE 1 flags (algorithm limitation)
+                        # Note: PendingOrderItem stores paper specs directly (gsm, bf, shade) instead of paper_id
+                        pending_order = models.PendingOrderItem(
+                            frontend_id=frontend_id,
+                            original_order_id=original_order_id,
+                            width_inches=float(pending_order_data['width']),
+                            quantity_pending=pending_order_data['quantity'],
+                            gsm=pending_order_data['gsm'],
+                            bf=float(pending_order_data['bf']),
+                            shade=pending_order_data['shade'],
+                            status="pending",
+                            included_in_plan_generation=False,  # PHASE 1: Algorithm limitation
+                            reason="insufficient_cutting_efficiency",
+                            created_by_id=self.user_id
+                        )
+                        
+                        self.db.add(pending_order)
+                        created_pending.append(pending_order)
+                        logger.info(f"Created PHASE 1 pending order: {pending_order_data['quantity']} rolls of {pending_order_data['width']}\" {pending_order_data['shade']} paper (algorithm limitation)")
+                        
+                    else:
+                        logger.warning(f"Could not find original order for pending requirement: {pending_order_data}")
+                        
+                except Exception as e:
+                    logger.error(f"Error creating pending order for algorithm limitation: {e}")
             
-            # OUTPUT 4: No waste inventory creation (removed - waste >20" goes to pending)
+            self.db.flush()  # Ensure pending orders are saved before continuing
             
-            # IMPORTANT: Do NOT update order statuses during plan generation
-            # Status updates happen only when "Start Production" is clicked
-            # Keep orders in "created" status until production actually starts
+            # OUTPUT 4: Mark pending orders that contributed to plan generation with tracking flags
+            # Per two-phase strategy: Only mark as included_in_plan_generation=True if they generated cut rolls
+            # Status remains "pending" until production start (PHASE 2)
+            logger.info("Setting plan generation tracking flags for pending orders that generated cut rolls")
+            self._mark_pending_orders_in_plan_generation(pending_requirements, optimization_result)
+            
+            # IMPORTANT: Two-Phase Pending Order Strategy Implementation Complete
+            # PHASE 1 (Plan Generation): Created pending orders for algorithm limitations (included_in_plan_generation=FALSE)  
+            # PHASE 2 (Production Start): Will create pending orders for user deferrals (included_in_plan_generation=TRUE)
+            # 
+            # Order status updates happen only during production start, not plan generation
+            # Orders remain in "created" status until production actually starts
             
             self.db.commit()
             
@@ -292,14 +348,11 @@ class WorkflowManager:
             logger.info(f"🔍 DEBUG WF: Starting paper_id enhancement for {len(cut_rolls_generated)} cut rolls")
             enhanced_cut_rolls = []
             for i, cut_roll in enumerate(cut_rolls_generated):
-                logger.info(f"🔍 DEBUG WF: Processing cut roll {i+1}: {cut_roll}")
                 enhanced_roll = cut_roll.copy()
                 
                 # FALLBACK: Map to paper_id from order requirements (simpler and more reliable)
                 paper_id_found = False
                 if 'gsm' in cut_roll and 'bf' in cut_roll and 'shade' in cut_roll:
-                    logger.info(f"🔍 DEBUG WF: Looking for paper_id from order requirements for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']}")
-                    
                     # Try to find matching order requirement
                     for req in self.processed_order_requirements:
                         if (req.get('gsm') == cut_roll['gsm'] and 
@@ -307,7 +360,6 @@ class WorkflowManager:
                             req.get('shade') == cut_roll['shade']):
                             enhanced_roll['paper_id'] = req['paper_id']
                             enhanced_roll['order_id'] = req['order_id']  # Add the order_id so it can match pending orders
-                            logger.info(f"✅ DEBUG WF: Found paper_id and order_id from order requirement: paper_id={req['paper_id']}, order_id={req['order_id']}")
                             paper_id_found = True
                             break
                     
@@ -331,7 +383,6 @@ class WorkflowManager:
                                         pending_req.get('bf') == cut_roll['bf'] and 
                                         pending_req.get('shade') == cut_roll['shade']):
                                         enhanced_roll['order_id'] = pending_req['original_order_id']
-                                        logger.info(f"✅ DEBUG WF: Found order_id from pending requirement: {pending_req['original_order_id']}")
                                         break
                                 
                                 paper_id_found = True
@@ -341,7 +392,6 @@ class WorkflowManager:
                                 if self.processed_order_requirements:
                                     enhanced_roll['paper_id'] = self.processed_order_requirements[0]['paper_id']
                                     enhanced_roll['order_id'] = self.processed_order_requirements[0]['order_id']
-                                    logger.info(f"✅ DEBUG WF: Using fallback paper_id and order_id: paper_id={enhanced_roll['paper_id']}, order_id={enhanced_roll['order_id']}")
                                     paper_id_found = True
                         except Exception as paper_error:
                             logger.error(f"❌ DEBUG WF: Error in paper lookup: {paper_error}")
@@ -358,15 +408,12 @@ class WorkflowManager:
                     from ..services.barcode_generator import BarcodeGenerator
                     barcode_id = BarcodeGenerator.generate_cut_roll_barcode(self.db)
                     enhanced_roll['barcode_id'] = barcode_id
-                    logger.info(f"✅ DEBUG WF: Generated barcode for roll {i+1}: {barcode_id}")
                 except Exception as barcode_error:
                     logger.error(f"❌ DEBUG WF: Error generating barcode for cut roll {i+1}: {barcode_error}")
                     # Fallback to a timestamp-based ID
                     import time
                     enhanced_roll['barcode_id'] = f"CUT_ROLL_{int(time.time() * 1000)}_{i+1}"
-                    logger.warning(f"⚠️ DEBUG WF: Using fallback barcode: {enhanced_roll['barcode_id']}")
                     
-                logger.info(f"🔍 DEBUG WF: Enhanced roll {i+1} paper_id: '{enhanced_roll.get('paper_id', 'MISSING')}', barcode_id: '{enhanced_roll.get('barcode_id', 'MISSING')}'")
                 enhanced_cut_rolls.append(enhanced_roll)
             
             logger.info(f"🔍 DEBUG WF: Finished enhancing {len(enhanced_cut_rolls)} cut rolls")
@@ -389,6 +436,15 @@ class WorkflowManager:
                         "reason": po.reason
                     } for po in created_pending
                 ],
+                # NEW: Store source tracking metadata for production start
+                "source_tracking_map": {
+                    f"{cr.get('width', 0)}-{cr.get('gsm', 0)}-{cr.get('bf', 0)}-{cr.get('shade', '')}-{cr.get('individual_roll_number', 1)}": {
+                        "source_type": cr.get('source_type'),
+                        "source_pending_id": cr.get('source_pending_id'),
+                        "source_order_id": cr.get('source_order_id')
+                    }
+                    for cr in enhanced_cut_rolls if cr.get('source_type')
+                },
                 "summary": {
                     "total_cut_rolls": total_cut_rolls,
                     "total_individual_118_rolls": optimization_result.get('summary', {}).get('total_individual_118_rolls', 0),
@@ -803,3 +859,69 @@ class WorkflowManager:
         except Exception as e:
             logger.error(f"Error updating resolved pending orders: {e}")
             # Don't raise - this shouldn't break the main workflow
+    
+    def _mark_pending_orders_in_plan_generation(self, pending_requirements: List[Dict], optimization_result: Dict):
+        """
+        Mark pending orders that were included in plan generation and actually generated cut rolls.
+        Per documentation: Only mark with included_in_plan_generation = True if they contributed to the solution.
+        Status remains "pending" until production start (PHASE 2).
+        """
+        from datetime import datetime
+        
+        try:
+            cut_rolls_generated = optimization_result.get('cut_rolls_generated', [])
+            
+            # Count how many cut rolls were generated from each pending order
+            pending_cut_roll_counts = {}
+            
+            for cut_roll in cut_rolls_generated:
+                if cut_roll.get('source_type') == 'pending_order' and cut_roll.get('source_pending_id'):
+                    pending_id = cut_roll.get('source_pending_id')
+                    if pending_id in pending_cut_roll_counts:
+                        pending_cut_roll_counts[pending_id] += 1
+                    else:
+                        pending_cut_roll_counts[pending_id] = 1
+            
+            logger.info(f"🔍 PLAN TRACKING: Found {len(pending_cut_roll_counts)} pending orders that generated cut rolls")
+            
+            # Update the tracking fields ONLY for pending orders that generated cut rolls
+            for pending_id, cut_roll_count in pending_cut_roll_counts.items():
+                try:
+                    # Convert string UUID to UUID object if needed
+                    if isinstance(pending_id, str):
+                        import uuid
+                        pending_uuid = uuid.UUID(pending_id)
+                    else:
+                        pending_uuid = pending_id
+                    
+                    # Find and update the pending order
+                    pending_order = self.db.query(models.PendingOrderItem).filter(
+                        models.PendingOrderItem.id == pending_uuid
+                    ).first()
+                    
+                    if pending_order:
+                        # IMPORTANT: Only set to True for orders that actually generated cut rolls
+                        pending_order.included_in_plan_generation = True
+                        pending_order.generated_cut_rolls_count = cut_roll_count
+                        pending_order.plan_generation_date = datetime.utcnow()
+                        
+                        # Status remains "pending" - will change to "included_in_plan" during production start
+                        
+                        logger.info(f"✅ PLAN TRACKING: Marked pending {pending_order.frontend_id} as included in plan generation ({cut_roll_count} cut rolls generated)")
+                    else:
+                        logger.warning(f"⚠️ PLAN TRACKING: Could not find pending order with ID {pending_id}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ PLAN TRACKING: Error updating pending order {pending_id}: {e}")
+            
+            # Ensure all other pending orders remain with included_in_plan_generation = False
+            # This includes orders that were input but didn't generate cut rolls (high waste, etc.)
+            for req in pending_requirements:
+                pending_id = req.get('pending_id')
+                if pending_id and pending_id not in pending_cut_roll_counts:
+                    logger.info(f"📊 PLAN TRACKING: Pending order {pending_id} was NOT included in plan generation (likely high waste or technical limitation)")
+                    # These orders maintain included_in_plan_generation = False (default)
+            
+        except Exception as e:
+            logger.error(f"❌ PLAN TRACKING: Error in _mark_pending_orders_in_plan_generation: {e}")
+            # Don't raise - this shouldn't break plan generation

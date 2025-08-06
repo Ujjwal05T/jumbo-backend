@@ -125,161 +125,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         selected_cut_rolls = request_data.get("selected_cut_rolls", [])
         all_available_cuts = request_data.get("all_available_cuts", [])  # All cuts that were available for selection
         
-        # Update status of pending orders that are actually resolved by selected cut rolls
-        # Only mark pending orders as "included_in_plan" if they were actually 
-        # consumed by optimization to create cut rolls that are now being selected for production
-        from ..services.workflow_manager import WorkflowManager
-        try:
-            # Create a temporary workflow instance to access the pending order update logic
-            temp_workflow = WorkflowManager(db=db, user_id=request_data.get("created_by_id"))
-            
-            # For each selected cut roll, find corresponding pending orders that should be marked as resolved
-            # This logic should match the cut roll specifications with pending order specifications
-            resolved_pending_count = 0
-            logger.info(f"🔍 PENDING RESOLUTION: Processing {len(selected_cut_rolls)} selected cut rolls for pending order resolution")
-            for cut_roll in selected_cut_rolls:
-                # Convert to Decimal to match database types exactly
-                from decimal import Decimal
-                width = Decimal(str(cut_roll.get("width_inches", 0)))
-                gsm = int(cut_roll.get("gsm", 0))
-                bf = Decimal(str(cut_roll.get("bf", 0)))
-                shade = str(cut_roll.get("shade", "")).strip()
-                order_id = cut_roll.get("order_id")
-                
-                logger.info(f"🔍 PENDING MATCH: Looking for pending orders matching cut roll: {width}\" {gsm}gsm {bf}bf {shade} (order: {order_id})")
-                
-                # Find matching pending orders that are resolved by this cut roll selection
-                # Search by specifications even if order_id is None
-                from uuid import UUID
-                try:
-                    # Build base query with specifications - use tolerance for float comparisons
-                    logger.info(f"🔍 QUERY DEBUG: Searching for width={width} (type: {type(width)}), gsm={gsm} (type: {type(gsm)}), bf={bf} (type: {type(bf)}), shade='{shade}' (type: {type(shade)})")
-                    
-                    # Use exact Decimal comparison since we converted to Decimal
-                    base_query = db.query(models.PendingOrderItem).filter(
-                        models.PendingOrderItem.width_inches == width,
-                        models.PendingOrderItem.gsm == gsm,
-                        models.PendingOrderItem.bf == bf,
-                        models.PendingOrderItem.shade == shade,
-                        models.PendingOrderItem._status == "pending"
-                    )
-                    
-                    # PRIORITIZE SPECIFICATION MATCHING: Try specifications first, then order_id as secondary filter
-                    matching_pending = base_query.all()
-                    
-                    # If we found matches by specs but want to prefer same order_id, filter further
-                    if order_id and len(matching_pending) > 1:
-                        try:
-                            order_id_uuid = UUID(order_id) if isinstance(order_id, str) else order_id
-                            order_specific_matches = [p for p in matching_pending if p.original_order_id == order_id_uuid]
-                            if order_specific_matches:
-                                matching_pending = order_specific_matches
-                                logger.info(f"🔍 ORDER PRIORITY: Filtered to {len(matching_pending)} matches with same order_id")
-                        except (ValueError, TypeError) as e:
-                            logger.info(f"🔍 ORDER ID ISSUE: Using spec-only matching due to order_id error: {e}")
-                            # Continue with spec-only matches
-                    
-                    # With Decimal conversion, exact matching should work now
-                    
-                    logger.info(f"🔍 PENDING FOUND: {len(matching_pending)} matching pending orders found")
-                    
-                    # CRITICAL DEBUG: If no matches, this is the root issue!
-                    if len(matching_pending) == 0:
-                        logger.error(f"🔍 ROOT ISSUE: No pending orders match cut roll {width}\" {gsm}gsm {bf}bf {shade}")
-                        logger.error(f"🔍 CHECKING: Are there ANY pending orders in database?")
-                        total_pending = db.query(models.PendingOrderItem).filter(
-                            models.PendingOrderItem._status == "pending"
-                        ).count()
-                        logger.error(f"🔍 TOTAL PENDING ORDERS: {total_pending}")
-                        
-                        if total_pending > 0:
-                            logger.error(f"🔍 DATA TYPE ISSUE: Cut roll types - width:{type(width)}, gsm:{type(gsm)}, bf:{type(bf)}")
-                            sample_pending = db.query(models.PendingOrderItem).filter(
-                                models.PendingOrderItem._status == "pending"
-                            ).first()
-                            if sample_pending:
-                                logger.error(f"🔍 DB TYPES: width:{type(sample_pending.width_inches)}, gsm:{type(sample_pending.gsm)}, bf:{type(sample_pending.bf)}")
-                                logger.error(f"🔍 DB VALUES: width:{sample_pending.width_inches}, gsm:{sample_pending.gsm}, bf:{sample_pending.bf}, shade:'{sample_pending.shade}'")
-                    else:
-                        logger.info(f"🔍 SUCCESS: Found matches, proceeding with status update")
-                    
-                    # Debug: If no matches found, let's see what pending orders actually exist
-                    if len(matching_pending) == 0:
-                        # Check if there are any pending orders with the same specs but different order_id
-                        debug_pending = db.query(models.PendingOrderItem).filter(
-                            models.PendingOrderItem._status == "pending"
-                        ).all()
-                        logger.info(f"🔍 DEBUG: Found {len(debug_pending)} total pending orders in database")
-                        for debug_item in debug_pending:
-                            logger.info(f"  - DB Pending {debug_item.frontend_id}: order_id={debug_item.original_order_id}, width={debug_item.width_inches} (type: {type(debug_item.width_inches)}), gsm={debug_item.gsm} (type: {type(debug_item.gsm)}), bf={debug_item.bf} (type: {type(debug_item.bf)}), shade='{debug_item.shade}' (type: {type(debug_item.shade)})")
-                        
-                        # Check with relaxed comparison
-                        relaxed_pending = db.query(models.PendingOrderItem).filter(
-                            models.PendingOrderItem._status == "pending"
-                        ).all()
-                        for pending_item in relaxed_pending:
-                            width_match = float(pending_item.width_inches) == float(width) if width and pending_item.width_inches else False
-                            gsm_match = int(pending_item.gsm) == int(gsm) if gsm and pending_item.gsm else False
-                            bf_match = float(pending_item.bf) == float(bf) if bf and pending_item.bf else False
-                            shade_match = str(pending_item.shade).strip().lower() == str(shade).strip().lower() if shade and pending_item.shade else False
-                            if width_match and gsm_match and bf_match and shade_match:
-                                logger.info(f"🔍 RELAXED MATCH FOUND: {pending_item.frontend_id} matches with relaxed comparison")
-                        
-                        # Also check if there are ANY pending orders for this order_id if we have one
-                        if order_id:
-                            order_pending = db.query(models.PendingOrderItem).filter(
-                                models.PendingOrderItem.original_order_id == order_id_uuid,
-                                models.PendingOrderItem._status == "pending"
-                            ).all()
-                            logger.info(f"🔍 DEBUG: Found {len(order_pending)} pending orders for order_id {order_id_uuid}")
-                            for order_item in order_pending:
-                                logger.info(f"  - Pending {order_item.frontend_id}: width={order_item.width_inches}, gsm={order_item.gsm}, bf={order_item.bf}, shade={order_item.shade}")
-                    
-                    for pending_item in matching_pending:
-                        # Only update one pending item per cut roll selected
-                        if pending_item.quantity_pending > 0:
-                            logger.info(f"🔍 PENDING RESOLVE: Marking pending order {pending_item.frontend_id} as included_in_plan")
-                            logger.info(f"🔍 BEFORE UPDATE: status={pending_item.status}, quantity_pending={pending_item.quantity_pending}, quantity_fulfilled={getattr(pending_item, 'quantity_fulfilled', 'NOT_SET')}")
-                            
-                            # Use the safe method that includes validation
-                            try:
-                                if pending_item.mark_as_included_in_plan(db, resolved_by_production=True):
-                                    # Update quantity fields
-                                    old_fulfilled = getattr(pending_item, 'quantity_fulfilled', 0) or 0
-                                    old_pending = pending_item.quantity_pending
-                                    
-                                    pending_item.quantity_fulfilled = old_fulfilled + 1
-                                    pending_item.quantity_pending = max(0, old_pending - 1)
-                                    
-                                    # Force flush to database to ensure changes are persisted
-                                    db.flush()
-                                    
-                                    resolved_pending_count += 1
-                                    updated_pending_orders.append(str(pending_item.id))
-                                    
-                                    logger.info(f"✅ PENDING SUCCESS: Resolved pending order {pending_item.frontend_id}")
-                                    logger.info(f"🔍 AFTER UPDATE: status={pending_item.status}, quantity_pending={pending_item.quantity_pending}, quantity_fulfilled={pending_item.quantity_fulfilled}")
-                                    break  # Only resolve one item per cut roll
-                                else:
-                                    logger.warning(f"❌ PENDING FAILED: Could not mark pending order {pending_item.frontend_id} as included_in_plan")
-                            except Exception as e:
-                                logger.error(f"❌ PENDING ERROR: Exception during update of {pending_item.frontend_id}: {e}")
-                                import traceback
-                                logger.error(f"❌ TRACEBACK: {traceback.format_exc()}")
-                            
-                except Exception as e:
-                    logger.error(f"Error in pending order resolution for cut roll {width}\" {gsm}gsm {bf}bf {shade}: {e}")
-                    continue
-                        
-            logger.info(f"Resolved {resolved_pending_count} pending order items based on selected cut rolls")
-            
-        except Exception as e:
-            logger.warning(f"Error updating resolved pending orders during production start: {e}")
-            # Don't fail the entire production start if pending order updates fail
-        
         # Initialize tracking lists
         created_inventory = []
-        created_pending_items = []
         
         # Create inventory records for SELECTED cut rolls with status "cutting"
         for cut_roll in selected_cut_rolls:
@@ -290,8 +137,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             # Find the best matching order for this cut roll
             best_order = None
-            cut_roll_width = cut_roll.get("width_inches", 0)
-            cut_roll_paper_id = cut_roll.get("paper_id")
+            cut_roll_width = cut_roll.get("width", cut_roll.get("width_inches", 0))  # Try both field names
+            cut_roll_paper_id = cut_roll.get("paper_id")  # This might be None from optimizer
             
             # Look through all orders associated with this plan
             for plan_order in db_plan.plan_orders:
@@ -310,19 +157,60 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             # Generate NEW QR code for production (don't reuse planning QR codes)
             production_qr_code = f"PROD_{barcode_id}_{uuid.uuid4().hex[:8].upper()}"
             
+            # Handle paper_id - optimizer might not set this, so find it from the order
+            if not cut_roll_paper_id and best_order:
+                # Find paper_id from the best matching order item
+                for order_item in best_order.order_items:
+                    if abs(float(order_item.width_inches) - float(cut_roll_width)) < 0.01:
+                        cut_roll_paper_id = order_item.paper_id
+                        break
+            
+            logger.info(f"🔍 INVENTORY DEBUG: cut_roll data = {cut_roll}")
+            logger.info(f"🔍 INVENTORY DEBUG: source_type = {cut_roll.get('source_type')}")
+            logger.info(f"🔍 INVENTORY DEBUG: source_pending_id = {cut_roll.get('source_pending_id')}")
+            
+            # NEW: If source tracking is missing, try to reconstruct it from pending orders
+            if not cut_roll.get('source_type') and cut_roll.get('gsm') and cut_roll.get('shade'):
+                logger.info(f"🔍 RECONSTRUCTING: Trying to find source tracking from pending orders for {cut_roll_width}\" GSM={cut_roll.get('gsm')} Shade={cut_roll.get('shade')}")
+                
+                # Look for pending orders with matching specs that were included in plan generation
+                matching_pending = db.query(models.PendingOrderItem).filter(
+                    models.PendingOrderItem.width_inches == cut_roll_width,
+                    models.PendingOrderItem.gsm == cut_roll.get('gsm'),
+                    models.PendingOrderItem.shade == cut_roll.get('shade'),
+                    models.PendingOrderItem._status == "pending",
+                    models.PendingOrderItem.included_in_plan_generation == True
+                ).first()
+                
+                if matching_pending:
+                    logger.info(f"🔍 RECONSTRUCTED: Found matching pending order {matching_pending.frontend_id} for cut roll")
+                    # Add source tracking to the cut_roll dict
+                    cut_roll['source_type'] = 'pending_order'
+                    cut_roll['source_pending_id'] = str(matching_pending.id)
+                    logger.info(f"🔍 RECONSTRUCTED: Added source_type='pending_order', source_pending_id='{matching_pending.id}'")
+                else:
+                    logger.info(f"🔍 RECONSTRUCTED: No matching pending order found, assuming regular order")
+                    cut_roll['source_type'] = 'regular_order'
+            
             inventory_item = models.InventoryMaster(
-                paper_id=cut_roll.get("paper_id"),
-                width_inches=cut_roll.get("width_inches", 0),
+                paper_id=cut_roll_paper_id,
+                width_inches=cut_roll_width,
                 weight_kg=0,  # Will be updated via QR scan
                 roll_type="cut",
                 status="cutting",
                 qr_code=production_qr_code,  # Use NEW production QR code
                 barcode_id=barcode_id,
                 allocated_to_order_id=best_order.id if best_order else None,
+                # NEW: Save source tracking information from cut roll
+                source_type=cut_roll.get("source_type"),
+                source_pending_id=UUID(cut_roll.get("source_pending_id")) if cut_roll.get("source_pending_id") else None,
                 created_by_id=request_data.get("created_by_id")
             )
             db.add(inventory_item)
             db.flush()  # Get inventory_item.id
+            
+            # CRITICAL DEBUG: Log what was actually saved to database
+            logger.info(f"🔍 INVENTORY CREATED: id={inventory_item.id}, width={inventory_item.width_inches}, source_type={inventory_item.source_type}, source_pending_id={inventory_item.source_pending_id}")
             
             # Create plan-inventory link to associate this inventory item with the plan
             plan_inventory_link = models.PlanInventoryLink(
@@ -334,105 +222,159 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             created_inventory.append(inventory_item)
         
-        # Move UNSELECTED cut rolls to pending orders
-        if all_available_cuts:
-            # Debug: Log the selected and available cut rolls data structure
-            from ..services.id_generator import FrontendIDGenerator
+        # NEW CORRECT PENDING ORDER RESOLUTION LOGIC  
+        # Now process the created inventory items to resolve pending orders
+        try:
+            resolved_pending_count = 0
+            logger.info(f"🔍 NEW PENDING RESOLUTION: Processing {len(created_inventory)} inventory items with source tracking")
             
-            logger.info(f"🔍 ROLL COMPARISON DEBUG: Number of selected cut rolls: {len(selected_cut_rolls)}")
-            logger.info(f"🔍 ROLL COMPARISON DEBUG: Number of available cuts: {len(all_available_cuts)}")
-            
-            # Debug: Log sample data structure
-            if selected_cut_rolls:
-                logger.info(f"🔍 SAMPLE SELECTED CUT ROLL: {selected_cut_rolls[0]}")
-            if all_available_cuts:
-                logger.info(f"🔍 SAMPLE AVAILABLE CUT: {all_available_cuts[0]}")
-            
-            # Create multiple sets for different comparison methods
-            selected_barcodes = {cut.get("barcode_id") for cut in selected_cut_rolls if cut.get("barcode_id")}
-            selected_qr_codes = {cut.get("qr_code") for cut in selected_cut_rolls if cut.get("qr_code")}
-            
-            # Also create composite identifiers as fallback
-            selected_cut_identifiers = set()
-            for cut in selected_cut_rolls:
-                # Create a unique identifier from available fields
-                identifier = (
-                    cut.get("width_inches", cut.get("width", 0)),
-                    cut.get("gsm", 0),
-                    cut.get("bf", 0),
-                    cut.get("shade", ""),
-                    cut.get("individual_roll_number", 0),
-                    cut.get("paper_id", "")
-                )
-                selected_cut_identifiers.add(identifier)
-                logger.info(f"🔍 SELECTED IDENTIFIER: {identifier}")
-            
-            logger.info(f"🔍 SELECTED BARCODES: {selected_barcodes}")
-            logger.info(f"🔍 SELECTED QR CODES: {selected_qr_codes}")
-            logger.info(f"🔍 TOTAL SELECTED IDENTIFIERS: {len(selected_cut_identifiers)}")
-            
-            for available_cut in all_available_cuts:
-                # Try multiple comparison methods
-                available_barcode = available_cut.get("barcode_id")
-                available_qr = available_cut.get("qr_code")
+            # Process each created inventory item to find its source pending order (if any)
+            for i, inventory_item in enumerate(created_inventory):
+                logger.info(f"🔍 INVENTORY ITEM {i+1}: Processing {inventory_item.width_inches}\" {inventory_item.barcode_id}")
                 
-                # Create the same identifier for available cut
-                available_identifier = (
-                    available_cut.get("width_inches", available_cut.get("width", 0)),
-                    available_cut.get("gsm", 0),
-                    available_cut.get("bf", 0),
-                    available_cut.get("shade", ""),
-                    available_cut.get("individual_roll_number", 0),
-                    available_cut.get("paper_id", "")
-                )
+                # Check if this inventory item came from a pending order (read from database)
+                source_type = inventory_item.source_type
+                source_pending_id = inventory_item.source_pending_id
                 
-                # Check if selected using any method
-                is_selected_by_barcode = available_barcode and available_barcode in selected_barcodes
-                is_selected_by_qr = available_qr and available_qr in selected_qr_codes
-                is_selected_by_identifier = available_identifier in selected_cut_identifiers
+                logger.info(f"🔍 INVENTORY ITEM {i+1}: source_type={source_type}, source_pending_id={source_pending_id}")
                 
-                is_selected = is_selected_by_barcode or is_selected_by_qr or is_selected_by_identifier
-                
-                logger.info(f"🔍 AVAILABLE CUT: barcode='{available_barcode}', qr='{available_qr}', identifier={available_identifier}")
-                logger.info(f"🔍 SELECTION CHECK: by_barcode={is_selected_by_barcode}, by_qr={is_selected_by_qr}, by_identifier={is_selected_by_identifier} -> SELECTED: {is_selected}")
-                
-                # If this cut was not selected, move it to pending orders
-                if not is_selected:
-                    # Debug: Check if order_id is available
-                    order_id = available_cut.get("order_id")
-                    logger.info(f"🔍 PENDING DEBUG: Creating pending item for unselected cut: {available_cut}")
-                    logger.info(f"🔍 PENDING DEBUG: order_id = {order_id}")
-                    
-                    if not order_id:
-                        logger.warning(f"⚠️ PENDING WARNING: No order_id found for unselected cut roll. Available keys: {list(available_cut.keys())}")
-                        # Use the first order from plan_orders as fallback
-                        if db_plan.plan_orders:
-                            order_id = db_plan.plan_orders[0].order_id
-                            logger.info(f"🔧 PENDING FALLBACK: Using first plan order_id as fallback: {order_id}")
+                if source_type == 'pending_order' and source_pending_id:
+                    # This cut roll was generated from a pending order - resolve it
+                    try:
+                        # Convert string UUID to UUID object if needed
+                        if isinstance(source_pending_id, str):
+                            pending_uuid = UUID(source_pending_id)
                         else:
-                            logger.error(f"❌ PENDING ERROR: No plan orders available for fallback")
-                            continue  # Skip this item if no fallback available
+                            pending_uuid = source_pending_id
+                        
+                        # Find the pending order
+                        pending_order = db.query(models.PendingOrderItem).filter(
+                            models.PendingOrderItem.id == pending_uuid,
+                            models.PendingOrderItem._status == "pending",
+                            models.PendingOrderItem.included_in_plan_generation == True  # CRITICAL: Only resolve if included in plan
+                        ).first()
+                        
+                        if pending_order and pending_order.quantity_pending > 0:
+                            logger.info(f"✅ RESOLVING: Cut roll {i+1} came from pending {pending_order.frontend_id} - marking as included_in_plan")
+                            
+                            # Use the safe method that includes validation
+                            if pending_order.mark_as_included_in_plan(db, resolved_by_production=True):
+                                # Update quantity fields
+                                old_fulfilled = getattr(pending_order, 'quantity_fulfilled', 0) or 0
+                                old_pending = pending_order.quantity_pending
+                                
+                                pending_order.quantity_fulfilled = old_fulfilled + 1
+                                pending_order.quantity_pending = max(0, old_pending - 1)
+                                
+                                # Force flush to database to ensure changes are persisted
+                                db.flush()
+                                
+                                resolved_pending_count += 1
+                                updated_pending_orders.append(str(pending_order.id))
+                                
+                                logger.info(f"✅ SUCCESS: Resolved pending {pending_order.frontend_id} - qty_pending: {old_pending} -> {pending_order.quantity_pending}")
+                            else:
+                                logger.warning(f"❌ FAILED: Could not mark pending {pending_order.frontend_id} as included_in_plan")
+                        elif pending_order and pending_order.included_in_plan_generation == False:
+                            logger.info(f"⏸️ SKIPPED: Pending order {pending_order.frontend_id} was not included in plan generation (high waste) - keeping as pending")
+                        elif not pending_order:
+                            logger.warning(f"⚠️ NOT FOUND: Could not find pending order with ID {source_pending_id}")
+                        else:
+                            logger.info(f"ℹ️ NO QUANTITY: Pending order {pending_order.frontend_id} has no remaining quantity to resolve")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ ERROR: Exception resolving pending order for cut roll {i+1}: {e}")
+                        import traceback
+                        logger.error(f"❌ TRACEBACK: {traceback.format_exc()}")
+                        
+                elif source_type == 'regular_order':
+                    logger.info(f"ℹ️ REGULAR ORDER: Cut roll {i+1} came from regular order - no pending order to resolve")
+                else:
+                    logger.info(f"ℹ️ NO SOURCE: Cut roll {i+1} has no source tracking - likely from regular order")
+            
+            logger.info(f"✅ RESOLUTION COMPLETE: Resolved {resolved_pending_count} pending orders based on source tracking of selected cut rolls")
+            
+        except Exception as e:
+            logger.warning(f"Error updating resolved pending orders during production start: {e}")
+            # Don't fail the entire production start if pending order updates fail
+        
+        # PHASE 2: Create pending orders for unselected cut rolls (per documentation)
+        # These are user business decisions to defer production
+        logger.info("Creating PHASE 2 pending orders for unselected cut rolls (user deferred production)")
+        
+        created_pending_from_unselected = []
+        unselected_cut_rolls = []
+        
+        # Find unselected cut rolls by comparing available vs selected
+        # Since cut rolls don't have unique IDs, use a combination of identifying fields
+        def make_roll_key(roll):
+            return (
+                roll.get('width_inches', roll.get('width', 0)),
+                roll.get('gsm', 0), 
+                roll.get('bf', 0),
+                roll.get('shade', ''),
+                roll.get('individual_roll_number', 1),
+                roll.get('order_id', '')
+            )
+        
+        selected_roll_keys = {make_roll_key(roll) for roll in selected_cut_rolls}
+        
+        logger.info(f"🔍 PHASE 2 DEBUG: {len(selected_cut_rolls)} selected cut rolls, {len(all_available_cuts)} available cuts")
+        logger.info(f"🔍 PHASE 2 DEBUG: Selected keys count: {len(selected_roll_keys)}")
+        
+        for available_roll in all_available_cuts:
+            available_key = make_roll_key(available_roll)
+            if available_key not in selected_roll_keys:
+                unselected_cut_rolls.append(available_roll)
+                logger.info(f"🔍 PHASE 2 DEBUG: Unselected roll found: {available_key}")
+            else:
+                logger.info(f"🔍 PHASE 2 DEBUG: Roll WAS selected: {available_key}")
+        
+        logger.info(f"🔍 PHASE 2: Found {len(unselected_cut_rolls)} unselected cut rolls for pending order creation")
+        
+        # Create pending orders for each unselected cut roll
+        for unselected_roll in unselected_cut_rolls:
+            try:
+                # Find the original order this cut roll was meant for
+                original_order_id = unselected_roll.get('order_id')
+                
+                if original_order_id:
+                    # Convert to UUID if needed
+                    if isinstance(original_order_id, str):
+                        original_order_id = UUID(original_order_id)
                     
-                    # Create pending order item for unselected cut
+                    # Generate frontend ID for the pending order
+                    from ..services.id_generator import FrontendIDGenerator
                     frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
                     
-                    pending_item = models.PendingOrderItem(
+                    # Create PHASE 2 pending order (user deferred production)
+                    # Note: PendingOrderItem stores paper specs directly (gsm, bf, shade) instead of paper_id
+                    pending_order = models.PendingOrderItem(
                         frontend_id=frontend_id,
-                        original_order_id=order_id,
-                        width_inches=available_cut.get("width_inches", 0),
-                        quantity_pending=1,  # Each cut roll is quantity 1
-                        gsm=available_cut.get("gsm"),
-                        bf=available_cut.get("bf"),
-                        shade=available_cut.get("shade"),
-                        reason="unselected_for_production",
+                        original_order_id=original_order_id,
+                        width_inches=float(unselected_roll.get('width_inches', 0)),
+                        quantity_pending=1,  # One roll per unselected cut roll
+                        gsm=unselected_roll.get('gsm', 0),
+                        bf=float(unselected_roll.get('bf', 0)),
+                        shade=unselected_roll.get('shade', ''),
                         status="pending",
+                        included_in_plan_generation=True,  # PHASE 2: User business decision
+                        reason="user_deferred_production",
                         created_by_id=request_data.get("created_by_id")
                     )
-                    db.add(pending_item)
-                    db.flush()
                     
-                    created_pending_items.append(pending_item)
-                    updated_pending_orders.append(str(pending_item.id))
+                    db.add(pending_order)
+                    created_pending_from_unselected.append(pending_order)
+                    logger.info(f"Created PHASE 2 pending order: 1 roll of {unselected_roll.get('width_inches')}\" {unselected_roll.get('shade')} paper (user deferred)")
+                    
+                else:
+                    logger.warning(f"Could not find original order for unselected cut roll: {unselected_roll}")
+                    
+            except Exception as e:
+                logger.error(f"Error creating PHASE 2 pending order for unselected cut roll: {e}")
+        
+        db.flush()  # Ensure PHASE 2 pending orders are saved
+        logger.info(f"✅ PHASE 2 COMPLETE: Created {len(created_pending_from_unselected)} pending orders from unselected cut rolls")
         
         db.commit()
         db.refresh(db_plan)
@@ -444,16 +386,15 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             "summary": {
                 "orders_updated": len(updated_orders),
                 "order_items_updated": len(updated_order_items),
-                "pending_orders_updated": len(updated_pending_orders),
+                "pending_orders_resolved": len(updated_pending_orders),
                 "inventory_created": len(created_inventory),
-                "pending_items_created": len(created_pending_items)
+                "pending_orders_created_phase2": len(created_pending_from_unselected)
             },
             "details": {
                 "updated_orders": updated_orders,
                 "updated_order_items": updated_order_items,
-                "updated_pending_orders": updated_pending_orders,
-                "created_inventory": [str(inv.id) for inv in created_inventory],
-                "created_pending_items": [str(pending.id) for pending in created_pending_items]
+                "updated_pending_orders": updated_pending_orders,  # Use the expected field name
+                "created_inventory": [str(inv.id) for inv in created_inventory]
             },
             "created_inventory_details": [
                 {
@@ -466,7 +407,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     "created_at": inv.created_at.isoformat() if inv.created_at else None
                 } for inv in created_inventory
             ],
-            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, {len(updated_pending_orders)} pending orders, and created {len(created_pending_items)} pending items from unselected rolls"
+            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_inventory)} inventory items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
         }
 
 

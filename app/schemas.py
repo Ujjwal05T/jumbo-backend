@@ -318,6 +318,12 @@ class PendingOrderItem(PendingOrderItemBase):
     created_by_id: Optional[UUID] = None
     created_at: datetime
     resolved_at: Optional[datetime] = None
+    quantity_fulfilled: Optional[int] = Field(default=0, description="Number of items fulfilled")
+    
+    # NEW: Plan generation tracking fields
+    included_in_plan_generation: Optional[bool] = Field(default=False, description="Was this pending order included in plan generation?")
+    generated_cut_rolls_count: Optional[int] = Field(default=0, description="Number of cut rolls generated from this pending order")
+    plan_generation_date: Optional[datetime] = Field(None, description="When was this included in plan generation?")
     
     # Include related data
     original_order: Optional[OrderMaster] = None
@@ -840,9 +846,9 @@ class ProductionStartSummary(BaseModel):
     """Summary of production start operation"""
     orders_updated: int = Field(..., ge=0)
     order_items_updated: int = Field(..., ge=0)
-    pending_orders_updated: int = Field(..., ge=0)
+    pending_orders_resolved: int = Field(..., ge=0, description="Number of pending orders resolved (PHASE 1 -> included_in_plan)")
     inventory_created: int = Field(..., ge=0)
-    pending_items_created: int = Field(..., ge=0)
+    pending_orders_created_phase2: int = Field(default=0, ge=0, description="Number of PHASE 2 pending orders created from unselected cuts")
 
 class InventoryDetail(BaseModel):
     """Inventory item details for production response"""
