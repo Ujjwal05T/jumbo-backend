@@ -266,6 +266,26 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                                 pending_order.quantity_fulfilled = old_fulfilled + 1
                                 pending_order.quantity_pending = max(0, old_pending - 1)
                                 
+                                # NEW: Decrement quantity_in_pending from original order item
+                                original_order_item = db.query(models.OrderItem).filter(
+                                    models.OrderItem.order_id == pending_order.original_order_id,
+                                    models.OrderItem.width_inches == pending_order.width_inches,
+                                    models.OrderItem.paper.has(
+                                        models.PaperMaster.gsm == pending_order.gsm,
+                                        models.PaperMaster.bf == pending_order.bf,
+                                        models.PaperMaster.shade == pending_order.shade
+                                    )
+                                ).first()
+                                
+                                if original_order_item:
+                                    # Decrement quantity_in_pending and increment quantity_fulfilled
+                                    if original_order_item.quantity_in_pending > 0:
+                                        original_order_item.quantity_in_pending -= 1
+                                    original_order_item.quantity_fulfilled += 1
+                                    logger.info(f"✅ UPDATED ORDER ITEM: {original_order_item.frontend_id} - quantity_in_pending: {original_order_item.quantity_in_pending}, quantity_fulfilled: {original_order_item.quantity_fulfilled}")
+                                else:
+                                    logger.warning(f"Could not find original order item to update for resolved pending order {pending_order.frontend_id}")
+                                
                                 # Force flush to database to ensure changes are persisted
                                 db.flush()
                                 

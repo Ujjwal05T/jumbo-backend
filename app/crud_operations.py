@@ -190,7 +190,7 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
         # Process each order item (different paper specs/widths)
         for item in order.order_items:
             if item.paper:
-                remaining_qty = item.quantity_rolls - (item.quantity_fulfilled or 0)
+                remaining_qty = item.remaining_to_plan  # Use property that excludes quantity_in_pending
                 if remaining_qty > 0:
                     order_requirements.append({
                         'order_id': str(order.id),

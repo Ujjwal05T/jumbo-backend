@@ -184,6 +184,7 @@ class OrderItem(Base):
     rate = Column(Numeric(10, 2), nullable=False)  # Rate per unit
     amount = Column(Numeric(12, 2), nullable=False)  # Total amount (quantity_kg * rate)
     quantity_fulfilled = Column(Integer, default=0, nullable=False)
+    quantity_in_pending = Column(Integer, default=0, nullable=False)  # Track quantities in pending orders
     item_status = Column(String(50), default=OrderItemStatus.CREATED, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -198,6 +199,11 @@ class OrderItem(Base):
     @property
     def remaining_quantity(self) -> int:
         return self.quantity_rolls - self.quantity_fulfilled
+    
+    @property
+    def remaining_to_plan(self) -> int:
+        """Calculate how much quantity is still available for planning (not fulfilled and not in pending)"""
+        return max(0, self.quantity_rolls - self.quantity_fulfilled - self.quantity_in_pending)
     
     @property
     def is_fully_fulfilled(self) -> bool:

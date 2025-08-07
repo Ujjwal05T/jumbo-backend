@@ -65,6 +65,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         paper_filter = or_(*spec_conditions) if len(spec_conditions) > 1 else spec_conditions[0]
         
         # CRITICAL: Filter out pending items already used in active plans
+        # AND exclude algorithm limitation pending orders (since original orders were reduced)
         pending_items = (
             db.query(models.PendingOrderItem)
             .filter(
@@ -76,7 +77,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
                         db.query(models.PendingOrderItem.id)
                         .filter(models.PendingOrderItem._status == "included_in_plan")
                         .subquery()
-                    )
+                    ),
                 )
             )
             .all()

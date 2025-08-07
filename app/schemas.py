@@ -207,12 +207,14 @@ class OrderItemUpdate(BaseModel):
     rate: Optional[float] = Field(None, gt=0)
     amount: Optional[float] = Field(None, gt=0)
     quantity_fulfilled: Optional[int] = Field(None, ge=0)
+    quantity_in_pending: Optional[int] = Field(None, ge=0)
 
 class OrderItem(OrderItemBase):
     id: UUID
     frontend_id: Optional[str] = Field(None, description="Human-readable order item ID (e.g., ORI-001)")
     order_id: UUID
     quantity_fulfilled: int
+    quantity_in_pending: int
     created_at: datetime
     updated_at: datetime
     

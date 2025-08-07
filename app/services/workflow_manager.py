@@ -316,6 +316,45 @@ class WorkflowManager:
                         
                         self.db.add(pending_order)
                         created_pending.append(pending_order)
+                        
+                        # NEW: Update the original order item's quantity_in_pending
+                        logger.info(f"🔍 PENDING TRACKING DEBUG: Looking for order item to update quantity_in_pending")
+                        logger.info(f"🔍 PENDING TRACKING DEBUG: original_order_id = {original_order_id}")
+                        logger.info(f"🔍 PENDING TRACKING DEBUG: pending_order_data = {pending_order_data}")
+                        logger.info(f"🔍 PENDING TRACKING DEBUG: Searching for width={float(pending_order_data['width'])}, gsm={pending_order_data['gsm']}, bf={float(pending_order_data['bf'])}, shade='{pending_order_data['shade']}'")
+                        
+                        from sqlalchemy import and_
+                        original_order_item = self.db.query(models.OrderItem).filter(
+                            models.OrderItem.order_id == original_order_id,
+                            models.OrderItem.width_inches == float(pending_order_data['width']),
+                            models.OrderItem.paper.has(
+                                and_(
+                                    models.PaperMaster.gsm == pending_order_data['gsm'],
+                                    models.PaperMaster.bf == float(pending_order_data['bf']),
+                                    models.PaperMaster.shade == pending_order_data['shade']
+                                )
+                            )
+                        ).first()
+                        
+                        logger.info(f"🔍 PENDING TRACKING DEBUG: Found order item = {original_order_item}")
+                        if original_order_item:
+                            logger.info(f"🔍 PENDING TRACKING DEBUG: Order item details - ID: {original_order_item.id}, frontend_id: {original_order_item.frontend_id}, width: {original_order_item.width_inches}")
+                            logger.info(f"🔍 PENDING TRACKING DEBUG: Current quantity_in_pending BEFORE update: {original_order_item.quantity_in_pending}")
+                            logger.info(f"🔍 PENDING TRACKING DEBUG: Adding {pending_order_data['quantity']} to quantity_in_pending")
+                            
+                            # Track that this quantity is now in pending (use existing quantity_in_pending field)
+                            original_order_item.quantity_in_pending += pending_order_data['quantity']
+                            
+                            logger.info(f"🔍 PENDING TRACKING DEBUG: quantity_in_pending AFTER update: {original_order_item.quantity_in_pending}")
+                            logger.info(f"✅ TRACKED order item {original_order_item.frontend_id}: quantity_in_pending += {pending_order_data['quantity']} (now {original_order_item.quantity_in_pending})")
+                        else:
+                            logger.warning(f"❌ PENDING TRACKING DEBUG: Could not find matching order item!")
+                            logger.warning(f"❌ PENDING TRACKING DEBUG: Available order items for order {original_order_id}:")
+                            all_items = self.db.query(models.OrderItem).filter(models.OrderItem.order_id == original_order_id).all()
+                            for item in all_items:
+                                logger.warning(f"❌   Item ID: {item.id}, width: {item.width_inches}, paper GSM: {item.paper.gsm if item.paper else 'None'}, BF: {item.paper.bf if item.paper else 'None'}, shade: {item.paper.shade if item.paper else 'None'}")
+                            logger.warning(f"Could not find matching order item to track pending quantity for pending order {pending_order.frontend_id}")
+                        
                         logger.info(f"Created PHASE 1 pending order: {pending_order_data['quantity']} rolls of {pending_order_data['width']}\" {pending_order_data['shade']} paper (algorithm limitation)")
                         
                     else:
