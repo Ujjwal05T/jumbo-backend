@@ -8,6 +8,7 @@ import logging
 
 from .. import models, crud_operations, schemas
 from .cutting_optimizer import CuttingOptimizer
+from .plan_calculation_service import PlanCalculationService
 from .id_generator import FrontendIDGenerator
 
 logger = logging.getLogger(__name__)
@@ -19,104 +20,37 @@ class WorkflowManager:
     Uses master-based architecture with proper foreign key relationships.
     """
     
-    def __init__(self, db: Session, user_id: Optional[uuid.UUID] = None):
+    def __init__(self, db: Session, user_id: Optional[uuid.UUID] = None, jumbo_roll_width: int = 118):
         self.db = db
         self.user_id = user_id
-        self.optimizer = CuttingOptimizer()
+        self.jumbo_roll_width = jumbo_roll_width
+        self.optimizer = CuttingOptimizer(jumbo_roll_width=jumbo_roll_width)
+        self.calculation_service = PlanCalculationService(db=db, jumbo_roll_width=jumbo_roll_width)
     
     def process_multiple_orders(self, order_ids: List[uuid.UUID]) -> Dict:
         """
-        NEW FLOW: Process multiple orders together for optimal cutting plans.
-        SKIP INVENTORY CHECK - Always go directly to plan generation.
+        NEW FLOW: Process multiple orders - READ ONLY CALCULATION.
+        No database writes - pure calculation only.
         Uses 3-input/4-output optimization algorithm.
         """
         try:
-            # NEW FLOW: Get order requirements directly (no inventory check)
-            order_requirements = crud_operations.get_orders_with_paper_specs(self.db, order_ids)
+            logger.info(f"CALCULATION MODE: Processing {len(order_ids)} orders (read-only)")
             
-            # Store order requirements for later use in plan linking
-            self.processed_order_requirements = order_requirements
-            
-            if not order_requirements:
-                return {
-                    "status": "no_orders",
-                    "cut_rolls_generated": [],
-                    "jumbo_rolls_needed": 0,
-                    "pending_orders_created": [],
-                    "inventory_created": [],
-                    "orders_updated": [],
-                    "plans_created": [],
-                    "production_orders_created": []
-                }
-            
-            # NEW FLOW: Get paper specifications from orders
-            paper_specs = []
-            for req in order_requirements:
-                spec = {'gsm': req['gsm'], 'bf': req['bf'], 'shade': req['shade']}
-                if spec not in paper_specs:
-                    paper_specs.append(spec)
-            
-            # NEW FLOW: Fetch pending orders for same paper specifications
-            logger.info(f"🔍 DEBUG WF: Fetching pending orders for paper specs: {paper_specs}")
-            pending_orders = crud_operations.get_pending_orders_by_specs(self.db, paper_specs)
-            logger.info(f"📋 DEBUG WF: Found {len(pending_orders)} pending order items")
-            
-            pending_requirements = []
-            for i, pending in enumerate(pending_orders):
-                logger.info(f"  Processing pending item {i+1}: ID={pending.get('pending_order_id', 'unknown')}, width={pending.get('width', 0)}\"")
-                # pending is already a dictionary from crud_operations
-                pending_req = {
-                    'order_id': str(pending.get('original_order_id', 'unknown')),
-                    'original_order_id': str(pending.get('original_order_id', 'unknown')),  # Add the correct field name
-                    'width': float(pending.get('width', 0)),
-                    'quantity': pending.get('quantity', 0),
-                    'gsm': pending.get('gsm', 0),
-                    'bf': float(pending.get('bf', 0)),
-                    'shade': pending.get('shade', ''),
-                    'pending_id': str(pending.get('pending_order_id', 'unknown')),
-                    'reason': pending.get('reason', 'unknown')
-                }
-                pending_requirements.append(pending_req)
-                logger.info(f"  ✅ Added pending requirement: {pending_req}")
-            
-            logger.info(f"📊 DEBUG WF: Final pending_requirements: {pending_requirements}")
-            
-            # DEBUG: Log the pending_id values being passed to optimizer
-            for i, req in enumerate(pending_requirements):
-                logger.info(f"🔍 DEBUG PENDING INPUT {i+1}: pending_id='{req.get('pending_id')}', width={req.get('width')}, quantity={req.get('quantity')}")
-            
-            # NEW FLOW: Fetch available inventory (20-25" waste rolls)
-            available_inventory_items = crud_operations.get_available_inventory_by_paper_specs(self.db, paper_specs)
-            available_inventory = []
-            for inv_item in available_inventory_items:
-                if inv_item.paper:
-                    available_inventory.append({
-                        'id': str(inv_item.id),
-                        'width': float(inv_item.width_inches),
-                        'gsm': inv_item.paper.gsm,
-                        'bf': float(inv_item.paper.bf),
-                        'shade': inv_item.paper.shade,
-                        'weight': float(inv_item.weight_kg) if inv_item.weight_kg else 0
-                    })
-            
-            logger.info(f"NEW FLOW Processing: {len(order_requirements)} orders, {len(pending_requirements)} pending, {len(available_inventory)} inventory")
-            
-            # NEW FLOW: Run 3-input optimization
-            optimization_result = self.optimizer.optimize_with_new_algorithm(
-                order_requirements=order_requirements,
-                pending_orders=pending_requirements,
-                available_inventory=available_inventory,
-                interactive=False
+            # Use calculation service for read-only operations
+            result = self.calculation_service.calculate_plan_for_orders(
+                order_ids=order_ids,
+                include_pending_orders=True,
+                include_available_inventory=True
             )
             
-            # NEW FLOW: Process 4 outputs
-            result = self._process_optimizer_outputs(optimization_result, order_ids, pending_requirements)
+            logger.info(f"CALCULATION COMPLETE: Generated {len(result.get('cut_rolls_generated', []))} cut rolls, "
+                       f"{result.get('jumbo_rolls_available', 0)} jumbo rolls available")
             
             return result
             
         except Exception as e:
-            logger.error(f"Error processing multiple orders: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in read-only plan calculation: {str(e)}")
+            raise
     
     def _consolidate_with_pending_orders(self, current_orders: List[models.OrderMaster]) -> List[models.OrderMaster]:
         """

@@ -51,6 +51,7 @@ class PendingOrderStatus(str, Enum):
 
 class RollType(str, Enum):
     JUMBO = "jumbo"
+    ROLL_118 = "118"
     CUT = "cut"
 
 class ClientStatus(str, Enum):
@@ -339,11 +340,17 @@ class InventoryMasterBase(BaseModel):
     paper_id: UUID
     width_inches: float = Field(..., gt=0)
     weight_kg: float = Field(..., gt=0)
-    roll_type: RollType = Field(..., description="Roll type: jumbo or cut")
+    roll_type: RollType = Field(..., description="Roll type: jumbo, 118, or cut")
     location: Optional[str] = Field(None, max_length=100)
     qr_code: Optional[str] = Field(None, max_length=255)
     barcode_id: Optional[str] = Field(None, description="Human-readable barcode ID")
     production_date: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Jumbo roll hierarchy fields
+    parent_jumbo_id: Optional[UUID] = Field(None, description="Parent jumbo roll ID")
+    parent_118_roll_id: Optional[UUID] = Field(None, description="Parent 118 inch roll ID")
+    roll_sequence: Optional[int] = Field(None, description="Position within jumbo (1, 2, 3)")
+    individual_roll_number: Optional[int] = Field(None, description="From optimization algorithm")
 
 class InventoryMasterCreate(InventoryMasterBase):
     created_by_id: UUID
@@ -377,6 +384,7 @@ class PlanMasterCreate(PlanMasterBase):
     created_by_id: UUID
     order_ids: List[UUID] = Field(..., min_items=1)
     inventory_ids: Optional[List[UUID]] = Field(default_factory=list, description="Optional inventory IDs for plan")
+    pending_orders: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Pending orders from algorithm")
 
 class PlanMasterUpdate(BaseModel):
     status: Optional[PlanStatus] = None
@@ -529,6 +537,7 @@ class CuttingOptimizationResult(BaseModel):
 class WorkflowProcessRequest(BaseModel):
     """NEW FLOW: Request to process multiple orders through workflow"""
     order_ids: List[UUID] = Field(..., min_items=1)
+    jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Jumbo roll width in inches")
     auto_approve_high_trim: bool = Field(default=False, description="Auto-approve high trim patterns")
     skip_inventory_check: bool = Field(default=True, description="NEW FLOW: Skip inventory checking, go directly to planning")
 
@@ -574,101 +583,6 @@ class PaginatedResponse(BaseModel):
     size: int
     pages: int
 
-# ============================================================================
-# CUT ROLL PRODUCTION SCHEMAS
-# ============================================================================
-
-class CutRollProductionStatus(str, Enum):
-    SELECTED = "selected"
-    IN_PRODUCTION = "in_production"
-    COMPLETED = "completed"
-    QUALITY_CHECK = "quality_check"
-    DELIVERED = "delivered"
-
-class CutRollProductionBase(BaseModel):
-    """Base schema for CutRollProduction"""
-    width_inches: float = Field(..., gt=0, description="Width of cut roll in inches")
-    length_meters: Optional[float] = Field(None, gt=0, description="Planned length in meters")
-    actual_weight_kg: Optional[float] = Field(None, gt=0, description="Actual weight when produced")
-    gsm: int = Field(..., gt=0, description="Paper GSM")
-    bf: float = Field(..., gt=0, description="Paper BF value")
-    shade: str = Field(..., min_length=1, description="Paper shade")
-    status: CutRollProductionStatus = Field(default=CutRollProductionStatus.SELECTED)
-    individual_roll_number: Optional[int] = Field(None, description="Roll number from cutting algorithm")
-    trim_left: Optional[float] = Field(None, ge=0, description="Waste/trim from cutting pattern")
-
-class CutRollProductionCreate(CutRollProductionBase):
-    """Schema for creating cut roll production record"""
-    paper_id: UUID
-    plan_id: UUID
-    order_id: Optional[UUID] = None
-    client_id: Optional[UUID] = None
-    created_by_id: UUID
-
-class CutRollProductionUpdate(BaseModel):
-    """Schema for updating cut roll production record"""
-    actual_weight_kg: Optional[float] = Field(None, gt=0)
-    status: Optional[CutRollProductionStatus] = None
-    length_meters: Optional[float] = Field(None, gt=0)
-    production_started_at: Optional[datetime] = None
-    production_completed_at: Optional[datetime] = None
-    weight_recorded_at: Optional[datetime] = None
-    weight_recorded_by_id: Optional[UUID] = None
-
-class CutRollProduction(CutRollProductionBase):
-    """Complete schema for CutRollProduction with all fields"""
-    id: UUID
-    frontend_id: Optional[str] = Field(None, description="Human-readable cut roll production ID (e.g., CRP-001)")
-    qr_code: str
-    barcode_id: Optional[str] = Field(None, description="Human-readable barcode ID (e.g., CR_00001)")
-    paper_id: UUID
-    plan_id: UUID
-    order_id: Optional[UUID]
-    client_id: Optional[UUID]
-    selected_at: datetime
-    production_started_at: Optional[datetime]
-    production_completed_at: Optional[datetime]
-    weight_recorded_at: Optional[datetime]
-    created_by_id: UUID
-    weight_recorded_by_id: Optional[UUID]
-    
-    class Config:
-        from_attributes = True
-
-class CutRollProductionWithDetails(CutRollProduction):
-    """Cut roll production with related entity details"""
-    paper: Optional[PaperMaster] = None
-    client: Optional[ClientMaster] = None
-    order: Optional[OrderMaster] = None
-    created_by: Optional[UserMaster] = None
-    weight_recorded_by: Optional[UserMaster] = None
-
-# Removed duplicate CutRollSelectionRequest - keeping the correct one later in file
-
-class QRCodeData(BaseModel):
-    """Schema for QR code information"""
-    qr_code: str
-    cut_roll_id: UUID
-    width_inches: float
-    gsm: int
-    bf: float
-    shade: str
-    client_name: Optional[str] = None
-    order_details: Optional[str] = None
-    production_date: Optional[datetime] = None
-
-class QRCodeScanResult(BaseModel):
-    """Schema for QR code scan result"""
-    cut_roll: CutRollProductionWithDetails
-    qr_data: QRCodeData
-    can_update_weight: bool = Field(default=True)
-    current_status: CutRollProductionStatus
-
-class WeightUpdateRequest(BaseModel):
-    """Schema for updating cut roll weight via QR scan"""
-    qr_code: str
-    actual_weight_kg: float = Field(..., gt=0)
-    updated_by_id: UUID
 
 # ============================================================================
 # ADDITIONAL SCHEMAS FOR NEW ENDPOINTS
@@ -837,12 +751,16 @@ class SelectedCutRoll(BaseModel):
     individual_roll_number: Optional[int] = Field(None, description="Roll number within jumbo")
     trim_left: Optional[float] = Field(None, ge=0, description="Trim left in inches")
     order_id: Optional[str] = Field(None, description="Source order ID")
+    # CRITICAL: Add source tracking fields for pending order resolution
+    source_type: Optional[str] = Field(None, description="Source type: 'regular_order' or 'pending_order'")
+    source_pending_id: Optional[str] = Field(None, description="ID of source pending order if applicable")
 
 class StartProductionRequest(BaseModel):
     """Request to start production with comprehensive roll handling"""
     selected_cut_rolls: List[SelectedCutRoll] = Field(..., min_items=1, description="Cut rolls selected for production")
     all_available_cuts: List[SelectedCutRoll] = Field(..., description="All cuts that were available for selection")
     created_by_id: str = Field(..., description="ID of user starting production")
+    jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Dynamic jumbo roll width in inches")
 
 class ProductionStartSummary(BaseModel):
     """Summary of production start operation"""
@@ -851,6 +769,8 @@ class ProductionStartSummary(BaseModel):
     pending_orders_resolved: int = Field(..., ge=0, description="Number of pending orders resolved (PHASE 1 -> included_in_plan)")
     inventory_created: int = Field(..., ge=0)
     pending_orders_created_phase2: int = Field(default=0, ge=0, description="Number of PHASE 2 pending orders created from unselected cuts")
+    jumbo_rolls_created: int = Field(default=0, ge=0, description="Number of virtual jumbo rolls created")
+    intermediate_118_rolls_created: int = Field(default=0, ge=0, description="Number of intermediate 118\" rolls created")
 
 class InventoryDetail(BaseModel):
     """Inventory item details for production response"""

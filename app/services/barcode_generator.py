@@ -130,29 +130,23 @@ class BarcodeGenerator:
             return False
     
     @staticmethod
-    def is_barcode_unique(db: Session, barcode_id: str, table: str = "cut_roll") -> bool:
+    def is_barcode_unique(db: Session, barcode_id: str, table: str = "inventory") -> bool:
         """
-        Check if barcode is unique in the specified table.
+        Check if barcode is unique in the inventory table.
         
         Args:
             db: Database session
             barcode_id: Barcode to check
-            table: Table to check - "cut_roll" or "inventory"
+            table: Table to check - only "inventory" supported now
             
         Returns:
             bool: True if unique
         """
         try:
-            if table == "cut_roll":
-                existing = db.query(models.CutRollProduction).filter(
-                    models.CutRollProduction.barcode_id == barcode_id
-                ).first()
-            elif table == "inventory":
-                existing = db.query(models.InventoryMaster).filter(
-                    models.InventoryMaster.barcode_id == barcode_id
-                ).first()
-            else:
-                return False
+            # All barcodes are now stored in inventory_master table
+            existing = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.barcode_id == barcode_id
+            ).first()
                 
             return existing is None
             

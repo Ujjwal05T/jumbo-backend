@@ -29,14 +29,14 @@ class RollSpec:
     shade: str
 
 # --- CONFIGURATIONS ---
-JUMBO_WIDTH = 118
+DEFAULT_JUMBO_WIDTH = 118  # Default width, can be overridden
 MIN_TRIM = 1
 MAX_TRIM = 20
 MAX_TRIM_WITH_CONFIRMATION = 20
 MAX_ROLLS_PER_JUMBO = 5
 
 class CuttingOptimizer:
-    def __init__(self, jumbo_roll_width: int = JUMBO_WIDTH):
+    def __init__(self, jumbo_roll_width: int = DEFAULT_JUMBO_WIDTH):
         """
         Initialize the cutting optimizer with configuration.
         
@@ -55,7 +55,7 @@ class CuttingOptimizer:
         for r in range(1, MAX_ROLLS_PER_JUMBO + 1):
             for combo in product(sizes, repeat=r):
                 total = sum(combo)
-                trim = round(JUMBO_WIDTH - total, 2)
+                trim = round(self.jumbo_roll_width - total, 2)
                 if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION:
                     valid_combos.append((tuple(sorted(combo)), trim))
                     logger.debug(f"🔍 COMBO DEBUG: Valid combo: {tuple(sorted(combo))} → {total}\" used, {trim}\" trim")
@@ -187,11 +187,16 @@ class CuttingOptimizer:
         logger.info(f"🔍 OPTIMIZER DEBUG: Processing {len(pending_orders)} pending orders for source tracking")
         for i, req in enumerate(pending_orders):
             logger.info(f"🔍 OPTIMIZER DEBUG: Pending order {i+1}: {req}")
+            logger.info(f"🔍 OPTIMIZER DEBUG: Available keys in pending order: {list(req.keys())}")
             req_with_source = req.copy()
             req_with_source['source_type'] = 'pending_order'
             req_with_source['source_order_id'] = req.get('original_order_id')  # Pending orders use original_order_id
-            req_with_source['source_pending_id'] = req.get('pending_id')  # Direct link to pending order
+            
+            # TRY MULTIPLE POSSIBLE FIELD NAMES for pending ID
+            source_pending_id = req.get('pending_id') or req.get('id') or req.get('frontend_id')
+            req_with_source['source_pending_id'] = source_pending_id
             logger.info(f"🔍 OPTIMIZER DEBUG: Enhanced pending order {i+1}: source_type={req_with_source['source_type']}, source_pending_id={req_with_source['source_pending_id']}")
+            logger.info(f"🔍 OPTIMIZER DEBUG: Used field for pending_id: pending_id={req.get('pending_id')}, id={req.get('id')}, frontend_id={req.get('frontend_id')}")
             all_requirements.append(req_with_source)
         
         logger.info(f"🔄 OPTIMIZER: Combined all_requirements: {len(all_requirements)} total items")
@@ -420,7 +425,7 @@ class CuttingOptimizer:
                     all_high_trims.append({
                         'combo': combo,
                         'trim': trim,
-                        'waste_percentage': round((trim / JUMBO_WIDTH) * 100, 2),
+                        'waste_percentage': round((trim / self.jumbo_roll_width) * 100, 2),
                         'paper_spec': spec
                     })
         

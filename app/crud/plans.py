@@ -38,17 +38,77 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         )
     
     def create_plan(self, db: Session, *, plan: schemas.PlanMasterCreate) -> models.PlanMaster:
-        """Create new cutting plan"""
-        db_plan = models.PlanMaster(
-            name=plan.name,
-            cut_pattern=plan.cut_pattern,
-            expected_waste_percentage=plan.expected_waste_percentage,
-            created_by_id=plan.created_by_id
-        )
-        db.add(db_plan)
-        db.commit()
-        db.refresh(db_plan)
-        return db_plan
+        """Create new cutting plan with order links and pending orders"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Create the plan record
+            import json
+            db_plan = models.PlanMaster(
+                name=plan.name,
+                cut_pattern=json.dumps(plan.cut_pattern) if isinstance(plan.cut_pattern, list) else plan.cut_pattern,
+                expected_waste_percentage=plan.expected_waste_percentage,
+                created_by_id=plan.created_by_id
+            )
+            db.add(db_plan)
+            db.flush()  # Get the plan ID
+            
+            # Create plan-order links (need to link to specific order items)
+            for order_id in plan.order_ids:
+                # Get order items for this order
+                order_items = db.query(models.OrderItem).filter(
+                    models.OrderItem.order_id == order_id
+                ).all()
+                
+                # Create links for each order item
+                for order_item in order_items:
+                    plan_order_link = models.PlanOrderLink(
+                        plan_id=db_plan.id,
+                        order_id=order_id,
+                        order_item_id=order_item.id,
+                        quantity_allocated=1  # Default quantity
+                    )
+                    db.add(plan_order_link)
+            
+            logger.info(f"Created plan {db_plan.id} with {len(plan.order_ids)} order links")
+            
+            # Create pending orders from algorithm results if provided
+            if hasattr(plan, 'pending_orders') and plan.pending_orders:
+                from ..services.id_generator import FrontendIDGenerator
+                
+                for pending_data in plan.pending_orders:
+                    # Find original order ID from the provided order_ids
+                    original_order_id = plan.order_ids[0] if plan.order_ids else None
+                    
+                    # Generate frontend ID
+                    frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
+                    
+                    pending_order = models.PendingOrderItem(
+                        frontend_id=frontend_id,
+                        original_order_id=original_order_id,
+                        width_inches=float(pending_data.get('width', 0)),
+                        quantity_pending=int(pending_data.get('quantity', 1)),
+                        gsm=pending_data.get('gsm', 0),
+                        bf=float(pending_data.get('bf', 0)),
+                        shade=pending_data.get('shade', ''),
+                        status="pending",
+                        included_in_plan_generation=False,  # Algorithm rejected these
+                        reason=pending_data.get('reason', 'algorithm_rejected'),
+                        created_by_id=plan.created_by_id
+                    )
+                    db.add(pending_order)
+                
+                logger.info(f"Created {len(plan.pending_orders)} pending orders from algorithm")
+            
+            db.commit()
+            db.refresh(db_plan)
+            return db_plan
+            
+        except Exception as e:
+            logger.error(f"Error creating plan: {e}")
+            db.rollback()
+            raise
     
     def update_plan(
         self, db: Session, *, plan_id: UUID, plan_update: schemas.PlanMasterUpdate
@@ -105,6 +165,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         updated_orders = []
         updated_order_items = []
         updated_pending_orders = []
+        created_jumbo_rolls = []
+        created_118_rolls = []
         
         # Update related order statuses to "in_process"
         for plan_order in db_plan.plan_orders:
@@ -128,12 +190,133 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # Initialize tracking lists
         created_inventory = []
         
+        # NEW: Create virtual jumbo roll hierarchy based on optimization algorithm roll numbers
+        jumbo_roll_width = request_data.get("jumbo_roll_width", 118)  # Get dynamic width from request
+        
+        # Group selected cut rolls by individual_roll_number (from optimization algorithm)
+        roll_number_groups = {}
+        paper_specs = {}  # Track paper specs for each roll number
+        
+        for cut_roll in selected_cut_rolls:
+            individual_roll_number = cut_roll.get("individual_roll_number")
+            if individual_roll_number:
+                if individual_roll_number not in roll_number_groups:
+                    roll_number_groups[individual_roll_number] = []
+                    paper_specs[individual_roll_number] = {
+                        'gsm': cut_roll.get("gsm"),
+                        'bf': cut_roll.get("bf"),
+                        'shade': cut_roll.get("shade"),
+                        'paper_id': cut_roll.get("paper_id")
+                    }
+                roll_number_groups[individual_roll_number].append(cut_roll)
+        
+        # Calculate jumbo rolls needed: 3 individual rolls = 1 jumbo
+        total_118_rolls = len(roll_number_groups)
+        jumbo_count = (total_118_rolls + 2) // 3  # Ceiling division
+        
+        logger.info(f"📦 JUMBO CREATION: {total_118_rolls} individual 118\" rolls = {jumbo_count} jumbo rolls needed")
+        
+        # Create jumbo rolls and link 118" rolls properly
+        import uuid
+        
+        # Group 118" rolls by paper specification for jumbo creation
+        spec_to_118_rolls = {}
+        for roll_num, spec in paper_specs.items():
+            spec_key = (spec['gsm'], spec['bf'], spec['shade'])
+            if spec_key not in spec_to_118_rolls:
+                spec_to_118_rolls[spec_key] = []
+            spec_to_118_rolls[spec_key].append(roll_num)
+        
+        # Create jumbo rolls for each paper specification
+        for (gsm, bf, shade), roll_numbers in spec_to_118_rolls.items():
+            # Find paper record
+            paper_record = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == gsm,
+                models.PaperMaster.bf == bf,
+                models.PaperMaster.shade == shade
+            ).first()
+            
+            if not paper_record:
+                logger.warning(f"Could not find paper record for GSM={gsm}, BF={bf}, Shade={shade}")
+                continue
+            
+            # Calculate jumbo rolls needed for this paper spec
+            spec_jumbo_count = (len(roll_numbers) + 2) // 3
+            
+            # Create jumbo rolls for this paper specification
+            for jumbo_idx in range(spec_jumbo_count):
+                virtual_jumbo_qr = f"VIRTUAL_JUMBO_{uuid.uuid4().hex[:8].upper()}"
+                virtual_jumbo_barcode = f"VJB_{uuid.uuid4().hex[:8].upper()}"
+                jumbo_roll = models.InventoryMaster(
+                    paper_id=paper_record.id,
+                    width_inches=jumbo_roll_width,
+                    weight_kg=0,
+                    roll_type="jumbo",
+                    status="consumed",
+                    qr_code=virtual_jumbo_qr,
+                    barcode_id=virtual_jumbo_barcode,
+                    location="VIRTUAL",
+                    created_by_id=request_data.get("created_by_id")
+                )
+                db.add(jumbo_roll)
+                db.flush()
+                created_jumbo_rolls.append(jumbo_roll)
+                
+                logger.info(f"📦 CREATED JUMBO: {jumbo_roll.frontend_id} - {jumbo_roll_width}\" {shade} paper")
+                
+                # Assign 3 individual roll numbers to this jumbo
+                start_idx = jumbo_idx * 3
+                end_idx = min(start_idx + 3, len(roll_numbers))
+                assigned_roll_numbers = roll_numbers[start_idx:end_idx]
+                
+                # Create 118" rolls for the assigned individual roll numbers
+                for seq, roll_num in enumerate(assigned_roll_numbers, 1):
+                    virtual_118_qr = f"VIRTUAL_118_{uuid.uuid4().hex[:8].upper()}"
+                    virtual_118_barcode = f"V118_{uuid.uuid4().hex[:8].upper()}"
+                    roll_118 = models.InventoryMaster(
+                        paper_id=paper_record.id,
+                        width_inches=jumbo_roll_width,
+                        weight_kg=0,
+                        roll_type="118",
+                        status="consumed",
+                        qr_code=virtual_118_qr,
+                        barcode_id=virtual_118_barcode,
+                        location="VIRTUAL",
+                        parent_jumbo_id=jumbo_roll.id,
+                        roll_sequence=seq,
+                        individual_roll_number=roll_num,  # Store the algorithm's roll number
+                        created_by_id=request_data.get("created_by_id")
+                    )
+                    db.add(roll_118)
+                    db.flush()
+                    created_118_rolls.append(roll_118)
+                    
+                    logger.info(f"🧻 CREATED 118\" ROLL: {roll_118.frontend_id} - Roll #{roll_num}, Sequence {seq} of Jumbo {jumbo_roll.frontend_id}")
+        
+        logger.info(f"✅ HIERARCHY CREATED: {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls")
+        
         # Create inventory records for SELECTED cut rolls with status "cutting"
+        # Link cut rolls to their parent 118" rolls based on individual_roll_number
         for cut_roll in selected_cut_rolls:
             # Generate barcode for this cut roll
             from ..services.barcode_generator import BarcodeGenerator
             import uuid
             barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
+            
+            # Find parent 118" roll for this cut roll based on individual_roll_number
+            individual_roll_number = cut_roll.get("individual_roll_number")
+            parent_118_roll = None
+            
+            if individual_roll_number:
+                # Find the 118" roll with matching individual_roll_number
+                for roll_118 in created_118_rolls:
+                    if roll_118.individual_roll_number == individual_roll_number:
+                        parent_118_roll = roll_118
+                        logger.info(f"🔗 LINKING: Cut roll -> 118\" Roll {parent_118_roll.frontend_id} (Roll #{individual_roll_number})")
+                        break
+            
+            if not parent_118_roll:
+                logger.warning(f"Could not find parent 118\" roll for cut roll with individual_roll_number={individual_roll_number}")
             
             # Find the best matching order for this cut roll
             best_order = None
@@ -178,7 +361,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     models.PendingOrderItem.width_inches == cut_roll_width,
                     models.PendingOrderItem.gsm == cut_roll.get('gsm'),
                     models.PendingOrderItem.shade == cut_roll.get('shade'),
-                    models.PendingOrderItem._status == "pending",
+                    models.PendingOrderItem.status == "pending",
                     models.PendingOrderItem.included_in_plan_generation == True
                 ).first()
                 
@@ -204,13 +387,16 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 # NEW: Save source tracking information from cut roll
                 source_type=cut_roll.get("source_type"),
                 source_pending_id=UUID(cut_roll.get("source_pending_id")) if cut_roll.get("source_pending_id") else None,
+                # NEW: Link to parent 118" roll for complete hierarchy
+                parent_118_roll_id=parent_118_roll.id if parent_118_roll else None,
+                individual_roll_number=cut_roll.get("individual_roll_number"),
                 created_by_id=request_data.get("created_by_id")
             )
             db.add(inventory_item)
             db.flush()  # Get inventory_item.id
             
             # CRITICAL DEBUG: Log what was actually saved to database
-            logger.info(f"🔍 INVENTORY CREATED: id={inventory_item.id}, width={inventory_item.width_inches}, source_type={inventory_item.source_type}, source_pending_id={inventory_item.source_pending_id}")
+            logger.info(f"🔍 INVENTORY CREATED: id={inventory_item.id}, width={inventory_item.width_inches}, source_type={inventory_item.source_type}, source_pending_id={inventory_item.source_pending_id}, parent_118_roll_id={inventory_item.parent_118_roll_id}")
             
             # Create plan-inventory link to associate this inventory item with the plan
             plan_inventory_link = models.PlanInventoryLink(
@@ -247,10 +433,19 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         else:
                             pending_uuid = source_pending_id
                         
-                        # Find the pending order
+                        # ENHANCED DEBUGGING: Check what pending orders exist
+                        all_pending_with_id = db.query(models.PendingOrderItem).filter(
+                            models.PendingOrderItem.id == pending_uuid
+                        ).all()
+                        
+                        logger.info(f"🔍 DATABASE DEBUG: Found {len(all_pending_with_id)} pending orders with ID {pending_uuid}")
+                        for po in all_pending_with_id:
+                            logger.info(f"  📋 Pending order: id={po.id}, status={po.status}, included_in_plan={po.included_in_plan_generation}, width={po.width_inches}")
+                        
+                        # Find the pending order with exact criteria
                         pending_order = db.query(models.PendingOrderItem).filter(
                             models.PendingOrderItem.id == pending_uuid,
-                            models.PendingOrderItem._status == "pending",
+                            models.PendingOrderItem.status == "pending",
                             models.PendingOrderItem.included_in_plan_generation == True  # CRITICAL: Only resolve if included in plan
                         ).first()
                         
@@ -408,13 +603,17 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "order_items_updated": len(updated_order_items),
                 "pending_orders_resolved": len(updated_pending_orders),
                 "inventory_created": len(created_inventory),
-                "pending_orders_created_phase2": len(created_pending_from_unselected)
+                "pending_orders_created_phase2": len(created_pending_from_unselected),
+                "jumbo_rolls_created": len(created_jumbo_rolls),
+                "intermediate_118_rolls_created": len(created_118_rolls)
             },
             "details": {
                 "updated_orders": updated_orders,
                 "updated_order_items": updated_order_items,
                 "updated_pending_orders": updated_pending_orders,  # Use the expected field name
-                "created_inventory": [str(inv.id) for inv in created_inventory]
+                "created_inventory": [str(inv.id) for inv in created_inventory],
+                "created_jumbo_rolls": [str(jr.id) for jr in created_jumbo_rolls],
+                "created_118_rolls": [str(r118.id) for r118 in created_118_rolls]
             },
             "created_inventory_details": [
                 {
@@ -427,7 +626,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     "created_at": inv.created_at.isoformat() if inv.created_at else None
                 } for inv in created_inventory
             ],
-            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_inventory)} inventory items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
+            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
         }
 
 

@@ -53,8 +53,9 @@ def process_multiple_orders(
         import uuid
         order_ids = [uuid.UUID(id_str) for id_str in request_data.get("order_ids", [])]
         user_id = request_data.get("user_id")
+        jumbo_roll_width = request_data.get("jumbo_roll_width", 118)  # Default to 118 if not provided
         
-        workflow = WorkflowManager(db=db, user_id=user_id)
+        workflow = WorkflowManager(db=db, user_id=user_id, jumbo_roll_width=jumbo_roll_width)
         result = workflow.process_multiple_orders(order_ids)
         
         return result

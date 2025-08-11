@@ -52,6 +52,7 @@ class PendingOrderStatus(str, PyEnum):
 
 class RollType(str, PyEnum):
     JUMBO = "jumbo"
+    ROLL_118 = "118"
     CUT = "cut"
 
 # ============================================================================
@@ -374,6 +375,12 @@ class InventoryMaster(Base):
     source_type = Column(String(50), nullable=True, index=True)  # 'regular_order' or 'pending_order'
     source_pending_id = Column(UNIQUEIDENTIFIER, ForeignKey("pending_order_item.id"), nullable=True, index=True)
     
+    # Jumbo roll hierarchy tracking fields
+    parent_jumbo_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=True, index=True)
+    parent_118_roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=True, index=True)
+    roll_sequence = Column(Integer, nullable=True)  # Position within jumbo (1, 2, 3)
+    individual_roll_number = Column(Integer, nullable=True)  # From optimization algorithm
+    
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     
@@ -383,6 +390,12 @@ class InventoryMaster(Base):
     allocated_order = relationship("OrderMaster")
     source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
     plan_inventory = relationship("PlanInventoryLink", back_populates="inventory")
+    
+    # Jumbo roll hierarchy relationships
+    parent_jumbo = relationship("InventoryMaster", foreign_keys=[parent_jumbo_id], remote_side=[id])
+    parent_118_roll = relationship("InventoryMaster", foreign_keys=[parent_118_roll_id], remote_side=[id])
+    child_118_rolls = relationship("InventoryMaster", foreign_keys=[parent_jumbo_id], back_populates="parent_jumbo")
+    child_cut_rolls = relationship("InventoryMaster", foreign_keys=[parent_118_roll_id], back_populates="parent_118_roll")
 
 # Plan Master - Cutting optimization plans
 class PlanMaster(Base):
@@ -404,7 +417,6 @@ class PlanMaster(Base):
     created_by = relationship("UserMaster", back_populates="plans_created")
     plan_orders = relationship("PlanOrderLink", back_populates="plan")
     plan_inventory = relationship("PlanInventoryLink", back_populates="plan")
-    cut_roll_productions = relationship("CutRollProduction", back_populates="plan")
 
 # Production Order Master - Manufacturing queue for jumbo rolls
 class ProductionOrderMaster(Base):
@@ -461,65 +473,6 @@ class PlanInventoryLink(Base):
     plan = relationship("PlanMaster", back_populates="plan_inventory")
     inventory = relationship("InventoryMaster", back_populates="plan_inventory")
 
-# ============================================================================
-# CUT ROLL PRODUCTION TRACKING
-# ============================================================================
-
-class CutRollProduction(Base):
-    """
-    Individual cut roll production tracking with QR code functionality.
-    Each record represents one cut roll selected for production from a plan.
-    """
-    __tablename__ = "cut_roll_production"
-    
-    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # CRP-001, CRP-002, etc.
-    qr_code = Column(String(255), unique=True, nullable=False, index=True)  # Unique QR code (kept for compatibility)
-    barcode_id = Column(String(50), unique=False, nullable=True, index=True)  # Human-readable barcode ID (CR_00001)
-    
-    # Cut roll specifications
-    width_inches = Column(Numeric(6, 2), nullable=False)
-    length_meters = Column(Numeric(8, 2), nullable=True)  # Planned length
-    actual_weight_kg = Column(Numeric(8, 2), nullable=True)  # Actual weight when produced
-    
-    # Paper specifications (denormalized for QR code access)
-    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
-    gsm = Column(Integer, nullable=False)
-    bf = Column(Numeric(4, 2), nullable=False)
-    shade = Column(String(100), nullable=False)
-    
-    # Links to related entities
-    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, index=True)
-    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)  # Original order
-    client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=True, index=True)  # For QR code
-    
-    # Production tracking
-    status = Column(String(50), default="selected", nullable=False, index=True)  # selected, in_production, completed, quality_check, delivered
-    individual_roll_number = Column(Integer, nullable=True)  # From cutting algorithm
-    trim_left = Column(Numeric(6, 2), nullable=True)  # Waste from cutting pattern
-    
-    # Source tracking fields for pending order resolution
-    source_type = Column(String(50), nullable=True, index=True)  # 'regular_order' or 'pending_order'
-    source_pending_id = Column(UNIQUEIDENTIFIER, ForeignKey("pending_order_item.id"), nullable=True, index=True)
-    
-    # Timestamps
-    selected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    production_started_at = Column(DateTime, nullable=True)
-    production_completed_at = Column(DateTime, nullable=True)
-    weight_recorded_at = Column(DateTime, nullable=True)
-    
-    # User tracking
-    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
-    weight_recorded_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
-    
-    # Relationships
-    paper = relationship("PaperMaster")
-    plan = relationship("PlanMaster")
-    order = relationship("OrderMaster")
-    client = relationship("ClientMaster")
-    created_by = relationship("UserMaster", foreign_keys=[created_by_id])
-    weight_recorded_by = relationship("UserMaster", foreign_keys=[weight_recorded_by_id])
-    source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
 
 # ============================================================================
 # DISPATCH TRACKING
@@ -632,7 +585,6 @@ models_with_frontend_id = [
     ProductionOrderMaster,
     PlanOrderLink,
     PlanInventoryLink,
-    CutRollProduction,
     DispatchRecord,
     DispatchItem
 ]

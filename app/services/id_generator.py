@@ -86,11 +86,6 @@ class FrontendIDGenerator:
             "pattern": "{prefix}-{counter:03d}",
             "description": "Plan Inventory Link IDs (PIL-001, PIL-002, etc.)"
         },
-        "cut_roll_production": {
-            "prefix": "CRP",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Cut Roll Production IDs (CRP-001, CRP-002, etc.)"
-        },
         "dispatch_record": {
             "prefix": "DSP",
             "pattern": "{prefix}-{year}-{counter:03d}",
