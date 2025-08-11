@@ -243,7 +243,6 @@ class WorkflowManager:
                             bf=float(pending_order_data['bf']),
                             shade=pending_order_data['shade'],
                             status="pending",
-                            included_in_plan_generation=False,  # PHASE 1: Algorithm limitation
                             reason="insufficient_cutting_efficiency",
                             created_by_id=self.user_id
                         )
@@ -299,11 +298,8 @@ class WorkflowManager:
             
             self.db.flush()  # Ensure pending orders are saved before continuing
             
-            # OUTPUT 4: Mark pending orders that contributed to plan generation with tracking flags
-            # Per two-phase strategy: Only mark as included_in_plan_generation=True if they generated cut rolls
-            # Status remains "pending" until production start (PHASE 2)
-            logger.info("Setting plan generation tracking flags for pending orders that generated cut rolls")
-            self._mark_pending_orders_in_plan_generation(pending_requirements, optimization_result)
+            # Plan tracking flags no longer needed - using source tracking instead
+            logger.info("Plan generation complete - using source tracking for pending order resolution")
             
             # IMPORTANT: Two-Phase Pending Order Strategy Implementation Complete
             # PHASE 1 (Plan Generation): Created pending orders for algorithm limitations (included_in_plan_generation=FALSE)  
@@ -833,68 +829,3 @@ class WorkflowManager:
             logger.error(f"Error updating resolved pending orders: {e}")
             # Don't raise - this shouldn't break the main workflow
     
-    def _mark_pending_orders_in_plan_generation(self, pending_requirements: List[Dict], optimization_result: Dict):
-        """
-        Mark pending orders that were included in plan generation and actually generated cut rolls.
-        Per documentation: Only mark with included_in_plan_generation = True if they contributed to the solution.
-        Status remains "pending" until production start (PHASE 2).
-        """
-        from datetime import datetime
-        
-        try:
-            cut_rolls_generated = optimization_result.get('cut_rolls_generated', [])
-            
-            # Count how many cut rolls were generated from each pending order
-            pending_cut_roll_counts = {}
-            
-            for cut_roll in cut_rolls_generated:
-                if cut_roll.get('source_type') == 'pending_order' and cut_roll.get('source_pending_id'):
-                    pending_id = cut_roll.get('source_pending_id')
-                    if pending_id in pending_cut_roll_counts:
-                        pending_cut_roll_counts[pending_id] += 1
-                    else:
-                        pending_cut_roll_counts[pending_id] = 1
-            
-            logger.info(f"🔍 PLAN TRACKING: Found {len(pending_cut_roll_counts)} pending orders that generated cut rolls")
-            
-            # Update the tracking fields ONLY for pending orders that generated cut rolls
-            for pending_id, cut_roll_count in pending_cut_roll_counts.items():
-                try:
-                    # Convert string UUID to UUID object if needed
-                    if isinstance(pending_id, str):
-                        import uuid
-                        pending_uuid = uuid.UUID(pending_id)
-                    else:
-                        pending_uuid = pending_id
-                    
-                    # Find and update the pending order
-                    pending_order = self.db.query(models.PendingOrderItem).filter(
-                        models.PendingOrderItem.id == pending_uuid
-                    ).first()
-                    
-                    if pending_order:
-                        # IMPORTANT: Only set to True for orders that actually generated cut rolls
-                        pending_order.included_in_plan_generation = True
-                        pending_order.generated_cut_rolls_count = cut_roll_count
-                        pending_order.plan_generation_date = datetime.utcnow()
-                        
-                        # Status remains "pending" - will change to "included_in_plan" during production start
-                        
-                        logger.info(f"✅ PLAN TRACKING: Marked pending {pending_order.frontend_id} as included in plan generation ({cut_roll_count} cut rolls generated)")
-                    else:
-                        logger.warning(f"⚠️ PLAN TRACKING: Could not find pending order with ID {pending_id}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ PLAN TRACKING: Error updating pending order {pending_id}: {e}")
-            
-            # Ensure all other pending orders remain with included_in_plan_generation = False
-            # This includes orders that were input but didn't generate cut rolls (high waste, etc.)
-            for req in pending_requirements:
-                pending_id = req.get('pending_id')
-                if pending_id and pending_id not in pending_cut_roll_counts:
-                    logger.info(f"📊 PLAN TRACKING: Pending order {pending_id} was NOT included in plan generation (likely high waste or technical limitation)")
-                    # These orders maintain included_in_plan_generation = False (default)
-            
-        except Exception as e:
-            logger.error(f"❌ PLAN TRACKING: Error in _mark_pending_orders_in_plan_generation: {e}")
-            # Don't raise - this shouldn't break plan generation

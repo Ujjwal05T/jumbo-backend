@@ -158,9 +158,12 @@ class PlanCalculationService:
         """Format optimization results for frontend consumption."""
         
         # Calculate available jumbo rolls based on generated 118" rolls
-        total_118_rolls = len([roll for roll in optimization_result.get('cut_rolls_generated', [])
-                              if roll.get('source') == 'cutting'])
+        cut_rolls = optimization_result.get('cut_rolls_generated', [])
+        total_118_rolls = len([roll for roll in cut_rolls if roll.get('source') == 'cutting'])
         jumbo_rolls_available = total_118_rolls // 3  # Complete jumbos only
+        
+        # Enhanced: Add jumbo roll hierarchy information
+        enhanced_cut_rolls, jumbo_roll_details = self._enhance_with_jumbo_hierarchy(cut_rolls)
         
         # Enhanced summary with jumbo roll width
         summary = optimization_result.get('summary', {})
@@ -168,14 +171,106 @@ class PlanCalculationService:
             'jumbo_roll_width': self.jumbo_roll_width,
             'jumbo_rolls_available': jumbo_rolls_available,
             'individual_118_rolls_available': total_118_rolls,
-            'max_selectable_rolls': jumbo_rolls_available * 3
+            'max_selectable_rolls': jumbo_rolls_available * 3,
+            'complete_jumbos': len([jr for jr in jumbo_roll_details if jr['roll_count'] == 3]),
+            'partial_jumbos': len([jr for jr in jumbo_roll_details if jr['roll_count'] < 3])
         })
         
         return {
-            "cut_rolls_generated": optimization_result.get('cut_rolls_generated', []),
+            "cut_rolls_generated": enhanced_cut_rolls,
             "jumbo_rolls_available": jumbo_rolls_available,
             "pending_orders": optimization_result.get('pending_orders', []),
             "summary": summary,
+            "jumbo_roll_details": jumbo_roll_details,
             "order_ids_processed": [str(oid) for oid in order_ids],
             "calculation_only": True  # Flag to indicate this is calculation-only result
         }
+    
+    def _enhance_with_jumbo_hierarchy(self, cut_rolls: List[Dict]) -> tuple:
+        """
+        Enhance cut rolls with jumbo hierarchy information.
+        
+        Returns:
+            Tuple of (enhanced_cut_rolls, jumbo_roll_details)
+        """
+        enhanced_cut_rolls = []
+        jumbo_roll_details = []
+        
+        # Group cut rolls by paper specification and individual roll number
+        spec_groups = {}
+        for roll in cut_rolls:
+            if roll.get('source') != 'cutting':
+                # Keep inventory rolls as-is
+                enhanced_cut_rolls.append(roll)
+                continue
+                
+            spec_key = f"{roll.get('gsm', 0)}gsm-{roll.get('bf', 0)}bf-{roll.get('shade', '')}"
+            if spec_key not in spec_groups:
+                spec_groups[spec_key] = {}
+            
+            roll_num = roll.get('individual_roll_number', 0)
+            if roll_num not in spec_groups[spec_key]:
+                spec_groups[spec_key][roll_num] = []
+            
+            spec_groups[spec_key][roll_num].append(roll)
+        
+        # Create jumbo roll hierarchy
+        jumbo_counter = 1
+        
+        for spec_key, roll_groups in spec_groups.items():
+            # Sort roll numbers to create consistent jumbo groupings
+            sorted_roll_numbers = sorted(roll_groups.keys())
+            
+            # Group every 3 rolls into a jumbo
+            for i in range(0, len(sorted_roll_numbers), 3):
+                jumbo_id = f"JR-{jumbo_counter:03d}"
+                jumbo_frontend_id = f"JR-{jumbo_counter:03d}"
+                
+                # Get up to 3 rolls for this jumbo
+                rolls_in_jumbo = sorted_roll_numbers[i:i+3]
+                roll_count = len(rolls_in_jumbo)
+                total_cuts = 0
+                total_used_width = 0
+                
+                # Process each 118" roll in this jumbo
+                for seq_num, roll_num in enumerate(rolls_in_jumbo, 1):
+                    roll_118_id = f"R118-{jumbo_counter:03d}-{seq_num}"
+                    cuts_in_roll = roll_groups[roll_num]
+                    
+                    # Enhance each cut roll with hierarchy info
+                    for cut_roll in cuts_in_roll:
+                        enhanced_roll = cut_roll.copy()
+                        enhanced_roll.update({
+                            'jumbo_roll_id': jumbo_id,
+                            'jumbo_roll_frontend_id': jumbo_frontend_id,
+                            'parent_118_roll_id': roll_118_id,
+                            'roll_sequence': seq_num,
+                            'individual_roll_number': roll_num
+                        })
+                        enhanced_cut_rolls.append(enhanced_roll)
+                        total_cuts += 1
+                        total_used_width += cut_roll.get('width', 0)
+                
+                # Calculate jumbo statistics
+                efficiency = 0
+                if roll_count > 0:
+                    avg_width_per_roll = total_used_width / roll_count
+                    efficiency = (avg_width_per_roll / self.jumbo_roll_width) * 100
+                
+                # Create jumbo roll detail
+                jumbo_detail = {
+                    'jumbo_id': jumbo_id,
+                    'jumbo_frontend_id': jumbo_frontend_id,
+                    'paper_spec': spec_key.replace('-', ', '),
+                    'roll_count': roll_count,
+                    'total_cuts': total_cuts,
+                    'total_used_width': total_used_width,
+                    'efficiency_percentage': round(efficiency, 1),
+                    'is_complete': roll_count == 3,
+                    'roll_numbers': rolls_in_jumbo
+                }
+                
+                jumbo_roll_details.append(jumbo_detail)
+                jumbo_counter += 1
+        
+        return enhanced_cut_rolls, jumbo_roll_details

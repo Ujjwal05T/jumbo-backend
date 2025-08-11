@@ -262,8 +262,7 @@ class PendingOrderItem(Base):
     _status = Column("status", String(50), default=PendingOrderStatus.PENDING, nullable=False, index=True)
     production_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("production_order_master.id"), nullable=True)
     
-    # NEW FIELDS: Plan generation tracking
-    included_in_plan_generation = Column(Boolean, default=False, nullable=False, index=True)  # Was this pending order included in plan generation?
+    # Plan generation tracking fields (kept for database compatibility)
     generated_cut_rolls_count = Column(Integer, default=0, nullable=False)  # How many cut rolls were generated from this pending order?
     plan_generation_date = Column(DateTime, nullable=True)  # When was this included in plan generation?
     

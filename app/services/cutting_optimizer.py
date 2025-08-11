@@ -272,6 +272,9 @@ class CuttingOptimizer:
         jumbo_rolls_needed = 0
         all_high_trims = []
         
+        # NEW: Initialize assignment tracker for proper source distribution
+        assignment_tracker = {}
+        
         for spec_key, group_data in spec_groups.items():
             orders = group_data['orders']
             inventory = group_data['inventory']
@@ -372,8 +375,8 @@ class CuttingOptimizer:
                     
                     # Add cut rolls from this pattern
                     for width in combo:
-                        # NEW: Determine source information for this width
-                        source_info = self._get_source_info_for_width(width, spec_groups[spec_key]['source_tracking'])
+                        # NEW: Determine source information for this width with proper distribution
+                        source_info = self._get_source_info_for_width(width, spec_groups[spec_key]['source_tracking'], assignment_tracker)
                         
                         cut_roll = {
                             'width': width,
@@ -407,18 +410,40 @@ class CuttingOptimizer:
             # It will be calculated based on user's actual selection in frontend
             
             # Add orders that couldn't be fulfilled to pending
+            # CRITICAL: Only create new pending orders from unfulfilled REGULAR orders
+            # Do NOT create duplicates of existing pending orders
             if orders_copy:
                 logger.info(f"🔍 PENDING CONVERSION DEBUG: pending dict = {dict(pending)}")
                 for width, qty in pending.items():
-                    logger.info(f"🔍 Creating pending order: {width}\" x{qty}")
-                    new_pending_orders.append({
-                        'width': width,
-                        'quantity': qty,
-                        'gsm': spec['gsm'],
-                        'bf': spec['bf'],
-                        'shade': spec['shade'],
-                        'reason': 'waste_too_high'
-                    })
+                    # Check source tracking to see if this unfulfilled order came from regular orders
+                    source_tracking = spec_groups[spec_key]['source_tracking'].get(width, [])
+                    regular_order_qty = 0
+                    
+                    # Count how many of these unfulfilled orders came from regular orders (not existing pending orders)
+                    for source in source_tracking:
+                        if source.get('source_type') == 'regular_order':
+                            regular_order_qty += source.get('quantity', 0)
+                    
+                    # Only create pending orders for the portion that came from regular orders
+                    pending_qty_to_create = min(qty, regular_order_qty)
+                    
+                    if pending_qty_to_create > 0:
+                        logger.info(f"🔍 Creating pending order: {width}\" x{pending_qty_to_create} (from regular orders only)")
+                        new_pending_orders.append({
+                            'width': width,
+                            'quantity': pending_qty_to_create,
+                            'gsm': spec['gsm'],
+                            'bf': spec['bf'],
+                            'shade': spec['shade'],
+                            'reason': 'waste_too_high'
+                        })
+                    else:
+                        logger.info(f"🔍 SKIPPING pending order creation: {width}\" x{qty} (all from existing pending orders - no duplication)")
+                        
+                    # Log the breakdown for debugging
+                    existing_pending_qty = qty - pending_qty_to_create
+                    if existing_pending_qty > 0:
+                        logger.info(f"     📋 Breakdown: {pending_qty_to_create} from regular orders, {existing_pending_qty} from existing pending orders")
                 
                 # Track high trim approvals
                 for combo, trim in high_trims:
@@ -532,22 +557,52 @@ class CuttingOptimizer:
             interactive=interactive
         )
 
-    def _get_source_info_for_width(self, width: float, source_tracking: Dict) -> Dict:
+    def _get_source_info_for_width(self, width: float, source_tracking: Dict, assignment_tracker: Dict) -> Dict:
         """
         Get source information for a specific width from the source tracking data.
-        PRIORITIZES pending orders when multiple sources exist for the same width.
+        PROPERLY DISTRIBUTES cut rolls across pending orders based on their quantities.
+        
+        Args:
+            width: Width of the cut roll being assigned
+            source_tracking: Source tracking data for this specification group
+            assignment_tracker: Tracks how many cut rolls have been assigned to each source
         """
         if width in source_tracking and source_tracking[width]:
             sources = source_tracking[width]
             
-            # PRIORITIZE pending orders - check if any source is from pending orders
-            for source in sources:
-                if source.get('source_type') == 'pending_order':
-                    return source
+            # Initialize tracking key for this width if not exists
+            width_key = f"width_{width}"
+            if width_key not in assignment_tracker:
+                assignment_tracker[width_key] = {}
             
-            # If no pending order source, use the first available (regular order)
+            # PRIORITIZE pending orders - distribute them properly based on quantity
+            pending_sources = [s for s in sources if s.get('source_type') == 'pending_order']
+            if pending_sources:
+                # Find a pending order that hasn't exceeded its quantity limit
+                for source in pending_sources:
+                    source_id = source.get('source_pending_id')
+                    if source_id:
+                        # Track assignments for this specific pending order
+                        current_assignments = assignment_tracker[width_key].get(source_id, 0)
+                        max_quantity = source.get('quantity', 1)
+                        
+                        # If this pending order can still accept more cut rolls, use it
+                        if current_assignments < max_quantity:
+                            assignment_tracker[width_key][source_id] = current_assignments + 1
+                            logger.debug(f"🎯 SOURCE ASSIGNMENT: Assigned cut roll {current_assignments + 1}/{max_quantity} to pending order {str(source_id)[:8]}...")
+                            return source
+                        else:
+                            logger.debug(f"🚫 SOURCE SKIP: Pending order {str(source_id)[:8]}... already at capacity ({current_assignments}/{max_quantity})")
+            
+            # If no pending orders available or all at capacity, use regular order sources
+            regular_sources = [s for s in sources if s.get('source_type') == 'regular_order']
+            if regular_sources:
+                return regular_sources[0]
+            
+            # Fallback to first source if no other option
             return sources[0]
         
+        # Default fallback for width with no source tracking
         return {
             'source_type': 'regular_order',
             'source_order_id': None,

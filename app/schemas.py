@@ -323,8 +323,7 @@ class PendingOrderItem(PendingOrderItemBase):
     resolved_at: Optional[datetime] = None
     quantity_fulfilled: Optional[int] = Field(default=0, description="Number of items fulfilled")
     
-    # NEW: Plan generation tracking fields
-    included_in_plan_generation: Optional[bool] = Field(default=False, description="Was this pending order included in plan generation?")
+    # Plan generation tracking fields (kept for database compatibility)
     generated_cut_rolls_count: Optional[int] = Field(default=0, description="Number of cut rolls generated from this pending order")
     plan_generation_date: Optional[datetime] = Field(None, description="When was this included in plan generation?")
     
@@ -474,6 +473,13 @@ class CutRollGenerated(BaseModel):
     inventory_id: Optional[str] = None
     jumbo_number: Optional[int] = None
     trim_left: Optional[float] = None
+    
+    # Enhanced jumbo roll hierarchy fields
+    jumbo_roll_id: Optional[str] = Field(None, description="Virtual jumbo roll ID")
+    jumbo_roll_frontend_id: Optional[str] = Field(None, description="Human-readable jumbo ID (e.g., JR-001)")
+    parent_118_roll_id: Optional[str] = Field(None, description="Parent 118 inch roll ID")
+    roll_sequence: Optional[int] = Field(None, description="Position within jumbo (1, 2, 3)")
+    individual_roll_number: Optional[int] = Field(None, description="118 roll number from optimization")
 
 class PendingOrderOutput(BaseModel):
     """Pending order that couldn't be fulfilled"""
@@ -502,6 +508,9 @@ class OptimizerOutput(BaseModel):
     pending_orders: List[PendingOrderOutput] = Field(..., description="Orders that cannot be fulfilled")
     inventory_remaining: List[InventoryRemaining] = Field(..., description="20-25\" waste rolls for future use")
     summary: Dict[str, Any] = Field(..., description="Summary statistics")
+    
+    # Enhanced jumbo roll hierarchy information
+    jumbo_roll_details: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Jumbo roll hierarchy details")
 
 class CuttingOptimizationRequest(BaseModel):
     """Request for cutting optimization with order IDs - UPDATED for new flow"""
