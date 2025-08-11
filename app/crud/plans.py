@@ -356,13 +356,13 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             if not cut_roll.get('source_type') and cut_roll.get('gsm') and cut_roll.get('shade'):
                 logger.info(f"🔍 RECONSTRUCTING: Trying to find source tracking from pending orders for {cut_roll_width}\" GSM={cut_roll.get('gsm')} Shade={cut_roll.get('shade')}")
                 
-                # Look for pending orders with matching specs that were included in plan generation
+                # Look for pending orders with matching specs 
                 matching_pending = db.query(models.PendingOrderItem).filter(
                     models.PendingOrderItem.width_inches == cut_roll_width,
                     models.PendingOrderItem.gsm == cut_roll.get('gsm'),
                     models.PendingOrderItem.shade == cut_roll.get('shade'),
-                    models.PendingOrderItem.status == "pending",
-                    models.PendingOrderItem.included_in_plan_generation == True
+                    models.PendingOrderItem._status == "pending"  # FIXED: Use _status column, not status property
+                    # REMOVED: included_in_plan_generation filter - these ARE from plan generation
                 ).first()
                 
                 if matching_pending:
@@ -445,8 +445,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         # Find the pending order with exact criteria
                         pending_order = db.query(models.PendingOrderItem).filter(
                             models.PendingOrderItem.id == pending_uuid,
-                            models.PendingOrderItem.status == "pending",
-                            models.PendingOrderItem.included_in_plan_generation == True  # CRITICAL: Only resolve if included in plan
+                            models.PendingOrderItem._status == "pending"  # FIXED: Use _status column, not status property
+                            # REMOVED: included_in_plan_generation filter - these ARE the pending orders from plan generation
                         ).first()
                         
                         if pending_order and pending_order.quantity_pending > 0:
