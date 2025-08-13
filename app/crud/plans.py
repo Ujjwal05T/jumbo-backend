@@ -193,42 +193,90 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # NEW: Create virtual jumbo roll hierarchy based on optimization algorithm roll numbers
         jumbo_roll_width = request_data.get("jumbo_roll_width", 118)  # Get dynamic width from request
         
-        # Group selected cut rolls by individual_roll_number (from optimization algorithm)
-        roll_number_groups = {}
-        paper_specs = {}  # Track paper specs for each roll number
+        # Group selected cut rolls by paper specification first, then by individual_roll_number
+        # This ensures different paper types with same roll numbers are kept separate
+        paper_spec_groups = {}  # {paper_spec_key: {roll_number: [cut_rolls]}}
         
-        for cut_roll in selected_cut_rolls:
+        logger.info(f"📦 GROUPING: Starting paper specification grouping for {len(selected_cut_rolls)} cut rolls")
+        
+        for i, cut_roll in enumerate(selected_cut_rolls):
             individual_roll_number = cut_roll.get("individual_roll_number")
             if individual_roll_number:
-                if individual_roll_number not in roll_number_groups:
-                    roll_number_groups[individual_roll_number] = []
-                    paper_specs[individual_roll_number] = {
-                        'gsm': cut_roll.get("gsm"),
-                        'bf': cut_roll.get("bf"),
-                        'shade': cut_roll.get("shade"),
-                        'paper_id': cut_roll.get("paper_id")
-                    }
-                roll_number_groups[individual_roll_number].append(cut_roll)
+                # Create paper specification key (gsm, bf, shade)
+                paper_spec_key = (
+                    cut_roll.get("gsm"),
+                    cut_roll.get("bf"),
+                    cut_roll.get("shade")
+                )
+                
+                logger.info(f"📦 Cut Roll {i+1}: Roll #{individual_roll_number}, Spec: {paper_spec_key}")
+                
+                # Initialize paper spec group if not exists
+                if paper_spec_key not in paper_spec_groups:
+                    paper_spec_groups[paper_spec_key] = {}
+                    logger.info(f"📦 NEW PAPER SPEC: Created group for {paper_spec_key}")
+                
+                # Initialize roll number group within this paper spec
+                if individual_roll_number not in paper_spec_groups[paper_spec_key]:
+                    paper_spec_groups[paper_spec_key][individual_roll_number] = []
+                    logger.info(f"📦 NEW ROLL GROUP: Added roll #{individual_roll_number} to spec {paper_spec_key}")
+                
+                # Add cut roll to the appropriate group
+                paper_spec_groups[paper_spec_key][individual_roll_number].append(cut_roll)
+                logger.info(f"📦 ADDED: Cut roll to spec {paper_spec_key}, roll #{individual_roll_number} (now {len(paper_spec_groups[paper_spec_key][individual_roll_number])} cuts)")
+            else:
+                logger.warning(f"📦 SKIPPED: Cut roll {i+1} has no individual_roll_number")
+                
+        logger.info(f"📦 PAPER SPEC GROUPING: Found {len(paper_spec_groups)} unique paper specifications")
+        for spec_key, roll_groups in paper_spec_groups.items():
+            gsm, bf, shade = spec_key
+            total_cuts_for_spec = sum(len(cuts) for cuts in roll_groups.values())
+            logger.info(f"  → {gsm}gsm, {bf}bf, {shade}: {len(roll_groups)} roll numbers, {total_cuts_for_spec} total cut rolls")
+            for roll_num, cuts in roll_groups.items():
+                logger.info(f"    → Roll #{roll_num}: {len(cuts)} cut rolls")
         
-        # Calculate jumbo rolls needed: 3 individual rolls = 1 jumbo
-        total_118_rolls = len(roll_number_groups)
-        jumbo_count = (total_118_rolls + 2) // 3  # Ceiling division
+        # Validate paper specification separation
+        logger.info(f"📦 VALIDATION: Checking paper specification separation")
+        roll_number_conflicts = {}
+        for spec_key, roll_groups in paper_spec_groups.items():
+            for roll_num in roll_groups.keys():
+                if roll_num not in roll_number_conflicts:
+                    roll_number_conflicts[roll_num] = []
+                roll_number_conflicts[roll_num].append(spec_key)
         
-        logger.info(f"📦 JUMBO CREATION: {total_118_rolls} individual 118\" rolls = {jumbo_count} jumbo rolls needed")
+        conflicts_found = False
+        for roll_num, specs in roll_number_conflicts.items():
+            if len(specs) > 1:
+                conflicts_found = True
+                logger.info(f"📦 VALIDATION: Roll #{roll_num} appears in {len(specs)} different paper specs: {specs}")
+        
+        if not conflicts_found:
+            logger.info(f"📦 VALIDATION SUCCESS: All roll numbers properly separated by paper specification")
+        else:
+            logger.info(f"📦 VALIDATION: Roll number conflicts detected but properly handled by paper spec grouping")
+        
+        # Calculate total 118" rolls and jumbo rolls needed across all paper specifications
+        total_118_rolls = sum(len(roll_groups) for roll_groups in paper_spec_groups.values())
+        total_jumbo_count = sum((len(roll_groups) + 2) // 3 for roll_groups in paper_spec_groups.values())
+        
+        logger.info(f"📦 JUMBO CREATION: {total_118_rolls} individual 118\" rolls across {len(paper_spec_groups)} paper specs = {total_jumbo_count} total jumbo rolls needed")
         
         # Create jumbo rolls and link 118" rolls properly
         import uuid
         
-        # Group 118" rolls by paper specification for jumbo creation
+        # Convert the nested structure to the format needed for jumbo creation
+        # spec_to_118_rolls = {(gsm, bf, shade): [roll_numbers...]}
         spec_to_118_rolls = {}
-        for roll_num, spec in paper_specs.items():
-            spec_key = (spec['gsm'], spec['bf'], spec['shade'])
-            if spec_key not in spec_to_118_rolls:
-                spec_to_118_rolls[spec_key] = []
-            spec_to_118_rolls[spec_key].append(roll_num)
+        for spec_key, roll_groups in paper_spec_groups.items():
+            spec_to_118_rolls[spec_key] = list(roll_groups.keys())
+            logger.info(f"📦 SPEC PROCESSING: {spec_key} → {len(spec_to_118_rolls[spec_key])} roll numbers: {spec_to_118_rolls[spec_key]}")
         
-        # Create jumbo rolls for each paper specification
-        for (gsm, bf, shade), roll_numbers in spec_to_118_rolls.items():
+        # Create jumbo rolls for each paper specification separately
+        jumbo_creation_summary = {}
+        for spec_idx, ((gsm, bf, shade), roll_numbers) in enumerate(spec_to_118_rolls.items(), 1):
+            logger.info(f"📦 PROCESSING PAPER SPEC {spec_idx}/{len(spec_to_118_rolls)}: {gsm}gsm, {bf}bf, {shade} - {len(roll_numbers)} roll numbers")
+            jumbo_creation_summary[f"{gsm}gsm_{shade}"] = {"roll_count": len(roll_numbers), "jumbo_count": 0}
+            
             # Find paper record
             paper_record = db.query(models.PaperMaster).filter(
                 models.PaperMaster.gsm == gsm,
@@ -242,6 +290,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             # Calculate jumbo rolls needed for this paper spec
             spec_jumbo_count = (len(roll_numbers) + 2) // 3
+            logger.info(f"📦 SPEC JUMBOS: {len(roll_numbers)} rolls → {spec_jumbo_count} jumbos for {gsm}gsm {shade}")
+            jumbo_creation_summary[f"{gsm}gsm_{shade}"]["jumbo_count"] = spec_jumbo_count
             
             # Create jumbo rolls for this paper specification
             for jumbo_idx in range(spec_jumbo_count):
@@ -262,12 +312,14 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 db.flush()
                 created_jumbo_rolls.append(jumbo_roll)
                 
-                logger.info(f"📦 CREATED JUMBO: {jumbo_roll.frontend_id} - {jumbo_roll_width}\" {shade} paper")
+                logger.info(f"📦 CREATED JUMBO: {jumbo_roll.frontend_id} - {jumbo_roll_width}\" {gsm}gsm {shade} paper (#{jumbo_idx+1}/{spec_jumbo_count} for this spec)")
                 
                 # Assign 3 individual roll numbers to this jumbo
                 start_idx = jumbo_idx * 3
                 end_idx = min(start_idx + 3, len(roll_numbers))
                 assigned_roll_numbers = roll_numbers[start_idx:end_idx]
+                
+                logger.info(f"📦 ASSIGNING ROLLS: Jumbo {jumbo_roll.frontend_id} gets roll numbers {assigned_roll_numbers}")
                 
                 # Create 118" rolls for the assigned individual roll numbers
                 for seq, roll_num in enumerate(assigned_roll_numbers, 1):
@@ -291,9 +343,53 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     db.flush()
                     created_118_rolls.append(roll_118)
                     
-                    logger.info(f"🧻 CREATED 118\" ROLL: {roll_118.frontend_id} - Roll #{roll_num}, Sequence {seq} of Jumbo {jumbo_roll.frontend_id}")
+                    logger.info(f"🧻 CREATED 118\" ROLL: {roll_118.frontend_id} - Roll #{roll_num}, Sequence {seq} of Jumbo {jumbo_roll.frontend_id} ({gsm}gsm {shade})")
         
+        # Final validation and summary logging
         logger.info(f"✅ HIERARCHY CREATED: {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls")
+        logger.info(f"📊 VALIDATION SUMMARY:")
+        
+        # Group created jumbos by paper spec for validation
+        jumbo_by_spec = {}
+        for jumbo in created_jumbo_rolls:
+            paper = db.query(models.PaperMaster).filter(models.PaperMaster.id == jumbo.paper_id).first()
+            if paper:
+                spec_key = (paper.gsm, paper.bf, paper.shade)
+                if spec_key not in jumbo_by_spec:
+                    jumbo_by_spec[spec_key] = []
+                jumbo_by_spec[spec_key].append(jumbo)
+        
+        for spec_key, jumbos in jumbo_by_spec.items():
+            gsm, bf, shade = spec_key
+            logger.info(f"  → {gsm}gsm, {bf}bf, {shade}: {len(jumbos)} jumbo rolls created")
+            
+        # Enhanced validation with detailed reporting
+        logger.info(f"📊 CREATION SUMMARY BY PAPER SPEC:")
+        for spec_name, summary in jumbo_creation_summary.items():
+            logger.info(f"  → {spec_name}: {summary['roll_count']} roll numbers → {summary['jumbo_count']} jumbo rolls")
+        
+        # Validate that each paper spec got separate jumbos
+        if len(jumbo_by_spec) == len(paper_spec_groups):
+            logger.info(f"✅ VALIDATION SUCCESS: Each of {len(paper_spec_groups)} paper specifications got its own jumbos")
+            logger.info(f"✅ VALIDATION SUCCESS: No paper type mixing in jumbo rolls")
+        else:
+            logger.error(f"❌ VALIDATION FAILED: Expected {len(paper_spec_groups)} paper specs, but created jumbos for {len(jumbo_by_spec)} specs")
+            logger.error(f"❌ This indicates paper type mixing or missing specifications")
+        
+        # Additional validation: Check for roll number conflicts within each paper spec
+        logger.info(f"📊 ROLL NUMBER DISTRIBUTION CHECK:")
+        for spec_key, jumbos in jumbo_by_spec.items():
+            gsm, bf, shade = spec_key
+            # Get all 118" rolls for this paper spec
+            spec_118_rolls = [r for r in created_118_rolls if r.parent_jumbo_id in [j.id for j in jumbos]]
+            roll_numbers_in_spec = [r.individual_roll_number for r in spec_118_rolls]
+            logger.info(f"  → {gsm}gsm {shade}: Roll numbers {sorted(roll_numbers_in_spec)} distributed across {len(jumbos)} jumbos")
+            
+            # Check for duplicates within this spec (should not happen)
+            if len(roll_numbers_in_spec) != len(set(roll_numbers_in_spec)):
+                logger.error(f"❌ DUPLICATE ROLL NUMBERS DETECTED within {gsm}gsm {shade} specification!")
+            else:
+                logger.info(f"✅ No duplicate roll numbers within {gsm}gsm {shade} specification")
         
         # Create inventory records for SELECTED cut rolls with status "cutting"
         # Link cut rolls to their parent 118" rolls based on individual_roll_number

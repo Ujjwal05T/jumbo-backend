@@ -12,6 +12,39 @@ from ..services.barcode_generator import BarcodeGenerator
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+def _get_jumbo_roll_info(inventory_item):
+    """
+    Helper function to get jumbo roll information by traversing the relationship chain.
+    
+    For cut rolls, the hierarchy is: Cut Roll -> 118" Roll -> Jumbo Roll
+    So we need to traverse: inventory_item -> parent_118_roll -> parent_jumbo
+    """
+    jumbo_roll_id = None
+    jumbo_roll_frontend_id = None
+    jumbo_roll_uuid = None
+    
+    # Method 1: Direct parent_jumbo (if available)
+    if inventory_item.parent_jumbo_id and inventory_item.parent_jumbo:
+        jumbo_roll_uuid = inventory_item.parent_jumbo_id
+        jumbo_roll_id = str(inventory_item.parent_jumbo_id)
+        jumbo_roll_frontend_id = getattr(inventory_item.parent_jumbo, 'frontend_id', None)
+        logger.info(f"🔍 Found direct jumbo: {jumbo_roll_frontend_id}")
+    
+    # Method 2: Traverse via 118" roll (Cut Roll -> 118" Roll -> Jumbo Roll)
+    elif inventory_item.parent_118_roll_id and inventory_item.parent_118_roll:
+        parent_118_roll = inventory_item.parent_118_roll
+        if parent_118_roll.parent_jumbo_id and parent_118_roll.parent_jumbo:
+            jumbo_roll_uuid = parent_118_roll.parent_jumbo_id
+            jumbo_roll_id = str(parent_118_roll.parent_jumbo_id)
+            jumbo_roll_frontend_id = getattr(parent_118_roll.parent_jumbo, 'frontend_id', None)
+            logger.info(f"🔍 Found jumbo via 118\" roll: {jumbo_roll_frontend_id}")
+    
+    return {
+        "jumbo_roll_id": jumbo_roll_id,
+        "jumbo_roll_frontend_id": jumbo_roll_frontend_id,
+        "actual_parent_jumbo_id": str(jumbo_roll_uuid) if jumbo_roll_uuid else None
+    }
+
 # ============================================================================
 # CUT ROLL PRODUCTION ENDPOINTS
 # ============================================================================
@@ -150,10 +183,15 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         for link in plan_links:
             logger.info(f"🔍 DEBUG: Link {link.id} -> inventory_id: {link.inventory_id}")
         
-        # Method 1: Get cut rolls linked to this plan via PlanInventoryLink
+        # Method 1: Get cut rolls linked to this plan via PlanInventoryLink with jumbo hierarchy
+        from sqlalchemy.orm import joinedload
         cut_rolls_via_link = db.query(models.InventoryMaster).join(
             models.PlanInventoryLink, 
             models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
+        ).options(
+            joinedload(models.InventoryMaster.paper),  # Load paper specs
+            joinedload(models.InventoryMaster.parent_jumbo),  # Load parent jumbo roll (if exists)
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)  # Load 118" roll and its parent jumbo
         ).filter(
             models.PlanInventoryLink.plan_id == plan_id,
             models.InventoryMaster.roll_type == "cut"
@@ -218,7 +256,14 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                         "shade": inventory_item.paper.shade
                     } if inventory_item.paper else None,
                     "client_name": client_name,
-                    "order_date": order_date
+                    "order_date": order_date,
+                    # Jumbo roll hierarchy fields
+                    "individual_roll_number": inventory_item.individual_roll_number,
+                    "parent_jumbo_id": str(inventory_item.parent_jumbo_id) if inventory_item.parent_jumbo_id else None,
+                    "parent_118_roll_id": str(inventory_item.parent_118_roll_id) if inventory_item.parent_118_roll_id else None,
+                    "roll_sequence": inventory_item.roll_sequence,
+                    # Enhanced jumbo roll data - traverse the relationship chain
+                    **_get_jumbo_roll_info(inventory_item)
                 })
         
         logger.info(f"Final result: {len(all_cut_rolls)} unique cut rolls")
@@ -294,7 +339,14 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                     "created_at": item["created_at"].isoformat() if hasattr(item["created_at"], 'isoformat') else str(item["created_at"]),
                     "paper_specs": item["paper_specs"],
                     "client_name": item["client_name"],
-                    "order_date": item["order_date"]
+                    "order_date": item["order_date"],
+                    # Jumbo roll hierarchy fields for frontend grouping
+                    "individual_roll_number": item["individual_roll_number"],
+                    "parent_jumbo_id": item["parent_jumbo_id"],
+                    "parent_118_roll_id": item["parent_118_roll_id"],
+                    "roll_sequence": item["roll_sequence"],
+                    "jumbo_roll_frontend_id": item["jumbo_roll_frontend_id"],
+                    "jumbo_roll_id": item["jumbo_roll_id"]
                 }
                 for item in all_cut_rolls
             ]

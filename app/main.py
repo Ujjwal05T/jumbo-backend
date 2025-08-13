@@ -49,7 +49,7 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"message": "Paper Roll Management System API"}
+    return {"message": "Paper Roll Management System API is Live"}
 
 @app.get("/health")
 async def health_check():
