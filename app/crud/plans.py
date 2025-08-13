@@ -401,23 +401,61 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             # Find parent 118" roll for this cut roll based on individual_roll_number
             individual_roll_number = cut_roll.get("individual_roll_number")
+            
+            # Find paper_id from cut roll specs (gsm, bf, shade) - ignore the paper_id from cut roll as it's unreliable
+            paper_record = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == cut_roll.get("gsm"),
+                models.PaperMaster.bf == cut_roll.get("bf"),
+                models.PaperMaster.shade == cut_roll.get("shade")
+            ).first()
+            if paper_record:
+                cut_roll_paper_id = paper_record.id
+                logger.info(f"🔍 FOUND paper_id {cut_roll_paper_id} for cut roll specs: {cut_roll.get('gsm')}gsm, {cut_roll.get('bf')}bf, {cut_roll.get('shade')}")
+            else:
+                cut_roll_paper_id = None
+                logger.warning(f"❌ Could not find paper record for specs: {cut_roll.get('gsm')}gsm, {cut_roll.get('bf')}bf, {cut_roll.get('shade')}")
+            
             parent_118_roll = None
             
-            if individual_roll_number:
-                # Find the 118" roll with matching individual_roll_number
-                for roll_118 in created_118_rolls:
-                    if roll_118.individual_roll_number == individual_roll_number:
-                        parent_118_roll = roll_118
-                        logger.info(f"🔗 LINKING: Cut roll -> 118\" Roll {parent_118_roll.frontend_id} (Roll #{individual_roll_number})")
-                        break
+            if individual_roll_number and cut_roll_paper_id:
+                logger.info(f"🔍 MATCHING DEBUG: Looking for 118\" rolls with individual_roll_number={individual_roll_number} and paper_id={cut_roll_paper_id}")
+                logger.info(f"🔍 MATCHING DEBUG: Available 118\" rolls: {[(roll.frontend_id, roll.individual_roll_number, roll.paper_id) for roll in created_118_rolls]}")
+                
+                # Find the 118" roll with matching individual_roll_number AND same paper type
+                # Use round-robin assignment to distribute cut rolls evenly across 118" rolls
+                matching_118_rolls = [
+                    roll for roll in created_118_rolls 
+                    if (roll.individual_roll_number == individual_roll_number and 
+                        roll.paper_id == cut_roll_paper_id)
+                ]
+                
+                logger.info(f"🔍 MATCHING DEBUG: Found {len(matching_118_rolls)} matching 118\" rolls: {[(roll.frontend_id, roll.individual_roll_number, roll.paper_id) for roll in matching_118_rolls]}")
+                
+                if matching_118_rolls:
+                    # Count existing cut rolls for each 118" roll to find the least loaded one
+                    roll_loads = {}
+                    for roll_118 in matching_118_rolls:
+                        # Count cut rolls already assigned to this 118" roll
+                        existing_cuts = db.query(models.InventoryMaster).filter(
+                            models.InventoryMaster.parent_118_roll_id == roll_118.id,
+                            models.InventoryMaster.roll_type == "cut"
+                        ).count()
+                        roll_loads[roll_118.id] = existing_cuts
+                    
+                    # Select the 118" roll with the minimum load
+                    min_load_roll_id = min(roll_loads.keys(), key=lambda k: roll_loads[k])
+                    parent_118_roll = next(roll for roll in matching_118_rolls if roll.id == min_load_roll_id)
+                    
+                    logger.info(f"🔗 BALANCED LINKING: Cut roll -> 118\" Roll {parent_118_roll.frontend_id} (Roll #{individual_roll_number}, Paper ID: {cut_roll_paper_id}, Load: {roll_loads[min_load_roll_id]} cuts)")
+                else:
+                    logger.warning(f"No matching 118\" rolls found for individual_roll_number={individual_roll_number} and paper_id={cut_roll_paper_id}")
             
             if not parent_118_roll:
-                logger.warning(f"Could not find parent 118\" roll for cut roll with individual_roll_number={individual_roll_number}")
+                logger.warning(f"Could not find parent 118\" roll for cut roll with individual_roll_number={individual_roll_number} and paper_id={cut_roll_paper_id}")
             
             # Find the best matching order for this cut roll
             best_order = None
             cut_roll_width = cut_roll.get("width", cut_roll.get("width_inches", 0))  # Try both field names
-            cut_roll_paper_id = cut_roll.get("paper_id")  # This might be None from optimizer
             
             # Look through all orders associated with this plan
             for plan_order in db_plan.plan_orders:
