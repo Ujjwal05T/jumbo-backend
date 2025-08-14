@@ -26,76 +26,76 @@ class FrontendIDGenerator:
     ID_PATTERNS: Dict[str, Dict[str, str]] = {
         "client_master": {
             "prefix": "CL",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Client Master IDs (CL-001, CL-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Client Master IDs (CL-00001, CL-00002, etc.)"
         },
         "user_master": {
             "prefix": "USR", 
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "User Master IDs (USR-001, USR-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "User Master IDs (USR-00001, USR-00002, etc.)"
         },
         "paper_master": {
             "prefix": "PAP",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Paper Master IDs (PAP-001, PAP-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Paper Master IDs (PAP-00001, PAP-00002, etc.)"
         },
         "order_master": {
             "prefix": "ORD",
-            "pattern": "{prefix}-{year}-{counter:03d}",
-            "description": "Order Master IDs (ORD-2025-001, etc.)",
+            "pattern": "{prefix}-{year}-{counter:05d}",
+            "description": "Order Master IDs (ORD-2025-00001, etc.)",
             "uses_year": True
         },
         "order_item": {
             "prefix": "ORI",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Order Item IDs (ORI-001, ORI-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Order Item IDs (ORI-00001, ORI-00002, etc.)"
         },
         "pending_order_master": {
             "prefix": "POM",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Pending Order Master IDs (POM-001, POM-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Pending Order Master IDs (POM-00001, POM-00002, etc.)"
         },
         "pending_order_item": {
             "prefix": "POI",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Pending Order Item IDs (POI-001, POI-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Pending Order Item IDs (POI-00001, POI-00002, etc.)"
         },
         "inventory_master": {
             "prefix": "INV",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Inventory Master IDs (INV-001, INV-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Inventory Master IDs (INV-00001, INV-00002, etc.)"
         },
         "plan_master": {
             "prefix": "PLN",
-            "pattern": "{prefix}-{year}-{counter:03d}",
-            "description": "Plan Master IDs (PLN-2025-001, etc.)",
+            "pattern": "{prefix}-{year}-{counter:05d}",
+            "description": "Plan Master IDs (PLN-2025-00001, etc.)",
             "uses_year": True
         },
         "production_order_master": {
             "prefix": "PRO",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Production Order Master IDs (PRO-001, PRO-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Production Order Master IDs (PRO-00001, PRO-00002, etc.)"
         },
         "plan_order_link": {
             "prefix": "POL",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Plan Order Link IDs (POL-001, POL-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Plan Order Link IDs (POL-00001, POL-00002, etc.)"
         },
         "plan_inventory_link": {
             "prefix": "PIL",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Plan Inventory Link IDs (PIL-001, PIL-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Plan Inventory Link IDs (PIL-00001, PIL-00002, etc.)"
         },
         "dispatch_record": {
             "prefix": "DSP",
-            "pattern": "{prefix}-{year}-{counter:03d}",
-            "description": "Dispatch Record IDs (DSP-2025-001, etc.)",
+            "pattern": "{prefix}-{year}-{counter:05d}",
+            "description": "Dispatch Record IDs (DSP-2025-00001, etc.)",
             "uses_year": True
         },
         "dispatch_item": {
             "prefix": "DSI",
-            "pattern": "{prefix}-{counter:03d}",
-            "description": "Dispatch Item IDs (DSI-001, DSI-002, etc.)"
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Dispatch Item IDs (DSI-00001, DSI-00002, etc.)"
         }
     }
     
@@ -133,11 +133,17 @@ class FrontendIDGenerator:
             # Get next counter value
             counter = cls._get_next_counter(table_name, db, year)
             
-            # Generate the ID
+            # Generate the ID with automatic digit expansion if needed
             if uses_year:
-                generated_id = pattern.format(prefix=prefix, year=year, counter=counter)
+                # For year-based IDs, use at least 5 digits, expand if needed
+                digits = max(5, len(str(counter)))
+                expanded_pattern = pattern.replace(':05d', f':{digits:02d}d')
+                generated_id = expanded_pattern.format(prefix=prefix, year=year, counter=counter)
             else:
-                generated_id = pattern.format(prefix=prefix, counter=counter)
+                # For simple IDs, use at least 5 digits, expand if needed
+                digits = max(5, len(str(counter)))
+                expanded_pattern = pattern.replace(':05d', f':{digits:02d}d')
+                generated_id = expanded_pattern.format(prefix=prefix, counter=counter)
             
             logger.debug(f"Generated ID for {table_name}: {generated_id}")
             return generated_id
@@ -174,24 +180,34 @@ class FrontendIDGenerator:
             
             # No cache, query database
             if uses_year and year:
-                # For year-based IDs, find max counter for this year
+                # For year-based IDs, find max counter for this year (handle variable digits)
                 pattern_prefix = f"{prefix}-{year}-"
                 query = text(f"""
-                    SELECT MAX(CAST(RIGHT(frontend_id, 3) AS INT)) as max_counter 
+                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
                     FROM {table_name} WITH (UPDLOCK)
-                    WHERE frontend_id LIKE :pattern_prefix AND frontend_id IS NOT NULL
+                    WHERE frontend_id LIKE :pattern_prefix_like 
+                      AND frontend_id IS NOT NULL
+                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
                 """)
-                result = db.execute(query, {"pattern_prefix": f"{pattern_prefix}%"}).scalar()
+                result = db.execute(query, {
+                    "pattern_prefix": pattern_prefix,
+                    "pattern_prefix_like": f"{pattern_prefix}%"
+                }).scalar()
                 logger.debug(f"Year-based counter query for {table_name} ({year}): max_counter = {result}")
             else:
-                # For simple counters, find max counter overall
+                # For simple counters, find max counter overall (handle variable digits)
                 pattern_prefix = f"{prefix}-"
                 query = text(f"""
-                    SELECT MAX(CAST(RIGHT(frontend_id, 3) AS INT)) as max_counter 
+                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
                     FROM {table_name} WITH (UPDLOCK)
-                    WHERE frontend_id LIKE :pattern_prefix AND frontend_id IS NOT NULL
+                    WHERE frontend_id LIKE :pattern_prefix_like 
+                      AND frontend_id IS NOT NULL
+                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
                 """)
-                result = db.execute(query, {"pattern_prefix": f"{pattern_prefix}%"}).scalar()
+                result = db.execute(query, {
+                    "pattern_prefix": pattern_prefix,
+                    "pattern_prefix_like": f"{pattern_prefix}%"
+                }).scalar()
                 logger.debug(f"Simple counter query for {table_name}: max_counter = {result}")
             
             # Calculate next counter and cache it
@@ -258,7 +274,7 @@ class FrontendIDGenerator:
             return False
         
         if uses_year:
-            # Expected format: PREFIX-YYYY-NNN
+            # Expected format: PREFIX-YYYY-NNNNN
             parts = frontend_id.split("-")
             if len(parts) != 3:
                 return False
@@ -269,7 +285,7 @@ class FrontendIDGenerator:
             except ValueError:
                 return False
         else:
-            # Expected format: PREFIX-NNN
+            # Expected format: PREFIX-NNNNN
             parts = frontend_id.split("-")
             if len(parts) != 2:
                 return False

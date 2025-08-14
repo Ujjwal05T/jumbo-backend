@@ -342,8 +342,10 @@ def create_dispatch_record(
                 ).limit(1).all()
                 
                 for order_item in matching_order_items:
-                    order_item.item_status = "completed"
-                    order_item.dispatched_at = func.now()
+                    # Only mark as completed if status is "in_warehouse" (fully fulfilled)
+                    if order_item.item_status == "in_warehouse":
+                        order_item.item_status = "completed"
+                        order_item.dispatched_at = func.now()
                     
                     # Check if order is complete
                     order = crud_operations.get_order(db, order_item.order_id)

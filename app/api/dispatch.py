@@ -100,7 +100,7 @@ def get_dispatch_history(
                 } if dispatch.client else None,
                 "primary_order": {
                     "id": str(dispatch.primary_order.id),
-                    "order_number": dispatch.primary_order.order_number
+                    "order_number": dispatch.primary_order.frontend_id
                 } if dispatch.primary_order else None,
                 "vehicle_number": dispatch.vehicle_number,
                 "driver_name": dispatch.driver_name,
@@ -198,9 +198,9 @@ def get_dispatch_details(
             },
             "primary_order": {
                 "id": str(dispatch.primary_order.id),
-                "order_number": dispatch.primary_order.order_number,
-                "quantity_rolls": dispatch.primary_order.quantity_rolls,
-                "width_inches": float(dispatch.primary_order.width_inches)
+                "order_number": dispatch.primary_order.frontend_id,
+                "status": dispatch.primary_order.status,
+                "payment_type": dispatch.primary_order.payment_type
             } if dispatch.primary_order else None,
             "vehicle_number": dispatch.vehicle_number,
             "driver_name": dispatch.driver_name,

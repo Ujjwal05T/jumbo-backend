@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, or_, text
 from typing import Dict, List, Any, Optional
 import logging
+import uuid
 from datetime import datetime, timedelta
 
 from .base import get_db
@@ -420,4 +421,123 @@ def get_reports_summary(db: Session = Depends(get_db)):
         
     except Exception as e:
         logger.error(f"Error in reports summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/order/{order_id}/challan-with-dispatch", tags=["Reports"])
+def get_order_with_dispatch_info(
+    order_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get order data with associated dispatch information for challan generation.
+    This endpoint combines order details with vehicle/dispatch information when available.
+    """
+    try:
+        # Parse order ID
+        try:
+            order_uuid = uuid.UUID(order_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid order ID format")
+        
+        # Get order with all related data
+        order = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client),
+            joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+        ).filter(models.OrderMaster.id == order_uuid).first()
+        
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Find related dispatch record using the connection path:
+        # OrderMaster -> PlanOrderLink -> PlanInventoryLink -> InventoryMaster -> DispatchItem -> DispatchRecord
+        dispatch_query = db.query(models.DispatchRecord).join(
+            models.DispatchItem,
+            models.DispatchItem.dispatch_record_id == models.DispatchRecord.id
+        ).join(
+            models.InventoryMaster,
+            models.InventoryMaster.id == models.DispatchItem.inventory_id
+        ).join(
+            models.PlanInventoryLink,
+            models.PlanInventoryLink.inventory_id == models.InventoryMaster.id
+        ).join(
+            models.PlanOrderLink,
+            models.PlanOrderLink.plan_id == models.PlanInventoryLink.plan_id
+        ).filter(
+            models.PlanOrderLink.order_id == order_uuid
+        ).distinct()
+        
+        # Get the first dispatch record (there might be multiple dispatches for one order)
+        dispatch = dispatch_query.first()
+        
+        # Also check for direct relationship if primary_order_id is set
+        if not dispatch:
+            dispatch = db.query(models.DispatchRecord).filter(
+                models.DispatchRecord.primary_order_id == order_uuid
+            ).first()
+        
+        # Format order data
+        order_data = {
+            "id": str(order.id),
+            "frontend_id": order.frontend_id,
+            "client": {
+                "company_name": order.client.company_name,
+                "contact_person": order.client.contact_person,
+                "address": order.client.address,
+                "phone": order.client.phone,
+                "email": order.client.email,
+                "gst_number": order.client.gst_number,
+            } if order.client else None,
+            "payment_type": order.payment_type,
+            "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+            "created_at": order.created_at.isoformat(),
+            "status": order.status,
+            "order_items": []
+        }
+        
+        # Add order items
+        for item in order.order_items or []:
+            order_data["order_items"].append({
+                "id": str(item.id),
+                "paper": {
+                    "name": item.paper.name if item.paper else None,
+                    "gsm": item.paper.gsm if item.paper else None,
+                    "bf": float(item.paper.bf) if item.paper and item.paper.bf else None,
+                    "shade": item.paper.shade if item.paper else None,
+                } if item.paper else None,
+                "width_inches": float(item.width_inches) if item.width_inches else None,
+                "quantity_rolls": item.quantity_rolls,
+                "rate": float(item.rate) if item.rate else None,
+                "amount": float(item.amount) if item.amount else None,
+                "quantity_kg": float(item.quantity_kg) if item.quantity_kg else None,
+            })
+        
+        # Format dispatch data if available
+        dispatch_info = None
+        if dispatch:
+            dispatch_info = {
+                "id": str(dispatch.id),
+                "frontend_id": dispatch.frontend_id,
+                "vehicle_number": dispatch.vehicle_number,
+                "driver_name": dispatch.driver_name,
+                "driver_mobile": dispatch.driver_mobile,
+                "dispatch_date": dispatch.dispatch_date.isoformat() if dispatch.dispatch_date else None,
+                "dispatch_number": dispatch.dispatch_number,
+                "reference_number": dispatch.reference_number,
+                "payment_type": dispatch.payment_type,
+                "created_at": dispatch.created_at.isoformat()
+            }
+        
+        return {
+            "status": "success",
+            "data": {
+                "order": order_data,
+                "dispatch": dispatch_info,
+                "has_dispatch_info": dispatch is not None
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting order with dispatch info: {e}")
         raise HTTPException(status_code=500, detail=str(e))

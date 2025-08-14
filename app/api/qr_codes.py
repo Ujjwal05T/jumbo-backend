@@ -123,8 +123,11 @@ def update_weight_via_qr(
         
         # STEP 4: When weight is added, find related order items and set them to "in_warehouse"
         # Find order items that match this cut roll's specifications
+        order_items = []  # Initialize to avoid scope issues
+        logger.info(f"🔍 Inventory item paper relationship: {matching_item.paper is not None}, weight: {matching_item.weight_kg}")
         if matching_item.paper and matching_item.weight_kg > 0.1:  # Real weight added
             paper = matching_item.paper
+            logger.info(f"🔍 Looking for order items with paper_id={paper.id}, width={matching_item.width_inches}")
             
             # Find order items with matching paper and width that are still "in_process"
             order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
@@ -134,30 +137,84 @@ def update_weight_via_qr(
                 models.OrderItem.item_status == "in_process"
             ).all()
             
-            # Update the first matching order item to "in_warehouse"
+            logger.info(f"🔍 Found {len(order_items)} matching order items in 'in_process' status")
+            
+            # Update the first matching order item with quantity fulfillment logic
             if order_items:
                 order_item = order_items[0]
-                order_item.item_status = "in_warehouse"
-                order_item.moved_to_warehouse_at = func.now()
-                logger.info(f"✅ Updated order item {order_item.id} item_status to 'in_warehouse' (Step 4: QR Weight Added)")
+                
+                # STEP 5: Increment quantity_fulfilled for first-time weight updates
+                if old_weight <= 0.1 and matching_item.weight_kg > 0.1:  # First time getting real weight
+                    if order_item.quantity_fulfilled < order_item.quantity_rolls:
+                        order_item.quantity_fulfilled += 1
+                        logger.info(f"📈 Incremented quantity_fulfilled for order item {order_item.id}: {order_item.quantity_fulfilled}/{order_item.quantity_rolls}")
+                        
+                        # Only change status when ALL required rolls are fulfilled
+                        if order_item.quantity_fulfilled >= order_item.quantity_rolls:
+                            order_item.item_status = "in_warehouse"
+                            order_item.moved_to_warehouse_at = func.now()
+                            logger.info(f"🏭 Order item {order_item.id} moved to 'in_warehouse' - ALL rolls fulfilled!")
+                        else:
+                            # Keep in "in_process" until all rolls are weighed
+                            logger.info(f"⏳ Order item {order_item.id} remains 'in_process' - needs {order_item.quantity_rolls - order_item.quantity_fulfilled} more rolls")
+                
+                logger.info(f"✅ Updated order item {order_item.id} - status: '{order_item.item_status}', fulfilled: {order_item.quantity_fulfilled}/{order_item.quantity_rolls}")
+                
+                # STEP 6: Check if entire order is now completed based on quantity fulfillment
+                order = order_item.order
+                if order and old_weight <= 0.1 and matching_item.weight_kg > 0.1:  # Only check on first-time weight update
+                    # Check if all order items are fully fulfilled by quantity (in "in_warehouse" status)
+                    all_items_fulfilled = all(
+                        oi.quantity_fulfilled >= oi.quantity_rolls 
+                        for oi in order.order_items
+                    )
+                    
+                    # Check if all order items are now in warehouse (ready for dispatch)
+                    all_items_in_warehouse = all(
+                        oi.item_status == "in_warehouse"
+                        for oi in order.order_items
+                    )
+                    
+                    if all_items_fulfilled and all_items_in_warehouse and order.status != "completed":
+                        order.status = "in_process"  # Keep as in_process until actually dispatched
+                        order.updated_at = func.now()
+                        logger.info(f"🏭 Order {order.id} - all items in warehouse, ready for dispatch!")
         
         db.commit()
         db.refresh(matching_item)
         
-        return {
+        # Build response with fulfillment information
+        response_data = {
             "inventory_id": str(matching_item.id),
             "qr_code": matching_item.qr_code,
             "barcode_id": matching_item.barcode_id,
             "weight_update": {
                 "old_weight_kg": float(old_weight),
                 "new_weight_kg": float(matching_item.weight_kg),
-                "weight_difference": float(matching_item.weight_kg - old_weight)
+                "weight_difference": float(matching_item.weight_kg - old_weight),
+                "is_first_time_weight": old_weight <= 0.1 and matching_item.weight_kg > 0.1
             },
             "current_status": matching_item.status,
             "current_location": matching_item.location,
             "updated_at": matching_item.created_at.isoformat(),
             "message": f"Weight updated successfully from {old_weight}kg to {matching_item.weight_kg}kg"
         }
+        
+        # Add fulfillment information if order items were updated
+        if matching_item.paper and matching_item.weight_kg > 0.1 and order_items:
+            order_item = order_items[0]
+            response_data["fulfillment_update"] = {
+                "order_item_id": str(order_item.id),
+                "order_id": str(order_item.order_id),
+                "quantity_fulfilled": order_item.quantity_fulfilled,
+                "quantity_required": order_item.quantity_rolls,
+                "item_status": order_item.item_status,
+                "is_item_completed": order_item.quantity_fulfilled >= order_item.quantity_rolls,
+                "order_status": order_item.order.status if order_item.order else None,
+                "is_order_completed": order_item.order.status == "completed" if order_item.order else False
+            }
+        
+        return response_data
         
     except HTTPException:
         raise
