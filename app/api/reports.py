@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, desc, and_, or_, text
+from sqlalchemy import func, desc, and_, or_, text, case
 from typing import Dict, List, Any, Optional
 import logging
 import uuid
@@ -35,7 +35,15 @@ def get_paper_wise_report(
             func.sum(models.OrderItem.quantity_rolls).label('total_quantity_rolls'),
             func.sum(models.OrderItem.quantity_kg).label('total_quantity_kg'),
             func.sum(models.OrderItem.amount).label('total_value'),
-            func.count(func.distinct(models.ClientMaster.id)).label('unique_clients')
+            func.count(func.distinct(models.ClientMaster.id)).label('unique_clients'),
+            # Order completion metrics
+            func.sum(case((models.OrderMaster.status == 'completed', 1), else_=0)).label('completed_orders'),
+            func.sum(case(
+                (and_(models.OrderItem.quantity_fulfilled > 0, 
+                      models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls), 1), 
+                else_=0
+            )).label('partially_completed_items'),
+            func.sum(models.OrderItem.quantity_fulfilled).label('total_quantity_fulfilled')
         ).select_from(
             models.PaperMaster
         ).join(
@@ -82,18 +90,30 @@ def get_paper_wise_report(
         # Format results
         paper_analysis = []
         for result in results:
+            total_orders = result.total_orders or 0
+            completed_orders = result.completed_orders or 0
+            total_quantity_rolls = result.total_quantity_rolls or 0
+            total_quantity_fulfilled = result.total_quantity_fulfilled or 0
+            
             paper_analysis.append({
                 "paper_name": result.paper_name,
                 "gsm": result.gsm,
                 "bf": float(result.bf) if result.bf else 0,
                 "shade": result.shade,
                 "paper_type": result.paper_type,
-                "total_orders": result.total_orders,
-                "total_quantity_rolls": result.total_quantity_rolls or 0,
+                "total_orders": total_orders,
+                "total_quantity_rolls": total_quantity_rolls,
                 "total_quantity_kg": float(result.total_quantity_kg) if result.total_quantity_kg else 0,
                 "total_value": float(result.total_value) if result.total_value else 0,
                 "unique_clients": result.unique_clients,
-                "avg_order_value": float(result.total_value / max(result.total_orders, 1)) if result.total_value else 0
+                "avg_order_value": float(result.total_value / max(total_orders, 1)) if result.total_value else 0,
+                # Completion metrics
+                "completed_orders": completed_orders,
+                "pending_orders": total_orders - completed_orders,
+                "completion_rate": float(completed_orders / max(total_orders, 1) * 100),
+                "total_quantity_fulfilled": total_quantity_fulfilled,
+                "fulfillment_rate": float(total_quantity_fulfilled / max(total_quantity_rolls, 1) * 100),
+                "partially_completed_items": result.partially_completed_items or 0
             })
         
         # Calculate summary
@@ -146,7 +166,15 @@ def get_client_wise_report(
             func.sum(models.OrderItem.amount).label('total_value'),
             func.count(func.distinct(models.PaperMaster.id)).label('unique_papers'),
             func.max(models.OrderMaster.created_at).label('last_order_date'),
-            func.min(models.OrderMaster.created_at).label('first_order_date')
+            func.min(models.OrderMaster.created_at).label('first_order_date'),
+            # Order completion metrics
+            func.sum(case((models.OrderMaster.status == 'completed', 1), else_=0)).label('completed_orders'),
+            func.sum(case(
+                (and_(models.OrderItem.quantity_fulfilled > 0, 
+                      models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls), 1), 
+                else_=0
+            )).label('partially_completed_items'),
+            func.sum(models.OrderItem.quantity_fulfilled).label('total_quantity_fulfilled')
         ).select_from(
             models.ClientMaster
         ).join(
@@ -192,19 +220,31 @@ def get_client_wise_report(
         # Format results
         client_analysis = []
         for result in results:
+            total_orders = result.total_orders or 0
+            completed_orders = result.completed_orders or 0
+            total_quantity_rolls = result.total_quantity_rolls or 0
+            total_quantity_fulfilled = result.total_quantity_fulfilled or 0
+            
             client_analysis.append({
                 "client_name": result.client_name,
                 "client_id": result.client_id,
                 "gst_number": result.gst_number,
                 "contact_person": result.contact_person,
-                "total_orders": result.total_orders,
-                "total_quantity_rolls": result.total_quantity_rolls or 0,
+                "total_orders": total_orders,
+                "total_quantity_rolls": total_quantity_rolls,
                 "total_quantity_kg": float(result.total_quantity_kg) if result.total_quantity_kg else 0,
                 "total_value": float(result.total_value) if result.total_value else 0,
                 "unique_papers": result.unique_papers,
-                "avg_order_value": float(result.total_value / max(result.total_orders, 1)) if result.total_value else 0,
+                "avg_order_value": float(result.total_value / max(total_orders, 1)) if result.total_value else 0,
                 "last_order_date": result.last_order_date.isoformat() if result.last_order_date else None,
-                "first_order_date": result.first_order_date.isoformat() if result.first_order_date else None
+                "first_order_date": result.first_order_date.isoformat() if result.first_order_date else None,
+                # Completion metrics
+                "completed_orders": completed_orders,
+                "pending_orders": total_orders - completed_orders,
+                "completion_rate": float(completed_orders / max(total_orders, 1) * 100),
+                "total_quantity_fulfilled": total_quantity_fulfilled,
+                "fulfillment_rate": float(total_quantity_fulfilled / max(total_quantity_rolls, 1) * 100),
+                "partially_completed_items": result.partially_completed_items or 0
             })
         
         # Calculate summary
@@ -284,7 +324,15 @@ def get_date_wise_report(
             func.sum(models.OrderItem.quantity_kg).label('total_quantity_kg'),
             func.sum(models.OrderItem.amount).label('total_value'),
             func.count(func.distinct(models.ClientMaster.id)).label('unique_clients'),
-            func.count(func.distinct(models.PaperMaster.id)).label('unique_papers')
+            func.count(func.distinct(models.PaperMaster.id)).label('unique_papers'),
+            # Order completion metrics
+            func.sum(case((models.OrderMaster.status == 'completed', 1), else_=0)).label('completed_orders'),
+            func.sum(case(
+                (and_(models.OrderItem.quantity_fulfilled > 0, 
+                      models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls), 1), 
+                else_=0
+            )).label('partially_completed_items'),
+            func.sum(models.OrderItem.quantity_fulfilled).label('total_quantity_fulfilled')
         ).select_from(
             models.OrderMaster
         ).join(
@@ -308,15 +356,27 @@ def get_date_wise_report(
         # Format results
         date_analysis = []
         for result in results:
+            total_orders = result.total_orders or 0
+            completed_orders = result.completed_orders or 0
+            total_quantity_rolls = result.total_quantity_rolls or 0
+            total_quantity_fulfilled = result.total_quantity_fulfilled or 0
+            
             date_analysis.append({
                 "date_period": result.date_period.isoformat() if result.date_period else None,
-                "total_orders": result.total_orders,
-                "total_quantity_rolls": result.total_quantity_rolls or 0,
+                "total_orders": total_orders,
+                "total_quantity_rolls": total_quantity_rolls,
                 "total_quantity_kg": float(result.total_quantity_kg) if result.total_quantity_kg else 0,
                 "total_value": float(result.total_value) if result.total_value else 0,
                 "unique_clients": result.unique_clients,
                 "unique_papers": result.unique_papers,
-                "avg_order_value": float(result.total_value / max(result.total_orders, 1)) if result.total_value else 0
+                "avg_order_value": float(result.total_value / max(total_orders, 1)) if result.total_value else 0,
+                # Completion metrics
+                "completed_orders": completed_orders,
+                "pending_orders": total_orders - completed_orders,
+                "completion_rate": float(completed_orders / max(total_orders, 1) * 100),
+                "total_quantity_fulfilled": total_quantity_fulfilled,
+                "fulfillment_rate": float(total_quantity_fulfilled / max(total_quantity_rolls, 1) * 100),
+                "partially_completed_items": result.partially_completed_items or 0
             })
         
         # Calculate summary and trends
@@ -394,7 +454,10 @@ def get_reports_summary(db: Session = Depends(get_db)):
             func.count(models.OrderMaster.id),
             func.sum(models.OrderItem.quantity_rolls),
             func.sum(models.OrderItem.quantity_kg),
-            func.sum(models.OrderItem.amount)
+            func.sum(models.OrderItem.amount),
+            # Completion metrics
+            func.sum(case((models.OrderMaster.status == 'completed', 1), else_=0)),
+            func.sum(models.OrderItem.quantity_fulfilled)
         ).join(
             models.OrderItem, models.OrderItem.order_id == models.OrderMaster.id
         ).first()
@@ -414,7 +477,13 @@ def get_reports_summary(db: Session = Depends(get_db)):
                     "total_orders": overall_totals[0] or 0,
                     "total_quantity_rolls": overall_totals[1] or 0,
                     "total_quantity_kg": float(overall_totals[2]) if overall_totals[2] else 0,
-                    "total_value": float(overall_totals[3]) if overall_totals[3] else 0
+                    "total_value": float(overall_totals[3]) if overall_totals[3] else 0,
+                    # Completion metrics
+                    "completed_orders": overall_totals[4] or 0,
+                    "pending_orders": (overall_totals[0] or 0) - (overall_totals[4] or 0),
+                    "total_quantity_fulfilled": overall_totals[5] or 0,
+                    "overall_completion_rate": float((overall_totals[4] or 0) / max(overall_totals[0] or 1, 1) * 100),
+                    "overall_fulfillment_rate": float((overall_totals[5] or 0) / max(overall_totals[1] or 1, 1) * 100)
                 }
             }
         }
