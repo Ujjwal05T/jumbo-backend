@@ -677,21 +677,20 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                                         logger.warning(f"⚠️ WARNING: quantity_in_pending ({original_order_item.quantity_in_pending}) < cut_rolls_to_resolve ({cut_rolls_to_resolve})")
                                         original_order_item.quantity_in_pending = max(0, original_order_item.quantity_in_pending - cut_rolls_to_resolve)
                                     
-                                    # Increment quantity_fulfilled by the number of cut rolls resolved
-                                    original_order_item.quantity_fulfilled += cut_rolls_to_resolve
-                                    logger.info(f"✅ INCREMENTED quantity_fulfilled by {cut_rolls_to_resolve}")
+                                    # NOTE: quantity_fulfilled will be incremented later during QR scanning
+                                    # Removed increment here to avoid double counting
                                     
                                     logger.info(f"🔍 CRITICAL RESULT - ORDER ITEM UPDATE: {original_order_item.frontend_id}")
                                     logger.info(f"  → AFTER UPDATE - quantity_in_pending: {old_in_pending} → {original_order_item.quantity_in_pending} (change: {original_order_item.quantity_in_pending - old_in_pending})")
-                                    logger.info(f"  → AFTER UPDATE - quantity_fulfilled: {old_fulfilled} → {original_order_item.quantity_fulfilled} (change: {original_order_item.quantity_fulfilled - old_fulfilled})")
+                                    logger.info(f"  → quantity_fulfilled unchanged: {original_order_item.quantity_fulfilled} (will be updated during QR scanning)")
                                     logger.info(f"  → AFTER UPDATE - remaining_quantity: {original_order_item.remaining_quantity}")
                                     
-                                    # Validate the update was successful
-                                    if original_order_item.quantity_fulfilled == old_fulfilled + cut_rolls_to_resolve:
-                                        logger.info(f"✅ VALIDATION SUCCESS: quantity_fulfilled updated correctly")
+                                    # Validate the pending quantity update was successful
+                                    if original_order_item.quantity_in_pending == old_in_pending - cut_rolls_to_resolve:
+                                        logger.info(f"✅ VALIDATION SUCCESS: quantity_in_pending updated correctly")
                                     else:
-                                        logger.error(f"❌ VALIDATION FAILED: quantity_fulfilled not updated correctly!")
-                                        logger.error(f"   Expected: {old_fulfilled + cut_rolls_to_resolve}, Got: {original_order_item.quantity_fulfilled}")
+                                        logger.error(f"❌ VALIDATION FAILED: quantity_in_pending not updated correctly!")
+                                        logger.error(f"   Expected: {old_in_pending - cut_rolls_to_resolve}, Got: {original_order_item.quantity_in_pending}")
                                         
                                     # Final critical check
                                     logger.info(f"🔍 FINAL CHECK: Is order item properly resolved?")
@@ -735,12 +734,12 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                                         logger.info(f"  → quantity_fulfilled in DB: {verification_order_item.quantity_fulfilled}")
                                         
                                         # Critical check: Are the changes actually persisted?
-                                        if (verification_order_item.quantity_fulfilled == old_fulfilled + cut_rolls_to_resolve and
+                                        if (verification_order_item.quantity_fulfilled == old_fulfilled and
                                             verification_order_item.quantity_in_pending == old_in_pending - cut_rolls_to_resolve):
                                             logger.info(f"✅ DATABASE PERSISTENCE VERIFIED: Order item changes saved to database")
                                         else:
                                             logger.error(f"❌ DATABASE PERSISTENCE FAILED: Order item changes NOT saved to database!")
-                                            logger.error(f"   Expected fulfilled: {old_fulfilled + cut_rolls_to_resolve}, Got: {verification_order_item.quantity_fulfilled}")
+                                            logger.error(f"   Expected fulfilled (unchanged): {old_fulfilled}, Got: {verification_order_item.quantity_fulfilled}")
                                             logger.error(f"   Expected in_pending: {old_in_pending - cut_rolls_to_resolve}, Got: {verification_order_item.quantity_in_pending}")
                                     else:
                                         logger.error(f"❌ VERIFICATION FAILED: Could not re-query order item from DB!")
