@@ -66,44 +66,30 @@ def get_consolidation_opportunities(db: Session = Depends(get_db)):
         logger.error(f"Error getting consolidation opportunities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/pending-order-items/optimize-preview", tags=["Pending Order Items"])
-def optimize_pending_orders_preview(db: Session = Depends(get_db)):
-    """
-    Run optimization on all pending orders to preview possible solutions.
-    Returns remaining pending orders, roll combinations, and roll suggestions.
-    No data is saved to database unless user accepts specific combinations.
-    """
-    try:
-        from ..services.pending_optimizer import PendingOptimizer
-        optimizer = PendingOptimizer(db=db)
-        return optimizer.preview_optimization()
-    except Exception as e:
-        logger.error(f"Error in pending order optimization preview: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/pending-order-items/accept-combinations", tags=["Pending Order Items"])
-def accept_pending_combinations(
-    combinations: List[Dict[str, Any]],
+@router.post("/pending-order-items/roll-suggestions", tags=["Pending Order Items"])
+def get_roll_suggestions(
+    request_data: Dict[str, Any],
     db: Session = Depends(get_db)
 ):
     """
-    Accept selected roll combinations from optimization preview.
-    Creates a new plan with selected combinations and marks relevant pending orders as resolved.
-    Machine constraint: Only multiples of 3 combinations allowed (1 jumbo = 3 x 118" rolls).
+    Generate roll suggestions for completing target width rolls based on pending orders.
+    Takes wastage parameter to calculate dynamic target width (119 - wastage).
+    Returns suggestions showing existing width + needed width = target width.
     """
     try:
-        # Validate multiple of 3 constraint (machine limitation)
-        if len(combinations) % 3 != 0:
+        wastage = request_data.get('wastage', 0)
+        
+        if not isinstance(wastage, (int, float)) or wastage < 0:
             raise HTTPException(
-                status_code=400, 
-                detail="Only multiple of 3 roll combinations can be selected. Machine creates 1 jumbo roll = 3 x 118 inch rolls."
+                status_code=400,
+                detail="Wastage must be a non-negative number"
             )
         
         from ..services.pending_optimizer import PendingOptimizer
         optimizer = PendingOptimizer(db=db)
-        return optimizer.accept_combinations(combinations)
+        return optimizer.get_roll_suggestions(wastage)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error accepting pending combinations: {e}")
+        logger.error(f"Error generating roll suggestions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
