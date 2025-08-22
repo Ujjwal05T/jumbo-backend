@@ -265,6 +265,7 @@ class PendingOrderItem(Base):
     # Plan generation tracking fields (kept for database compatibility)
     generated_cut_rolls_count = Column(Integer, default=0, nullable=False)  # How many cut rolls were generated from this pending order?
     plan_generation_date = Column(DateTime, nullable=True)  # When was this included in plan generation?
+    included_in_plan_generation = Column(Boolean, default=False, nullable=False)  # Whether this was included in plan generation
     
     @property
     def status(self):

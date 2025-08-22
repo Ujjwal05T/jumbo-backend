@@ -414,6 +414,22 @@ class PlanMaster(PlanMasterBase):
     class Config:
         from_attributes = True
 
+# Plan Order Item Schema
+class PlanOrderItem(BaseModel):
+    """Schema for order items linked to a plan with estimated weights"""
+    id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable order item ID (e.g., ORI-001)")
+    order_id: UUID
+    width_inches: float
+    quantity_rolls: int
+    estimated_weight_kg: float = Field(..., description="Estimated weight based on paper specs")
+    gsm: int
+    bf: float
+    shade: str
+    
+    class Config:
+        from_attributes = True
+
 # Production Order Master Schemas
 class ProductionOrderMasterBase(BaseModel):
     paper_id: UUID

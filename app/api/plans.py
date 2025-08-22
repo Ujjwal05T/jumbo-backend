@@ -195,3 +195,50 @@ def start_production(
     except Exception as e:
         logger.error(f"Error starting production: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/plans/{plan_id}/order-items", response_model=List[schemas.PlanOrderItem], tags=["Plan Master"])
+def get_plan_order_items(plan_id: UUID, db: Session = Depends(get_db)):
+    """Get order items linked to a plan with estimated weights"""
+    try:
+        from .. import models
+        from sqlalchemy.orm import joinedload
+        
+        # Get the plan
+        plan = db.query(models.PlanMaster).filter(models.PlanMaster.id == plan_id).first()
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # Get order items linked to this plan via plan_order_link
+        order_items = db.query(models.OrderItem).join(
+            models.PlanOrderLink, models.OrderItem.order_id == models.PlanOrderLink.order_id
+        ).filter(
+            models.PlanOrderLink.plan_id == plan_id
+        ).options(
+            joinedload(models.OrderItem.paper)
+        ).all()
+        
+        # Calculate estimated weight for each order item
+        result = []
+        for item in order_items:
+            # Get paper specifications
+            paper = item.paper
+            estimated_weight = item.quantity_rolls * 13 * item.width_inches
+            
+            result.append({
+                "id": item.id,
+                "frontend_id": item.frontend_id,
+                "order_id": item.order_id,
+                "width_inches": float(item.width_inches),
+                "quantity_rolls": item.quantity_rolls,
+                "estimated_weight_kg": round(estimated_weight, 2),
+                "gsm": paper.gsm,
+                "bf": float(paper.bf),
+                "shade": paper.shade
+            })
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting plan order items: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
