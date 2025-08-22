@@ -36,6 +36,10 @@ class WorkflowManager:
         try:
             logger.info(f"CALCULATION MODE: Processing {len(order_ids)} orders (read-only)")
             
+            # Store order requirements for later use in pending order creation
+            self.processed_order_requirements = crud_operations.get_orders_with_paper_specs(self.db, order_ids)
+            logger.info(f"STORED: {len(self.processed_order_requirements)} order requirements for pending order tracking")
+            
             # Use calculation service for read-only operations
             result = self.calculation_service.calculate_plan_for_orders(
                 order_ids=order_ids,
@@ -216,13 +220,20 @@ class WorkflowManager:
                     original_order_id = None
                     paper_id = None
                     
-                    # Match with order requirements to get original order ID
-                    for req in self.processed_order_requirements:
-                        if (req.get('gsm') == pending_order_data.get('gsm') and
-                            req.get('bf') == pending_order_data.get('bf') and 
-                            req.get('shade') == pending_order_data.get('shade')):
-                            original_order_id = req['order_id']
-                            break
+                    # FIXED: Use source tracking from algorithm instead of paper spec matching
+                    if pending_order_data.get('source_order_id'):
+                        original_order_id = pending_order_data.get('source_order_id')
+                        logger.info(f"🎯 PENDING SOURCE: Using source_order_id from algorithm: {str(original_order_id)[:8]}...")
+                    else:
+                        # Fallback: Match with order requirements to get original order ID (old logic)
+                        logger.warning(f"⚠️ PENDING FALLBACK: No source_order_id, using paper spec matching")
+                        for req in self.processed_order_requirements:
+                            if (req.get('gsm') == pending_order_data.get('gsm') and
+                                req.get('bf') == pending_order_data.get('bf') and 
+                                req.get('shade') == pending_order_data.get('shade')):
+                                original_order_id = req['order_id']
+                                logger.warning(f"⚠️ PENDING FALLBACK: Matched to order {str(original_order_id)[:8]}... via paper specs")
+                                break
                     
                     if original_order_id:
                         # Convert string UUID to UUID object if needed
@@ -288,7 +299,14 @@ class WorkflowManager:
                                 logger.warning(f"❌   Item ID: {item.id}, width: {item.width_inches}, paper GSM: {item.paper.gsm if item.paper else 'None'}, BF: {item.paper.bf if item.paper else 'None'}, shade: {item.paper.shade if item.paper else 'None'}")
                             logger.warning(f"Could not find matching order item to track pending quantity for pending order {pending_order.frontend_id}")
                         
-                        logger.info(f"Created PHASE 1 pending order: {pending_order_data['quantity']} rolls of {pending_order_data['width']}\" {pending_order_data['shade']} paper (algorithm limitation)")
+                        # Log the client attribution for verification
+                        client_info = "Unknown"
+                        if original_order_id:
+                            matching_req = next((req for req in self.processed_order_requirements if req['order_id'] == str(original_order_id)), None)
+                            if matching_req:
+                                client_info = f"{matching_req.get('client_name', 'Unknown')} (ID: {matching_req.get('client_id', 'Unknown')[:8]}...)"
+                        
+                        logger.info(f"Created PHASE 1 pending order: {pending_order_data['quantity']} rolls of {pending_order_data['width']}\" {pending_order_data['shade']} paper → Client: {client_info} (algorithm limitation)")  
                         
                     else:
                         logger.warning(f"Could not find original order for pending requirement: {pending_order_data}")

@@ -429,13 +429,19 @@ class CuttingOptimizer:
                     
                     if pending_qty_to_create > 0:
                         logger.info(f"🔍 Creating pending order: {width}\" x{pending_qty_to_create} (from regular orders only)")
+                        
+                        # Find source order for this pending requirement
+                        source_order_info = self._find_source_order_for_pending(width, spec_key, spec_groups)
+                        
                         new_pending_orders.append({
                             'width': width,
                             'quantity': pending_qty_to_create,
                             'gsm': spec['gsm'],
                             'bf': spec['bf'],
                             'shade': spec['shade'],
-                            'reason': 'waste_too_high'
+                            'reason': 'waste_too_high',
+                            'source_order_id': source_order_info.get('order_id'),
+                            'source_type': 'regular_order'
                         })
                     else:
                         logger.info(f"🔍 SKIPPING pending order creation: {width}\" x{qty} (all from existing pending orders - no duplication)")
@@ -608,6 +614,34 @@ class CuttingOptimizer:
             'source_order_id': None,
             'source_pending_id': None
         }
+
+    def _find_source_order_for_pending(self, width: float, spec_key: tuple, spec_groups: Dict) -> Dict:
+        """
+        Find the source order for a pending requirement to maintain client attribution.
+        Uses the source tracking data to identify which order this pending requirement should be attributed to.
+        """
+        try:
+            if spec_key in spec_groups and 'source_tracking' in spec_groups[spec_key]:
+                source_tracking = spec_groups[spec_key]['source_tracking']
+                
+                if width in source_tracking and source_tracking[width]:
+                    # Prioritize regular orders for pending order creation
+                    regular_sources = [s for s in source_tracking[width] if s.get('source_type') == 'regular_order']
+                    if regular_sources:
+                        # Return the first regular order source (could be enhanced to distribute proportionally)
+                        source = regular_sources[0]
+                        logger.debug(f"🎯 PENDING SOURCE: Found source order {str(source.get('source_order_id', 'None')[:8])}... for {width}\" pending requirement")
+                        return {
+                            'order_id': source.get('source_order_id'),
+                            'source_type': 'regular_order'
+                        }
+            
+            logger.warning(f"⚠️ PENDING SOURCE: No source tracking found for {width}\" pending requirement")
+            return {'order_id': None, 'source_type': 'regular_order'}
+            
+        except Exception as e:
+            logger.error(f"❌ Error finding source order for pending: {e}")
+            return {'order_id': None, 'source_type': 'regular_order'}
 
     def create_plan_from_orders(
         self,
