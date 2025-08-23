@@ -48,7 +48,11 @@ class PendingOrderStatus(str, PyEnum):
     PENDING = "pending"
     INCLUDED_IN_PLAN = "included_in_plan"
     RESOLVED = "resolved"
-    CANCELLED = "cancelled"
+
+class WastageStatus(str, PyEnum):
+    AVAILABLE = "available"
+    USED = "used"
+    DAMAGED = "damaged"
 
 class RollType(str, PyEnum):
     JUMBO = "jumbo"
@@ -546,6 +550,46 @@ class DispatchItem(Base):
     inventory = relationship("InventoryMaster")
 
 
+class WastageInventory(Base):
+    """
+    Wastage inventory for tracking waste material (9-21 inches)
+    Generated during production when trim/waste is between 9-21 inches
+    """
+    __tablename__ = "wastage_inventory"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # WS-00001, WS-00002, etc.
+    barcode_id = Column(String(50), unique=True, nullable=True, index=True)   # WSB-00001, WSB-00002, etc.
+    
+    # Wastage details
+    width_inches = Column(Numeric(6, 2), nullable=False)  # Width of the waste material
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    weight_kg = Column(Numeric(8, 2), default=0.0)  # Weight will be set via QR scan
+    
+    # Source information
+    source_plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=True, index=True)
+    source_jumbo_roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=True, index=True)
+    individual_roll_number = Column(Integer, nullable=True)  # Which 118" roll this waste came from
+    
+    # Status and tracking
+    status = Column(String(50), default=WastageStatus.AVAILABLE.value, nullable=False)
+    location = Column(String(255), default="WASTE_STORAGE", nullable=True)
+    
+    # Audit fields
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Notes for special handling
+    notes = Column(Text, nullable=True)
+    
+    # Relationships
+    paper = relationship("PaperMaster")
+    source_plan = relationship("PlanMaster")
+    source_jumbo_roll = relationship("InventoryMaster", foreign_keys=[source_jumbo_roll_id])
+    created_by = relationship("UserMaster")
+
+
 # ============================================================================
 # FRONTEND ID GENERATION - Auto-generate human-readable IDs on record creation
 # ============================================================================
@@ -586,7 +630,8 @@ models_with_frontend_id = [
     PlanOrderLink,
     PlanInventoryLink,
     DispatchRecord,
-    DispatchItem
+    DispatchItem,
+    WastageInventory
 ]
 
 for model in models_with_frontend_id:

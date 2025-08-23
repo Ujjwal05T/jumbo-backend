@@ -780,10 +780,23 @@ class SelectedCutRoll(BaseModel):
     source_type: Optional[str] = Field(None, description="Source type: 'regular_order' or 'pending_order'")
     source_pending_id: Optional[str] = Field(None, description="ID of source pending order if applicable")
 
+class WastageData(BaseModel):
+    """Wastage data for tracking waste material (9-21 inches)"""
+    width_inches: float = Field(..., ge=9, le=21, description="Width of waste material in inches")
+    paper_id: str = Field(..., description="Paper master ID")
+    gsm: int = Field(..., ge=50, le=500, description="Paper GSM")
+    bf: float = Field(..., ge=10, le=50, description="Paper BF")
+    shade: str = Field(..., description="Paper shade")
+    individual_roll_number: Optional[int] = Field(None, description="Source 118 roll number")
+    source_plan_id: str = Field(..., description="Source plan ID")
+    source_jumbo_roll_id: Optional[str] = Field(None, description="Source jumbo roll ID")
+    notes: Optional[str] = Field(None, description="Additional notes")
+
 class StartProductionRequest(BaseModel):
     """Request to start production with comprehensive roll handling"""
     selected_cut_rolls: List[SelectedCutRoll] = Field(..., min_items=1, description="Cut rolls selected for production")
     all_available_cuts: List[SelectedCutRoll] = Field(..., description="All cuts that were available for selection")
+    wastage_data: List[WastageData] = Field(default=[], description="Wastage data for 9-21 inch waste")
     created_by_id: str = Field(..., description="ID of user starting production")
     jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Dynamic jumbo roll width in inches")
 
@@ -816,4 +829,52 @@ class StartProductionResponse(BaseModel):
     details: Dict[str, List[str]]
     created_inventory_details: List[InventoryDetail] = Field(default_factory=list)
     message: str
+
+# ============================================================================
+# WASTAGE INVENTORY SCHEMAS
+# ============================================================================
+
+class WastageInventory(BaseModel):
+    """Schema for wastage inventory item"""
+    id: UUID
+    frontend_id: Optional[str] = Field(None, description="Human-readable wastage ID (e.g., WS-00001)")
+    barcode_id: Optional[str] = Field(None, description="Barcode ID (e.g., WSB-00001)")
+    
+    # Wastage details
+    width_inches: float = Field(..., description="Width of waste material in inches")
+    paper_id: UUID = Field(..., description="Paper master ID")
+    weight_kg: float = Field(default=0.0, description="Weight in kg")
+    
+    # Source information
+    source_plan_id: Optional[UUID] = Field(None, description="Source plan ID")
+    source_jumbo_roll_id: Optional[UUID] = Field(None, description="Source jumbo roll ID")
+    individual_roll_number: Optional[int] = Field(None, description="Source 118 roll number")
+    
+    # Status and tracking
+    status: str = Field(default="available", description="Status: available, used, damaged")
+    location: Optional[str] = Field(None, description="Storage location")
+    
+    # Audit fields
+    created_at: datetime
+    created_by_id: Optional[UUID] = Field(None, description="Creator user ID")
+    updated_at: Optional[datetime] = Field(None, description="Last update time")
+    
+    # Notes
+    notes: Optional[str] = Field(None, description="Additional notes")
+    
+    # Relationships (optional, loaded when needed)
+    paper: Optional[PaperMaster] = None
+    created_by: Optional[UserMaster] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class PaginatedWastageResponse(BaseModel):
+    """Paginated response for wastage inventory"""
+    items: List[WastageInventory]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
 

@@ -96,6 +96,11 @@ class FrontendIDGenerator:
             "prefix": "DSI",
             "pattern": "{prefix}-{counter:05d}",
             "description": "Dispatch Item IDs (DSI-00001, DSI-00002, etc.)"
+        },
+        "wastage_inventory": {
+            "prefix": "WS",
+            "pattern": "{prefix}-{counter:05d}",
+            "description": "Wastage Inventory IDs (WS-00001, WS-00002, etc.)"
         }
     }
     

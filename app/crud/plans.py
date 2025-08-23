@@ -856,6 +856,106 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         db.flush()  # Ensure PHASE 2 pending orders are saved
         logger.info(f"✅ PHASE 2 COMPLETE: Created {len(created_pending_from_unselected)} pending orders from unselected cut rolls")
         
+        # WASTAGE PROCESSING: Handle wastage data for 9-21 inch waste materials
+        created_wastage = []
+        wastage_data = request_data.get("wastage_data", [])
+        logger.info(f"🗑️ WASTAGE PROCESSING: Processing {len(wastage_data)} wastage items")
+        
+        for i, wastage_item in enumerate(wastage_data):
+            try:
+                # Validate wastage width is in acceptable range (9-21 inches)
+                width = float(wastage_item.get("width_inches", 0))
+                if not (9 <= width <= 21):
+                    logger.warning(f"⚠️ WASTAGE SKIP: Item {i+1} width {width}\" outside 9-21\" range")
+                    continue
+                
+                # Generate wastage IDs using the new generators
+                from ..services.barcode_generator import BarcodeGenerator
+                wastage_barcode_id = BarcodeGenerator.generate_wastage_barcode(db)
+                
+                # Find paper record for wastage
+                import uuid
+                received_paper_id = wastage_item.get("paper_id")
+                logger.info(f"🔍 WASTAGE DEBUG: Received paper_id for item {i+1}: '{received_paper_id}' (type: {type(received_paper_id)})")
+                
+                paper_record = None
+                paper_id = None
+                
+                # Try to use provided paper_id first
+                if received_paper_id and received_paper_id.strip():
+                    try:
+                        paper_id = uuid.UUID(received_paper_id)
+                        paper_record = db.query(models.PaperMaster).filter(models.PaperMaster.id == paper_id).first()
+                        if paper_record:
+                            logger.info(f"✅ WASTAGE DEBUG: Found paper by provided paper_id: {paper_id}")
+                        else:
+                            logger.warning(f"⚠️ WASTAGE DEBUG: Paper_id provided but record not found: {paper_id}")
+                            paper_id = None
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"⚠️ WASTAGE DEBUG: Invalid paper_id format, will lookup by specs: '{received_paper_id}' - Error: {e}")
+                
+                # If no valid paper_id or paper not found, find it by GSM/BF/Shade specifications
+                if not paper_record:
+                    gsm = wastage_item.get('gsm')
+                    bf = wastage_item.get('bf') 
+                    shade = wastage_item.get('shade')
+                    logger.info(f"🔍 WASTAGE DEBUG: Looking up paper by specs: GSM={gsm}, BF={bf}, Shade='{shade}'")
+                    
+                    paper_record = db.query(models.PaperMaster).filter(
+                        models.PaperMaster.gsm == gsm,
+                        models.PaperMaster.bf == bf,
+                        models.PaperMaster.shade == shade
+                    ).first()
+                    
+                    if paper_record:
+                        paper_id = paper_record.id
+                        logger.info(f"✅ WASTAGE DEBUG: Found paper by specs: {paper_id} (GSM={gsm}, BF={bf}, Shade='{shade}')")
+                    else:
+                        logger.error(f"❌ WASTAGE ERROR: No paper found for specs: GSM={gsm}, BF={bf}, Shade='{shade}'")
+                        continue
+                
+                # Find source plan and jumbo roll if provided
+                source_plan_id = None
+                source_jumbo_roll_id = None
+                
+                try:
+                    source_plan_id = uuid.UUID(wastage_item.get("source_plan_id"))
+                except (ValueError, TypeError):
+                    logger.warning(f"⚠️ WASTAGE: Invalid source_plan_id for wastage item {i+1}")
+                
+                if wastage_item.get("source_jumbo_roll_id"):
+                    try:
+                        source_jumbo_roll_id = uuid.UUID(wastage_item.get("source_jumbo_roll_id"))
+                    except (ValueError, TypeError):
+                        logger.warning(f"⚠️ WASTAGE: Invalid source_jumbo_roll_id for wastage item {i+1}")
+                
+                # Create wastage inventory record
+                wastage_inventory = models.WastageInventory(
+                    width_inches=width,
+                    paper_id=paper_id,
+                    weight_kg=0.0,  # Will be set via QR scan later
+                    source_plan_id=source_plan_id,
+                    source_jumbo_roll_id=source_jumbo_roll_id,
+                    individual_roll_number=wastage_item.get("individual_roll_number"),
+                    status=models.WastageStatus.AVAILABLE.value,
+                    location="WASTE_STORAGE",
+                    notes=wastage_item.get("notes"),
+                    created_by_id=uuid.UUID(request_data.get("created_by_id")) if request_data.get("created_by_id") else None,
+                    barcode_id=wastage_barcode_id
+                )
+                
+                db.add(wastage_inventory)
+                db.flush()  # Get the ID and frontend_id
+                created_wastage.append(wastage_inventory)
+                
+                logger.info(f"🗑️ WASTAGE CREATED: {wastage_inventory.frontend_id} - {width}\" {paper_record.shade} paper (Barcode: {wastage_barcode_id})")
+                
+            except Exception as e:
+                logger.error(f"❌ WASTAGE ERROR: Failed to create wastage item {i+1}: {e}")
+                continue
+        
+        logger.info(f"✅ WASTAGE COMPLETE: Created {len(created_wastage)} wastage inventory items")
+        
         db.commit()
         db.refresh(db_plan)
         
@@ -870,7 +970,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "inventory_created": len(created_inventory),
                 "pending_orders_created_phase2": len(created_pending_from_unselected),
                 "jumbo_rolls_created": len(created_jumbo_rolls),
-                "intermediate_118_rolls_created": len(created_118_rolls)
+                "intermediate_118_rolls_created": len(created_118_rolls),
+                "wastage_items_created": len(created_wastage)
             },
             "details": {
                 "updated_orders": updated_orders,
@@ -878,7 +979,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "updated_pending_orders": updated_pending_orders,  # Use the expected field name
                 "created_inventory": [str(inv.id) for inv in created_inventory],
                 "created_jumbo_rolls": [str(jr.id) for jr in created_jumbo_rolls],
-                "created_118_rolls": [str(r118.id) for r118 in created_118_rolls]
+                "created_118_rolls": [str(r118.id) for r118 in created_118_rolls],
+                "created_wastage": [str(w.id) for w in created_wastage]
             },
             "created_inventory_details": [
                 {
@@ -891,7 +993,20 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     "created_at": inv.created_at.isoformat() if inv.created_at else None
                 } for inv in created_inventory
             ],
-            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
+            "created_wastage_details": [
+                {
+                    "id": str(w.id),
+                    "frontend_id": w.frontend_id,
+                    "barcode_id": w.barcode_id,
+                    "width_inches": float(w.width_inches),
+                    "paper_id": str(w.paper_id),
+                    "status": w.status,
+                    "location": w.location,
+                    "notes": w.notes,
+                    "created_at": w.created_at.isoformat() if w.created_at else None
+                } for w in created_wastage
+            ],
+            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_wastage)} wastage items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
         }
 
 

@@ -103,13 +103,57 @@ class BarcodeGenerator:
             return fallback_id
     
     @staticmethod
+    def generate_wastage_barcode(db: Session) -> str:
+        """
+        Generate barcode for wastage inventory in WSB-00001 format.
+        
+        Args:
+            db: Database session
+            
+        Returns:
+            str: Next wastage barcode ID like WSB-00001, WSB-00002, etc.
+        """
+        try:
+            # Get the highest existing wastage barcode number
+            result = db.query(func.max(models.WastageInventory.barcode_id)).filter(
+                models.WastageInventory.barcode_id.like('WSB-%')
+            ).scalar()
+            
+            if result is None:
+                next_number = 1
+            else:
+                try:
+                    if result and result.startswith('WSB-'):
+                        current_number = int(result[4:])  # Remove 'WSB-' prefix
+                        next_number = current_number + 1
+                    else:
+                        next_number = 1
+                except (ValueError, AttributeError):
+                    logger.warning(f"Invalid wastage barcode format: {result}")
+                    next_number = 1
+            
+            # Format as WSB-00001 (5 digits with leading zeros)
+            barcode_id = f"WSB-{next_number:05d}"
+            
+            logger.info(f"Generated wastage barcode: {barcode_id}")
+            return barcode_id
+            
+        except Exception as e:
+            logger.error(f"Error generating wastage barcode: {e}")
+            # Fallback to timestamp-based ID
+            import time
+            fallback_id = f"WSB-{int(time.time())}"
+            logger.warning(f"Using fallback wastage barcode: {fallback_id}")
+            return fallback_id
+    
+    @staticmethod
     def validate_barcode_format(barcode_id: str, barcode_type: str = "cut_roll") -> bool:
         """
         Validate barcode format.
         
         Args:
             barcode_id: Barcode to validate
-            barcode_type: Type - "cut_roll", "inventory", or "jumbo"
+            barcode_type: Type - "cut_roll", "inventory", "jumbo", or "wastage"
             
         Returns:
             bool: True if valid format
@@ -124,6 +168,8 @@ class BarcodeGenerator:
                 return barcode_id.startswith("INV_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             elif barcode_type == "jumbo":
                 return barcode_id.startswith("JMB_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+            elif barcode_type == "wastage":
+                return barcode_id.startswith("WSB-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             else:
                 return False
         except:
