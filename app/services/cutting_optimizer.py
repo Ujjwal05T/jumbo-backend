@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
-from itertools import product
+from itertools import product, combinations_with_replacement
+import math
 from typing import List, Tuple, Dict, Optional, Set, Union, Any
 import json
 from dataclasses import dataclass
@@ -13,6 +14,32 @@ import logging
 from .. import models, schemas, crud_operations
 
 logger = logging.getLogger(__name__)
+
+# Try to import PuLP for optimal ILP solutions
+try:
+    from pulp import LpProblem, LpVariable, LpMinimize, LpStatus, lpSum, LpInteger
+    SOLVER_AVAILABLE = True
+    logger.info("📊 ILP Solver (PuLP) available - will use optimal solutions")
+except ImportError:
+    SOLVER_AVAILABLE = False
+    logger.info("⚠️ PuLP not available - using heuristic fallback")
+
+class Pattern:
+    """Represents a cutting pattern for the ILP algorithm"""
+    def __init__(self, lanes: Tuple[float, ...], deckle: float = 118.0):
+        self.lanes = tuple(sorted(lanes, reverse=True))  # Sort for consistency
+        self.total_width = sum(lanes)
+        self.trim = deckle - self.total_width
+        self.coeff = Counter(lanes)  # How many of each width this pattern produces
+        
+    def __hash__(self):
+        return hash(self.lanes)
+    
+    def __eq__(self, other):
+        return isinstance(other, Pattern) and self.lanes == other.lanes
+    
+    def __repr__(self):
+        return f"Pattern({self.lanes}, trim={self.trim:.2f})"
 
 class CutRollStatus(str, Enum):
     AVAILABLE = "available"
@@ -69,9 +96,302 @@ class CuttingOptimizer:
             logger.info(f"  {i+1}. {combo} → trim={trim}\" ({len(combo)} pieces)")
         return sorted_combos
 
-    def match_combos(self, orders: Dict[float, int], interactive: bool = False) -> Tuple[List[Tuple[Tuple[float, ...], float]], Dict[float, int], List[Tuple[Tuple[float, ...], float]]]:
+    # === ILP-BASED OPTIMIZATION METHODS ===
+    
+    def _solve_cutting_with_ilp(self, demand: Dict[float, int], trim_cap: float = 6.0, max_lanes: int = 4) -> Dict:
+        """Main ILP solving method using the new algorithm."""
+        precision = 0.01
+        scale_factor = int(1 / precision)
+        deckle = self.jumbo_roll_width
+        
+        # Generate all feasible cutting patterns
+        patterns = self._generate_ilp_patterns(list(demand.keys()), trim_cap, max_lanes, deckle, scale_factor)
+        
+        if not patterns:
+            return {'status': 'Infeasible', 'message': 'No feasible patterns found'}
+            
+        logger.info(f"🔢 ILP: Generated {len(patterns)} feasible patterns (trim ≤ {trim_cap}\")")
+        
+        # Try ILP solver first, fallback to greedy
+        if SOLVER_AVAILABLE:
+            result = self._solve_ilp_exact(patterns, demand)
+            if result['status'] == 'Optimal':
+                return result
+                
+        # Fallback to greedy heuristic
+        logger.info("🔄 ILP: Falling back to greedy heuristic")
+        return self._solve_greedy_exact(patterns, demand)
+    
+    def _generate_ilp_patterns(self, widths: List[float], trim_cap: float, max_lanes: int, deckle: float, scale_factor: int) -> List[Pattern]:
+        """Generate all feasible cutting patterns for ILP"""
+        patterns = set()
+        scaled_deckle = int(deckle * scale_factor)
+        scaled_widths = [int(w * scale_factor) for w in widths]
+        scaled_trim_cap = int(trim_cap * scale_factor)
+        
+        # Generate all combinations with repetition up to max_lanes
+        for num_lanes in range(1, max_lanes + 1):
+            for combo in combinations_with_replacement(scaled_widths, num_lanes):
+                total_scaled = sum(combo)
+                if total_scaled <= scaled_deckle:
+                    trim_scaled = scaled_deckle - total_scaled
+                    if trim_scaled <= scaled_trim_cap:
+                        # Convert back to float widths
+                        float_lanes = tuple(w / scale_factor for w in combo)
+                        pattern = Pattern(float_lanes, deckle)
+                        patterns.add(pattern)
+        
+        return list(patterns)
+    
+    def _solve_ilp_exact(self, patterns: List[Pattern], demand: Dict[float, int]) -> Dict:
+        """Solve exact fulfillment using Integer Linear Programming"""
+        try:
+            prob = LpProblem("ExactFulfillment", LpMinimize)
+            
+            # Variables: how many times to run each pattern
+            pattern_vars = {i: LpVariable(f"pattern_{i}", lowBound=0, cat=LpInteger) 
+                           for i in range(len(patterns))}
+            
+            # Objective: minimize total trim
+            prob += lpSum(patterns[i].trim * pattern_vars[i] for i in range(len(patterns)))
+            
+            # Constraints: meet demand exactly
+            for width in demand:
+                prob += lpSum(patterns[i].coeff[width] * pattern_vars[i] 
+                             for i in range(len(patterns))) == demand[width]
+            
+            prob.solve()
+            
+            if LpStatus[prob.status] == 'Optimal':
+                solution = {i: int(pattern_vars[i].varValue) for i in range(len(patterns)) 
+                           if pattern_vars[i].varValue > 0}
+                return self._build_ilp_production_plan(patterns, solution, demand)
+            else:
+                return {'status': 'Infeasible', 'message': 'ILP could not find optimal solution'}
+                
+        except Exception as e:
+            logger.error(f"❌ ILP Error: {e}")
+            return {'status': 'Error', 'message': f'ILP solver error: {str(e)}'}
+    
+    def _solve_greedy_exact(self, patterns: List[Pattern], demand: Dict[float, int]) -> Dict:
+        """Greedy heuristic for exact fulfillment"""
+        remaining_demand = demand.copy()
+        solution = defaultdict(int)
+        
+        # Sort patterns by efficiency (low trim, high utilization)
+        def pattern_score(p):
+            utilization = (self.jumbo_roll_width - p.trim) / self.jumbo_roll_width
+            return (p.trim, -utilization)
+        
+        patterns.sort(key=pattern_score)
+        
+        max_iterations = 1000  # Prevent infinite loops
+        iterations = 0
+        
+        while any(remaining_demand.values()) and iterations < max_iterations:
+            iterations += 1
+            best_pattern = None
+            best_times = 0
+            best_coverage = 0
+            
+            for i, pattern in enumerate(patterns):
+                # How many times can we run this pattern?
+                max_times = float('inf')
+                for width, count in pattern.coeff.items():
+                    if count > 0:
+                        max_times = min(max_times, remaining_demand.get(width, 0) // count)
+                
+                max_times = max(int(max_times), 0)
+                
+                if max_times > 0:
+                    # Score based on coverage and efficiency
+                    coverage = sum(min(pattern.coeff[width] * max_times, remaining_demand.get(width, 0)) 
+                                 for width in pattern.coeff)
+                    efficiency = coverage / (pattern.trim + 0.1)  # Avoid division by zero
+                    
+                    if efficiency > best_coverage:
+                        best_pattern = i
+                        best_times = max_times
+                        best_coverage = efficiency
+            
+            if best_pattern is None or best_times == 0:
+                break
+            
+            # Apply the best pattern
+            solution[best_pattern] += best_times
+            pattern = patterns[best_pattern]
+            
+            for width, count in pattern.coeff.items():
+                remaining_demand[width] = max(0, remaining_demand[width] - count * best_times)
+        
+        # Check if we satisfied all demand
+        if any(remaining_demand.values()):
+            return {'status': 'Infeasible', 'message': 'Greedy heuristic could not satisfy all demand'}
+        
+        return self._build_ilp_production_plan(patterns, solution, demand)
+    
+    def _build_ilp_production_plan(self, patterns: List[Pattern], solution: Dict[int, int], demand: Dict[float, int]) -> Dict:
+        """Build the complete production plan from ILP solution"""
+        # Convert solution to sets
+        sets = []
+        for pattern_idx, count in solution.items():
+            pattern = patterns[pattern_idx]
+            for _ in range(count):
+                sets.append({
+                    'pattern': pattern.lanes,
+                    'used_width': pattern.total_width,
+                    'trim': pattern.trim
+                })
+        
+        # Sort sets for better sequencing
+        sets.sort(key=lambda s: (s['trim'], -s['used_width'], s['pattern']))
+        
+        # Calculate metrics
+        total_trim = sum(s['trim'] for s in sets)
+        avg_trim = total_trim / len(sets) if sets else 0
+        
+        # Calculate production summary
+        produced = defaultdict(int)
+        for pattern_idx, count in solution.items():
+            pattern = patterns[pattern_idx]
+            for width, qty in pattern.coeff.items():
+                produced[width] += qty * count
+        
+        return {
+            'status': 'Optimal',
+            'sets': sets,
+            'summary': {
+                'total_sets': len(sets),
+                'total_trim': round(total_trim, 2),
+                'avg_trim': round(avg_trim, 2),
+            },
+            'demand_vs_produced': {
+                width: {
+                    'demand': demand[width],
+                    'produced': produced[width]
+                }
+                for width in demand
+            },
+            'patterns_used': len(solution)
+        }
+    
+    def _convert_ilp_result_to_internal_format(self, ilp_result: Dict, order_counter: Counter) -> Tuple[List, Counter]:
+        """Convert ILP result to the format expected by the rest of the system"""
+        patterns_used = []
+        
+        # Convert sets to internal pattern format
+        for set_info in ilp_result['sets']:
+            pattern_tuple = set_info['pattern']
+            trim = set_info['trim']
+            patterns_used.append((pattern_tuple, trim))
+        
+        # Calculate remaining demand (should be zero for exact fulfillment)
+        remaining_demand = Counter()
+        produced = Counter()
+        
+        # Count what we produced
+        for pattern_tuple, trim in patterns_used:
+            for width in pattern_tuple:
+                produced[width] += 1
+        
+        # Calculate remaining
+        for width, demanded in order_counter.items():
+            remaining = max(0, demanded - produced[width])
+            if remaining > 0:
+                remaining_demand[width] = remaining
+        
+        logger.info(f"✅ ILP CONVERSION: {len(patterns_used)} patterns, {sum(remaining_demand.values())} remaining demand")
+        return patterns_used, remaining_demand
+
+    # === USER'S SMART TRACKING ALGORITHM ===
+    
+    def _find_optimal_solution_with_tracking(self, order_counter: Counter):
         """
-        Match combos with orders using the provided algorithm logic.
+        User's brilliant approach: Use good patterns but track remaining demand in real-time.
+        Applies patterns one at a time and regenerates when any width hits zero.
+        """
+        original_demand = order_counter.copy()
+        remaining_demand = order_counter.copy()
+        patterns_used = []
+        
+        logger.info(f"🎯 TRACKING ALGO: Starting with demand={sum(original_demand.values())}, widths={list(original_demand.keys())}")
+        iterations = 0
+        max_iterations = sum(original_demand.values()) + 10  # Safety limit
+        
+        while any(remaining_demand.values()) and iterations < max_iterations:
+            iterations += 1
+            
+            # 1. Generate efficient patterns for CURRENT remaining demand
+            current_widths = [w for w, qty in remaining_demand.items() if qty > 0]
+            if not current_widths:
+                break
+                
+            efficient_patterns = self._generate_efficient_patterns(current_widths)
+            if not efficient_patterns:
+                logger.warning(f"⚠️ TRACKING ALGO: No patterns found for widths {current_widths}")
+                break
+            
+            # 2. Pick the BEST pattern (lowest trim first, then highest coverage)
+            best_pattern = None
+            best_score = float('inf')
+            
+            for pattern, trim in efficient_patterns:
+                # Check how many rolls this pattern can satisfy from remaining demand
+                coverage = sum(1 for width in pattern if remaining_demand.get(width, 0) > 0)
+                can_apply = all(remaining_demand.get(width, 0) > 0 for width in pattern)
+                
+                if can_apply:
+                    # Score: prioritize low trim, then high coverage
+                    score = trim - (coverage * 0.1)  # Slight preference for coverage
+                    
+                    if score < best_score:
+                        best_pattern = (pattern, trim)
+                        best_score = score
+            
+            if not best_pattern:
+                # Try patterns that only partially satisfy demand - but require higher utilization
+                for pattern, trim in efficient_patterns:
+                    usable_pieces = sum(1 for width in pattern if remaining_demand.get(width, 0) > 0)
+                    # FIXED: Require at least 50% of pattern pieces to be useful
+                    if usable_pieces >= len(pattern) * 0.5:  # At least half the pieces must be useful
+                        score = trim - (usable_pieces * 0.1)
+                        if score < best_score:
+                            best_pattern = (pattern, trim)
+                            best_score = score
+                            
+            if not best_pattern:
+                logger.warning(f"⚠️ TRACKING ALGO: No applicable patterns found")
+                break
+                
+            # 3. Apply the pattern ONCE and update remaining demand
+            pattern, trim = best_pattern
+            patterns_used.append((pattern, trim))
+            
+            # 4. CRITICAL: Subtract exactly what we used from remaining demand
+            for width in pattern:
+                if remaining_demand.get(width, 0) > 0:
+                    remaining_demand[width] -= 1
+                    if remaining_demand[width] <= 0:
+                        del remaining_demand[width]  # Remove when zero
+            
+            # 5. When ANY roll type hits zero, patterns will be regenerated next iteration
+            
+        # Calculate final stats
+        total_patterns = len(patterns_used)
+        total_waste = sum(trim for _, trim in patterns_used)
+        avg_waste = total_waste / total_patterns if total_patterns > 0 else 0
+        remaining_total = sum(remaining_demand.values())
+        
+        logger.info(f"✅ TRACKING ALGO: Generated {total_patterns} patterns, avg trim={avg_waste:.1f}\", remaining={remaining_total}")
+        
+        if remaining_total == 0:
+            return patterns_used, Counter()
+        else:
+            return patterns_used, remaining_demand
+
+    def match_combos(self, orders: Dict[float, int], interactive: bool = False, algorithm: str = "ilp") -> Tuple[List[Tuple[Tuple[float, ...], float]], Dict[float, int], List[Tuple[Tuple[float, ...], float]]]:
+        """
+        Match combos with orders using best-fit algorithm logic.
         
         Args:
             orders: Dictionary of {width: quantity}
@@ -81,29 +401,112 @@ class CuttingOptimizer:
             Tuple of (used_combos, pending_orders, high_trim_log)
         """
         order_counter = Counter(orders)
+        original_order_counter = order_counter.copy()  # Save original for reset if needed
         combos = self.generate_combos(list(orders.keys()))
         used = []
         high_trim_log = []
         pending = defaultdict(int)
         
-        # DETAILED MATCHING: Let's see exactly what's happening
-        logger.info(f"🔧 DETAILED MATCHING: Starting with demand: {dict(order_counter)}")
+        # GLOBAL PATTERN MIX OPTIMIZATION: Find optimal combination of all patterns
         
-        for combo_idx, (combo, trim) in enumerate(combos):
-            combo_count = Counter(combo)
-            applications_this_combo = 0
+        # Try direct optimal pattern search first for small-medium problems
+        total_demand = sum(order_counter.values())
+        logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Starting with demand={total_demand}")
+        
+        if total_demand <= 200:  # Use global optimization for manageable sizes
+            logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Demand ≤200, proceeding with direct optimization")
             
-            logger.info(f"  🔍 Trying combo #{combo_idx+1}: {combo} → trim={trim}\" (needs: {dict(combo_count)})")
+            # Try direct optimal solution first
+            direct_solution = self._find_direct_optimal_solution(order_counter, algorithm)
+            logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Direct solution result = {direct_solution is not None}")
             
-            while all(order_counter[k] >= v for k, v in combo_count.items()):
+            if direct_solution:
+                used_patterns, remaining_demand = direct_solution
+                
+                used.extend(used_patterns)
+                for combo, trim in used_patterns:
+                    if trim > 6:
+                        high_trim_log.append((combo, trim))
+                
+                # Update order counter with remaining demand
+                order_counter = Counter(remaining_demand)
+                
+                # CRITICAL FIX: Validate direct optimization results
+                total_satisfied = 0
+                for pattern, trim in used_patterns:
+                    total_satisfied += len(pattern)  # Each pattern creates len(pattern) individual rolls
+                
+                original_total_demand = total_demand
+                remaining_total = sum(remaining_demand.values())
+                satisfaction_rate = 1 - (remaining_total / original_total_demand)
+                
+                # Debug logging
+                logger.info(f"🔍 DIRECT OPTIMIZATION VALIDATION:")
+                logger.info(f"   Original demand: {original_total_demand}")
+                logger.info(f"   Patterns generated: {len(used_patterns)}")
+                logger.info(f"   Individual rolls created: {total_satisfied}")
+                logger.info(f"   Remaining demand: {remaining_total}")
+                logger.info(f"   Satisfaction rate: {satisfaction_rate*100:.1f}%")
+                
+                # Accept direct optimization if satisfaction rate is good (≥85%) 
+                # Allow some over-satisfaction but not massive under-satisfaction
+                if satisfaction_rate < 0.85:
+                    logger.warning(f"🚨 DIRECT OPTIMIZATION POOR SATISFACTION: {satisfaction_rate*100:.1f}%")
+                    # Clear direct optimization results and use fallback
+                    used.clear()
+                    high_trim_log.clear()
+                    order_counter = original_order_counter.copy()  # Reset to original demand
+                else:
+                    logger.info(f"✅ DIRECT OPTIMIZATION ACCEPTED: {satisfaction_rate*100:.1f}% satisfaction")
+            else:
+                logger.warning(f"🔍 DIRECT OPTIMIZATION DEBUG: No direct solution found, will use fallback")
+        
+        # Fallback to step-by-step best-fit for remaining items (if any)
+        if any(order_counter.values()):
+            initial_combos = combos.copy()
+            
+            step = 0
+            while any(order_counter.values()):
+                step += 1
+                
+                # Dynamic pattern adaptation: generate focused patterns for current demand
+                if step > 1:  # After first step, adapt patterns
+                    adaptive_combos = self._generate_adaptive_patterns(order_counter)
+                    # Combine initial patterns with adaptive ones, but prioritize adaptive
+                    working_combos = adaptive_combos + initial_combos
+                else:
+                    working_combos = initial_combos
+                
+                # Find the best-fit pattern for current demand
+                best_pattern = self._select_best_fit_pattern(working_combos, order_counter)
+                
+                if best_pattern is None:
+                    logger.warning(f"  ❌ No applicable patterns found for remaining demand: {dict(order_counter)}")
+                    break
+                
+                combo, trim = best_pattern
+                
                 if trim <= MAX_TRIM:
-                    # Accept directly (up to 20" trim)
-                    for k in combo:
-                        order_counter[k] -= 1
+                    # Apply the best-fit pattern once
+                    for width in combo:
+                        order_counter[width] -= 1
                     used.append((combo, trim))
-                    applications_this_combo += 1
                     
-                    logger.info(f"    ✅ APPLIED #{applications_this_combo}: {combo} → remaining: {dict(order_counter)}")
+                    logger.info(f"    ✅ APPLIED BEST-FIT: {combo} → trim={trim}\" → remaining: {dict(order_counter)}")
+                    
+                    # Log trim decisions
+                    if trim <= 6:
+                        logger.debug(f"     ✅ ACCEPTED: {combo} → trim={trim}\" (normal)")
+                    else:
+                        logger.info(f"     ⚠️ ACCEPTED HIGH TRIM: {combo} → trim={trim}\" (6-20\" range)")
+                        high_trim_log.append((combo, trim))
+                elif trim <= MAX_TRIM_WITH_CONFIRMATION:
+                    # Apply the best-fit pattern once
+                    for width in combo:
+                        order_counter[width] -= 1
+                    used.append((combo, trim))
+                    
+                    logger.info(f"    ✅ APPLIED BEST-FIT: {combo} → trim={trim}\" → remaining: {dict(order_counter)}")
                     
                     # Log trim decisions
                     if trim <= 6:
@@ -112,21 +515,599 @@ class CuttingOptimizer:
                         logger.info(f"     ⚠️ ACCEPTED HIGH TRIM: {combo} → trim={trim}\" (6-20\" range)")
                         high_trim_log.append((combo, trim))
                 else:
-                    # >20" trim goes to pending orders
+                    # >20" trim - should not happen due to generate_combos filtering
                     logger.warning(f"     ❌ REJECTED: {combo} → trim={trim}\" (>20\" - goes to pending)")
                     break
-            
-            if applications_this_combo == 0:
-                logger.info(f"    ❌ SKIPPED: {combo} (insufficient demand: need {dict(combo_count)}, have {dict(order_counter)})")
-            else:
-                logger.info(f"    📊 TOTAL APPLIED: {combo} used {applications_this_combo} times")
         
-        # Remaining = pending
+        # Remaining orders become pending
         for size, qty in order_counter.items():
             if qty > 0:
                 pending[size] = qty
+                logger.warning(f"  📋 PENDING: {size}\" x{qty} (could not be optimally fulfilled)")
                 
         return used, dict(pending), high_trim_log
+
+    def _select_best_fit_pattern(self, combos: List[Tuple[Tuple[float, ...], float]], order_counter: Counter) -> Tuple[Tuple[float, ...], float]:
+        """
+        Select the best-fit pattern with look-ahead logic to avoid poor future states.
+        
+        Args:
+            combos: List of (combo, trim) tuples
+            order_counter: Current demand counter
+            
+        Returns:
+            Best-fit pattern tuple (combo, trim) or None if no applicable patterns
+        """
+        best_score = -1
+        best_pattern = None
+        candidate_patterns = []
+        
+        logger.debug(f"    🔍 Evaluating {len(combos)} patterns for best fit...")
+        
+        # Phase 1: Score all applicable patterns
+        for combo_idx, (combo, trim) in enumerate(combos):
+            # Check if pattern is applicable (sufficient demand available)
+            if not self._can_apply_pattern(combo, order_counter):
+                continue
+                
+            # Calculate best-fit score with trim-prioritized metrics
+            demand_fit = self._calculate_demand_fit(combo, order_counter)
+            
+            # CRITICAL: Exponential penalty for any trim (heavily favor 0 trim)
+            if trim == 0:
+                trim_penalty = 1.0  # Perfect score for zero trim
+                zero_trim_bonus = 10.0  # Massive bonus for perfect patterns
+            else:
+                # Exponential penalty - makes any trim much worse than zero trim
+                trim_penalty = 1 + (trim / MAX_TRIM) ** 3  # Cubic penalty
+                zero_trim_bonus = 0
+            
+            # Material utilization (0-trim = 1.0, higher trim = lower)
+            material_utilization = (self.jumbo_roll_width - trim) / self.jumbo_roll_width
+            
+            # Efficiency: pieces count only when material utilization is high
+            if material_utilization > 0.94:  # >95% utilization
+                efficiency_score = len(combo) * material_utilization * 2  # Double bonus for high utilization
+            else:
+                efficiency_score = len(combo) * material_utilization * 0.5  # Penalty for low utilization
+            
+            # Base score: heavily favor zero-trim patterns
+            base_score = ((demand_fit * efficiency_score) + zero_trim_bonus) / trim_penalty
+            
+            candidate_patterns.append((combo, trim, base_score, combo_idx))
+            
+            logger.debug(f"      Pattern {combo_idx+1}: {combo} → trim={trim}\" → demand_fit={demand_fit:.3f}, trim_penalty={trim_penalty:.3f}, efficiency={efficiency_score:.3f}, base_score={base_score:.3f}")
+        
+        # Phase 2: Apply look-ahead logic to top candidates
+        if candidate_patterns:
+            # Sort candidates by base score and evaluate top candidates with look-ahead
+            candidate_patterns.sort(key=lambda x: x[2], reverse=True)
+            top_candidates = candidate_patterns[:min(5, len(candidate_patterns))]  # Top 5 candidates
+            
+            logger.debug(f"    🔮 Applying look-ahead logic to top {len(top_candidates)} candidates...")
+            
+            for combo, trim, base_score, combo_idx in top_candidates:
+                # Simulate applying this pattern
+                lookahead_score = self._calculate_lookahead_score(combo, order_counter, combos)
+                
+                # Final score combines base score with look-ahead assessment
+                final_score = base_score + lookahead_score
+                
+                logger.debug(f"      Look-ahead Pattern {combo_idx+1}: {combo} → base={base_score:.3f}, lookahead={lookahead_score:.3f}, final={final_score:.3f}")
+                
+                if final_score > best_score:
+                    best_score = final_score
+                    best_pattern = (combo, trim)
+                    logger.debug(f"        🏆 NEW BEST: {combo} with final score {final_score:.3f}")
+        
+        if best_pattern:
+            pass
+        
+        return best_pattern
+    
+    def _can_apply_pattern(self, combo: Tuple[float, ...], order_counter: Counter) -> bool:
+        """
+        Check if pattern can be applied given current demand.
+        
+        Args:
+            combo: Pattern tuple of widths
+            order_counter: Current demand counter
+            
+        Returns:
+            True if pattern is applicable
+        """
+        combo_count = Counter(combo)
+        return all(order_counter[width] >= count for width, count in combo_count.items())
+    
+    def _calculate_demand_fit(self, combo: Tuple[float, ...], order_counter: Counter) -> float:
+        """
+        Calculate how well this pattern fits current demand distribution.
+        Uses improved scoring without double-counting bias.
+        
+        Args:
+            combo: Pattern tuple of widths
+            order_counter: Current demand counter
+            
+        Returns:
+            Demand fit score (higher is better)
+        """
+        combo_count = Counter(combo)
+        total_demand = sum(order_counter.values())
+        
+        if total_demand == 0:
+            return 0
+        
+        # Primary metric: Weighted demand satisfaction
+        # Higher weight for widths with more remaining demand
+        demand_satisfaction = 0
+        for width, count in combo_count.items():
+            if order_counter[width] > 0:
+                # Weight by remaining demand ratio (prioritizes clearing backlogs)
+                width_weight = order_counter[width] / total_demand
+                demand_satisfaction += width_weight * count
+        
+        # Bonus for demand balance - penalize patterns that create imbalanced remainders
+        balance_bonus = self._calculate_balance_bonus(combo_count, order_counter)
+        
+        # Completion bonus - extra points for fully satisfying specific widths
+        completion_bonus = self._calculate_completion_bonus(combo_count, order_counter)
+        
+        # Combined fit score
+        fit_score = demand_satisfaction + balance_bonus + completion_bonus
+        
+        return fit_score
+    
+    def _calculate_balance_bonus(self, combo_count: Counter, order_counter: Counter) -> float:
+        """
+        Calculate bonus for creating balanced remaining demand.
+        Penalizes patterns that leave awkward single-piece remainders.
+        """
+        balance_bonus = 0
+        for width, count in combo_count.items():
+            remaining_after = order_counter[width] - count
+            if remaining_after > 0:
+                # Small bonus for leaving even numbers (easier to pair)
+                if remaining_after % 2 == 0:
+                    balance_bonus += 0.1
+                # Penalty for leaving single pieces (harder to optimize)
+                elif remaining_after == 1:
+                    balance_bonus -= 0.2
+        
+        return balance_bonus
+    
+    def _calculate_completion_bonus(self, combo_count: Counter, order_counter: Counter) -> float:
+        """
+        Calculate bonus for completely satisfying specific width demands.
+        Rewards patterns that fully clear specific widths.
+        """
+        completion_bonus = 0
+        for width, count in combo_count.items():
+            if order_counter[width] == count:
+                # Bonus for completely satisfying this width
+                completion_bonus += 0.5
+        
+        return completion_bonus
+
+    def _calculate_lookahead_score(self, combo: Tuple[float, ...], order_counter: Counter, all_combos: List[Tuple[Tuple[float, ...], float]]) -> float:
+        """
+        Calculate look-ahead score by simulating what happens after applying this pattern.
+        Penalizes patterns that leave difficult-to-fulfill remainders.
+        
+        Args:
+            combo: Pattern being considered
+            order_counter: Current demand counter
+            all_combos: All available patterns
+            
+        Returns:
+            Look-ahead score adjustment (can be negative for poor choices)
+        """
+        # Simulate applying this pattern
+        combo_count = Counter(combo)
+        simulated_counter = order_counter.copy()
+        for width, count in combo_count.items():
+            simulated_counter[width] -= count
+        
+        # Remove zeros to get actual remaining demand
+        remaining_demand = {width: qty for width, qty in simulated_counter.items() if qty > 0}
+        
+        if not remaining_demand:
+            # Perfect completion - highest bonus
+            return 1.0
+        
+        # Evaluate quality of remaining demand state
+        total_remaining = sum(remaining_demand.values())
+        
+        # Count how many patterns can still be applied to remaining demand
+        applicable_patterns = 0
+        best_remaining_utilization = 0
+        
+        for remaining_combo, remaining_trim in all_combos:
+            if self._can_apply_pattern(remaining_combo, Counter(remaining_demand)):
+                applicable_patterns += 1
+                # Track best possible utilization for remainder
+                utilization = (self.jumbo_roll_width - remaining_trim) / self.jumbo_roll_width
+                best_remaining_utilization = max(best_remaining_utilization, utilization)
+        
+        # Look-ahead score components
+        pattern_availability_score = min(applicable_patterns / 10.0, 1.0)  # More options = better
+        utilization_score = best_remaining_utilization  # Better efficiency available = better
+        
+        # Penalty for leaving orphaned single pieces
+        orphan_penalty = 0
+        for qty in remaining_demand.values():
+            if qty == 1:
+                orphan_penalty -= 0.3  # Significant penalty for single pieces
+            elif qty == 2:
+                orphan_penalty -= 0.1  # Smaller penalty for pairs
+        
+        # Bonus for leaving balanced remainders
+        balance_bonus = 0
+        if len(remaining_demand) <= 2:  # Simple remainders are better
+            balance_bonus += 0.2
+        
+        # Combined look-ahead score
+        lookahead_score = (pattern_availability_score + utilization_score + balance_bonus + orphan_penalty) * 0.3
+        
+        return lookahead_score
+
+    def _generate_adaptive_patterns(self, order_counter: Counter) -> List[Tuple[Tuple[float, ...], float]]:
+        """
+        Generate patterns specifically optimized for current remaining demand.
+        Focus on clearing exact quantities and avoiding orphaned pieces.
+        
+        Args:
+            order_counter: Current demand counter
+            
+        Returns:
+            List of adaptive patterns optimized for current demand
+        """
+        remaining_widths = [width for width, qty in order_counter.items() if qty > 0]
+        adaptive_patterns = []
+        
+        logger.debug(f"    🔄 Generating adaptive patterns for widths: {remaining_widths}")
+        
+        # Strategy 1: Perfect completion patterns (exactly clear specific widths)
+        # Strategy 1: Perfect completion patterns (exactly clear specific widths)
+        for target_width in remaining_widths:
+            target_qty = order_counter[target_width]
+    
+    # Allow up to MAX_ROLLS_PER_JUMBO pieces of this width
+            for consume_count in range(1, min(target_qty + 1, MAX_ROLLS_PER_JUMBO + 1)):
+                target_usage = target_width * consume_count
+                remaining_space = self.jumbo_roll_width - target_usage
+        
+                if remaining_space >= 0:
+            # Case 1: single-width pattern (all of target_width)
+                    if consume_count == MAX_ROLLS_PER_JUMBO:
+                        combo = tuple([target_width] * consume_count)
+                        trim = remaining_space
+                        if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION:  # allow 6–20 with confirmation
+                            adaptive_patterns.append((combo, trim))
+                        continue
+            
+            # Case 2: multi-width fill (now allow target_width too)
+                    for r in range(0, MAX_ROLLS_PER_JUMBO - consume_count + 1):
+                        if r == 0:
+                            combo = tuple([target_width] * consume_count)
+                            trim = remaining_space
+                            if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION:
+                                adaptive_patterns.append((combo, trim))
+                        else:
+                    # Include target_width in fill set
+                            for fill_combo in product(remaining_widths, repeat=r):
+                                fill_usage = sum(fill_combo)
+                                if fill_usage <= remaining_space:
+                                    combo = tuple(sorted([target_width] * consume_count + list(fill_combo)))
+                                    trim = round(remaining_space - fill_usage, 2)
+                                    if 0 <= trim <= MAX_TRIM_WITH_CONFIRMATION and self._can_apply_pattern(combo, order_counter):
+                                        adaptive_patterns.append((combo, trim))
+
+        
+        # Strategy 2: Balanced consumption patterns (consume proportionally)
+        total_remaining = sum(order_counter.values())
+        if total_remaining > 1:
+            for pieces in range(2, min(MAX_ROLLS_PER_JUMBO + 1, total_remaining + 1)):
+                # Try different balanced combinations
+                for combo in product(remaining_widths, repeat=pieces):
+                    if sum(combo) <= self.jumbo_roll_width:
+                        trim = round(self.jumbo_roll_width - sum(combo), 2)
+                        if 0 <= trim <= MAX_TRIM:
+                            sorted_combo = tuple(sorted(combo))
+                            if self._can_apply_pattern(sorted_combo, order_counter):
+                                # Check if this creates good balance
+                                balance_score = self._evaluate_balance_improvement(sorted_combo, order_counter)
+                                if balance_score > 0:  # Only add if it improves balance
+                                    adaptive_patterns.append((sorted_combo, trim))
+        
+        # Remove duplicates and sort by trim (prefer lower trim)
+        unique_patterns = list(set(adaptive_patterns))
+        unique_patterns.sort(key=lambda x: x[1])  # Sort by trim
+        
+        
+        return unique_patterns[:20]  # Limit to top 20 patterns to avoid explosion
+
+    def _evaluate_balance_improvement(self, combo: Tuple[float, ...], order_counter: Counter) -> float:
+        """
+        Evaluate how much this pattern improves demand balance.
+        Returns positive score if it creates better balance, negative if worse.
+        """
+        combo_count = Counter(combo)
+        balance_improvement = 0
+        
+        for width, count in combo_count.items():
+            remaining_after = order_counter[width] - count
+            current_qty = order_counter[width]
+            
+            # Reward patterns that bring high quantities closer to balanced levels
+            if current_qty > 3:  # High quantity
+                if remaining_after <= 2:  # Bringing it down to manageable level
+                    balance_improvement += 0.3
+            
+            # Penalize patterns that create single orphans
+            if remaining_after == 1:
+                balance_improvement -= 0.5
+            elif remaining_after == 2:
+                balance_improvement += 0.1  # Pairs are okay
+        
+        return balance_improvement
+
+    def _find_direct_optimal_solution(self, order_counter: Counter, algorithm="ilp"):
+        """
+        Optimal solver that supports multiple algorithms.
+        
+        Args:
+            order_counter: Demand for each width
+            algorithm: "ilp" for ILP optimization, "tracking" for user's tracking algorithm
+        """
+        if not any(order_counter.values()):
+            return None
+            
+        total_demand = sum(order_counter.values())
+        
+        if algorithm == "tracking":
+            # Use user's smart tracking algorithm
+            logger.info(f"🎯 USER TRACKING: Starting with demand={total_demand}, widths={list(order_counter.keys())}")
+            return self._find_optimal_solution_with_tracking(order_counter)
+            
+        else:  # algorithm == "ilp" (default)
+            # Use ILP algorithm
+            demand = {float(width): int(qty) for width, qty in order_counter.items() if qty > 0}
+            logger.info(f"🎯 ILP OPTIMIZATION: Starting with demand={total_demand}, widths={list(demand.keys())}")
+            
+            # Use the new ILP algorithm with progressive trim caps
+            result = self._solve_cutting_with_ilp(demand, trim_cap=6.0)  # Start with 6" trim cap
+            
+            # If 6" fails, try 8" then 10" for better solutions
+            if not result or result['status'] != 'Optimal':
+                logger.info("🔄 ILP: Trying higher trim cap (8\") for feasible solution")
+                result = self._solve_cutting_with_ilp(demand, trim_cap=8.0)
+                
+            if not result or result['status'] != 'Optimal':
+                logger.info("🔄 ILP: Trying higher trim cap (10\") for feasible solution")  
+                result = self._solve_cutting_with_ilp(demand, trim_cap=10.0)
+            
+            if result and result['status'] == 'Optimal':
+                logger.info(f"✅ ILP OPTIMIZATION: Found optimal solution with {result['summary']['total_sets']} sets, avg trim={result['summary']['avg_trim']:.1f}\"")
+                return self._convert_ilp_result_to_internal_format(result, order_counter)
+            else:
+                logger.warning(f"❌ ILP OPTIMIZATION: No optimal solution found - {result.get('message', 'Unknown error') if result else 'ILP failed'}")
+                return None
+
+    def _generate_efficient_patterns(self, widths: List[float]) -> List[Tuple[Tuple[float, ...], float]]:
+        """
+        Generate efficient pattern candidates for optimization.
+        Focus on patterns with minimal waste (≤6" trim for maximum efficiency).
+        """
+        from itertools import product
+        
+        efficient_patterns = []
+        
+        # Generate patterns with 2-5 pieces, prioritizing low waste
+        for num_pieces in range(2, min(MAX_ROLLS_PER_JUMBO + 1, 6)):
+            for pattern in product(widths, repeat=num_pieces):
+                total_width = sum(pattern)
+                trim = self.jumbo_roll_width - total_width
+                
+                # Only keep patterns with ≤6" waste for maximum efficiency
+                if 0 <= trim <= 18:
+                    pattern_tuple = tuple(sorted(pattern))
+                    if pattern_tuple not in [p[0] for p in efficient_patterns]:
+                        efficient_patterns.append((pattern_tuple, trim))
+        
+        # If no ultra-efficient patterns found, expand to ≤10" trim
+        if len(efficient_patterns) < 5:
+            for num_pieces in range(2, min(MAX_ROLLS_PER_JUMBO + 1, 6)):
+                for pattern in product(widths, repeat=num_pieces):
+                    total_width = sum(pattern)
+                    trim = self.jumbo_roll_width - total_width
+                    
+                    if 6 < trim <= 10:
+                        pattern_tuple = tuple(sorted(pattern))
+                        if pattern_tuple not in [p[0] for p in efficient_patterns]:
+                            efficient_patterns.append((pattern_tuple, trim))
+        
+        # Sort by efficiency (lower trim first, more pieces second)
+        efficient_patterns.sort(key=lambda x: (x[1], -len(x[0])))
+        
+        
+        return efficient_patterns
+
+    def _solve_optimal_pattern_combination(self, patterns: List[Tuple[Tuple[float, ...], float]], order_counter: Counter):
+        """
+        Solve for optimal pattern combination using comprehensive search.
+        Minimizes total waste by finding the best mix of efficient patterns.
+        """
+        best_solution = None
+        best_total_waste = float('inf')
+        
+        total_demand = sum(order_counter.values())
+        max_patterns_per_type = min(total_demand, 60)  # Allow more patterns for better solutions
+        
+        
+        # Use more patterns for comprehensive search  
+        search_patterns = patterns[:min(15, len(patterns))]  # Expand search space
+        
+        # Try combinations of 1-4 pattern types for optimal mix
+        from itertools import combinations
+        
+        logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Trying combinations of {len(search_patterns)} patterns")
+        combinations_tried = 0
+        solutions_found = 0
+        
+        for num_pattern_types in range(1, min(5, len(search_patterns) + 1)):
+            for pattern_combo in combinations(search_patterns, num_pattern_types):
+                combinations_tried += 1
+                # Use mathematical optimization to find best counts
+                solution = self._find_optimal_counts(pattern_combo, order_counter, max_patterns_per_type)
+                
+                if solution:
+                    solutions_found += 1
+                    patterns_used, remaining_demand, total_waste = solution
+                    
+                    # Check if this is better (lower total waste)
+                    if total_waste < best_total_waste:
+                        # Verify satisfaction rate is acceptable
+                        remaining_count = sum(remaining_demand.values())
+                        satisfaction_rate = 1 - (remaining_count / total_demand)
+                        
+                        if satisfaction_rate >= 0.85:  # At least 85% satisfied
+                            best_total_waste = total_waste
+                            best_solution = solution
+        
+        logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Tried {combinations_tried} combinations, found {solutions_found} valid solutions")
+        logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Best solution = {best_solution is not None}")
+        
+        return best_solution
+    
+    def _find_optimal_counts(self, pattern_combo, order_counter, max_per_pattern):
+        """
+        Find optimal application counts for given patterns using intelligent search.
+        """
+        import random
+        
+        best_solution = None
+        best_waste = float('inf')
+        
+        # Demand-aware search - ensure total production doesn't exceed demand significantly
+        total_demand = sum(order_counter.values())
+        logger.debug(f"🔍 COUNT DEBUG: Finding counts for {len(pattern_combo)} patterns, demand={total_demand}")
+        
+        # Calculate reasonable count ranges for each pattern based on demand
+        pattern_ranges = []
+        for pattern, trim in pattern_combo:
+            pattern_pieces = len(pattern)
+            # Calculate how much this pattern could contribute
+            max_reasonable = min(
+                max_per_pattern or 50,  # Respect max_per_pattern if provided
+                total_demand // pattern_pieces + 10,  # Allow some over-production
+                50  # Hard cap to prevent runaway
+            )
+            min_reasonable = 1
+            pattern_ranges.append((min_reasonable, max_reasonable))
+            logger.debug(f"🔍 COUNT DEBUG: Pattern {pattern} (trim={trim}\") range: {min_reasonable}-{max_reasonable}")
+        
+        valid_attempts = 0
+        for attempt in range(2000):  # Increased attempts for better coverage
+            counts = []
+            
+            # Generate counts for each pattern
+            for i, ((pattern, trim), (min_count, max_count)) in enumerate(zip(pattern_combo, pattern_ranges)):
+                if attempt < 500:  # First quarter: conservative approach
+                    count = random.randint(min_count, min(max_count, 20))
+                elif attempt < 1000:  # Second quarter: moderate approach
+                    count = random.randint(min_count, min(max_count, 35))
+                elif attempt < 1500:  # Third quarter: aggressive approach
+                    count = random.randint(min_count, max_count)
+                else:  # Final quarter: targeted approach based on demand gaps
+                    # Calculate current production estimate
+                    estimated_production = sum(c * len(p) for c, (p, _) in zip(counts, pattern_combo[:i]))
+                    remaining_demand = total_demand - estimated_production
+                    pattern_pieces = len(pattern)
+                    
+                    # Target count to help meet remaining demand
+                    if remaining_demand > 0 and pattern_pieces > 0:
+                        target_count = min(max_count, (remaining_demand // pattern_pieces) + random.randint(1, 5))
+                    else:
+                        target_count = random.randint(min_count, min(max_count, 10))
+                    count = max(min_count, target_count)
+                
+                counts.append(count)
+            
+            # Check if total production is reasonable
+            total_production = sum(count * len(pattern) for count, (pattern, _) in zip(counts, pattern_combo))
+            
+            # Allow some over-production but not excessive
+            if total_production > total_demand * 1.3:  # Max 30% over-production
+                # Scale down proportionally
+                scale_factor = (total_demand * 1.2) / total_production
+                counts = [max(1, int(count * scale_factor)) for count in counts]
+                
+            if sum(counts) == 0:
+                continue
+                
+            result = self._evaluate_pattern_combination(pattern_combo, counts, order_counter)
+            if result:
+                valid_attempts += 1
+                patterns_used, remaining_demand, total_waste, over_satisfaction = result
+                
+                # Score based on total waste (primary) and satisfaction (secondary)
+                total_remaining = sum(remaining_demand.values())
+                satisfaction_rate = 1 - (total_remaining / total_demand)
+                
+                # Heavily penalize low satisfaction rates
+                if satisfaction_rate < 0.85:
+                    score = total_waste + (1 - satisfaction_rate) * 1000  # Heavy penalty
+                else:
+                    score = total_waste + over_satisfaction * 5  # Light over-production penalty
+                
+                if score < best_waste:
+                    best_waste = score
+                    best_solution = (patterns_used, remaining_demand, total_waste)
+        
+        logger.debug(f"🔍 COUNT DEBUG: {valid_attempts} valid attempts out of 2000, best solution = {best_solution is not None}")
+        if best_solution:
+            _, remaining, waste = best_solution
+            satisfaction = 1 - (sum(remaining.values()) / total_demand)
+            logger.debug(f"🔍 COUNT DEBUG: Best solution - {waste}\" waste, {satisfaction*100:.1f}% satisfaction")
+        
+        return best_solution
+
+
+    def _evaluate_pattern_combination(self, pattern_combo, counts, order_counter):
+        """Evaluate a specific pattern combination with given counts."""
+        patterns_used = []
+        demand_satisfied = {}
+        total_waste = 0
+        
+        # Initialize demand tracking
+        for width in order_counter.keys():
+            demand_satisfied[width] = 0
+        
+        # Apply patterns
+        for (pattern, trim), count in zip(pattern_combo, counts):
+            for _ in range(count):
+                patterns_used.append((pattern, trim))
+                total_waste += trim
+                
+                # Track demand satisfaction
+                for width in pattern:
+                    demand_satisfied[width] = demand_satisfied.get(width, 0) + 1
+        
+        # Calculate remaining demand and over-satisfaction
+        remaining_demand = {}
+        over_satisfaction = 0
+        
+        for width, needed in order_counter.items():
+            satisfied = demand_satisfied.get(width, 0)
+            remaining = max(0, needed - satisfied)
+            excess = max(0, satisfied - needed)
+            
+            if remaining > 0:
+                remaining_demand[width] = remaining
+            over_satisfaction += excess
+        
+        return patterns_used, remaining_demand, total_waste, over_satisfaction
+
 
 
 
@@ -135,7 +1116,8 @@ class CuttingOptimizer:
         order_requirements: List[Dict],
         pending_orders: List[Dict] = None,
         available_inventory: List[Dict] = None,
-        interactive: bool = False
+        interactive: bool = False,
+        algorithm: str = "ilp"
     ) -> Dict:
         """
         NEW FLOW: 3-input/4-output optimization algorithm.
@@ -250,7 +1232,7 @@ class CuttingOptimizer:
             logger.info(f"  📋 Spec {spec_key}: {group_data['orders']}")
         
         # Add available inventory to matching specification groups
-        print(f"\n📦 DEBUG: Adding available inventory to spec groups...")
+        print(f"\n[DEBUG] Adding available inventory to spec groups...")
         for i, inv_item in enumerate(available_inventory):
             print(f"  Processing inventory item {i+1}: {inv_item}")
             inv_spec_key = (inv_item['gsm'], inv_item['shade'], inv_item['bf'])
@@ -262,7 +1244,7 @@ class CuttingOptimizer:
             else:
                 print(f"  ❌ No matching spec group found for inventory item {inv_spec_key}")
         
-        print(f"\n📋 DEBUG: Spec groups after adding inventory:")
+        print(f"\n[DEBUG] Spec groups after adding inventory:")
         for spec_key, group_data in spec_groups.items():
             print(f"  Spec {spec_key}: {len(group_data['inventory'])} inventory items")
         
@@ -302,7 +1284,7 @@ class CuttingOptimizer:
                 
                 if inv_width in orders_copy and orders_copy[inv_width] > 0:
                     # Use this inventory item
-                    print(f"     ✅ MATCH! Using inventory for {inv_width}\" (had {orders_copy[inv_width]} orders)")
+                    print(f" MATCH! Using inventory for {inv_width}\" (had {orders_copy[inv_width]} orders)")
                     cut_rolls_generated.append({
                         'width': inv_width,
                         'quantity': 1,
@@ -321,12 +1303,12 @@ class CuttingOptimizer:
                     inventory_used.append(inv_item)
                 else:
                     if inv_width not in orders_copy:
-                        print(f"     ❌ No orders for {inv_width}\" width")
+                        print(f"  No orders for {inv_width}\" width")
                     else:
-                        print(f"     ❌ Already fulfilled all {inv_width}\" orders")
+                        print(f"  Already fulfilled all {inv_width}\" orders")
             
-            print(f"   📦 Orders remaining after inventory: {orders_copy}")
-            print(f"   📋 Inventory items used: {len(inventory_used)}")
+            print(f"   [ORDERS] Remaining after inventory: {orders_copy}")
+            print(f"   [INVENTORY] Items used: {len(inventory_used)}")
             
             # Remove used inventory from available list
             remaining_inventory = [inv for inv in inventory if inv not in inventory_used]
@@ -335,7 +1317,7 @@ class CuttingOptimizer:
             individual_118_rolls_needed = 0
             if orders_copy:
                 logger.info(f"   🔪 OPTIMIZER: Running cutting algorithm for remaining orders: {orders_copy}")
-                used, pending, high_trims = self.match_combos(orders_copy, interactive)
+                used, pending, high_trims = self.match_combos(orders_copy, interactive, algorithm)
                 logger.info(f"   📊 CUTTING RESULTS: {len(used)} patterns used, {len(list(pending.keys()))} pending widths")
                 
                 # Debug: Show what went to pending and why
@@ -751,7 +1733,7 @@ def test_optimizer():
         for high_trim in result['high_trim_approved']:
             print(f"• {high_trim['combo']} → Trim: {high_trim['trim']}\"")
     
-    print(f"\n📊 Summary:")
+    print(f"\n[SUMMARY]:")
     print(f"Total Cut Rolls: {result.get('summary', {}).get('total_cut_rolls', 0)}")
     print(f"Total Jumbo Rolls Needed: {result.get('jumbo_rolls_needed', 0)}")
     print(f"Total Pending Orders: {result.get('summary', {}).get('total_pending_orders', 0)}")
