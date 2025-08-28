@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
+from itertools import combinations_with_replacement, permutations
 import uuid
 import logging
 import json
@@ -24,7 +25,8 @@ class PendingOptimizer:
     
     def get_roll_suggestions(self, wastage: float) -> Dict[str, Any]:
         """
-        Generate roll suggestions for completing target width rolls based on pending orders.
+        Generate jumbo roll suggestions based on pending orders.
+        Creates optimal 3-roll combinations per jumbo roll using existing pending items.
         
         Args:
             wastage: Amount to subtract from 119 inches for target width calculation
@@ -33,13 +35,13 @@ class PendingOptimizer:
             Dict containing:
             - target_width: Calculated target width (119 - wastage)
             - wastage: Input wastage amount
-            - roll_suggestions: Suggestions for completing target width rolls
-            - summary: Statistics about unique widths and suggestions
+            - jumbo_suggestions: List of jumbo roll suggestions with 3 rolls each
+            - summary: Statistics about pending items and suggestions
         """
         try:
-            # Calculate target width
+            # Calculate target width for each 118" roll
             target_width = 119 - wastage
-            logger.info(f"🎯 Generating roll suggestions for target width: {target_width}\" (119 - {wastage} wastage)")
+            logger.info(f"🎯 Generating JUMBO ROLL suggestions for target width: {target_width}\" (119 - {wastage} wastage)")
             
             # Get pending orders with available quantity
             pending_items = self.db.query(models.PendingOrderItem).filter(
@@ -55,47 +57,52 @@ class PendingOptimizer:
                     "status": "no_pending_orders",
                     "target_width": target_width,
                     "wastage": wastage,
-                    "roll_suggestions": [],
+                    "jumbo_suggestions": [],
                     "summary": {
                         "total_pending_input": 0,
-                        "unique_widths": 0,
-                        "suggested_rolls": 0
+                        "spec_groups_processed": 0,
+                        "jumbo_rolls_suggested": 0,
+                        "total_rolls_suggested": 0
                     }
                 }
             
-            # Group by paper specifications and get unique widths
+            # Group by paper specifications
             spec_groups = self._group_by_specs(pending_items)
             logger.info(f"🔍 Created {len(spec_groups)} spec groups")
             
-            # Generate suggestions for unique widths
-            roll_suggestions = self._generate_simple_suggestions(spec_groups, target_width)
+            # Generate jumbo roll suggestions for each spec group
+            jumbo_suggestions = []
+            total_rolls_suggested = 0
             
-            # Count unique widths across all spec groups
-            unique_widths = set()
-            for items in spec_groups.values():
-                for item in items:
-                    unique_widths.add(float(item.width_inches))
+            for spec_key, items in spec_groups.items():
+                spec_suggestions = self._generate_jumbo_suggestions(spec_key, items, target_width)
+                jumbo_suggestions.extend(spec_suggestions)
+                
+                for suggestion in spec_suggestions:
+                    total_rolls_suggested += len(suggestion['rolls'])
             
-            logger.info(f"🎯 ROLL SUGGESTIONS RESULTS:")
+            logger.info(f"🎯 JUMBO ROLL SUGGESTIONS RESULTS:")
             logger.info(f"  Total input items: {len(pending_items)}")
-            logger.info(f"  Unique widths: {len(unique_widths)}")
-            logger.info(f"  Suggestions generated: {len(roll_suggestions)}")
-            logger.info(f"  Target width: {target_width}\"")
+            logger.info(f"  Spec groups processed: {len(spec_groups)}")
+            logger.info(f"  Jumbo rolls suggested: {len(jumbo_suggestions)}")
+            logger.info(f"  Total rolls suggested: {total_rolls_suggested}")
+            logger.info(f"  Target width per roll: {target_width}\"")
 
             return {
                 "status": "success",
                 "target_width": target_width,
                 "wastage": wastage,
-                "roll_suggestions": roll_suggestions,
+                "jumbo_suggestions": jumbo_suggestions,
                 "summary": {
                     "total_pending_input": len(pending_items),
-                    "unique_widths": len(unique_widths),
-                    "suggested_rolls": len(roll_suggestions)
+                    "spec_groups_processed": len(spec_groups),
+                    "jumbo_rolls_suggested": len(jumbo_suggestions),
+                    "total_rolls_suggested": total_rolls_suggested
                 }
             }
             
         except Exception as e:
-            logger.error(f"Error generating roll suggestions: {e}")
+            logger.error(f"Error generating jumbo roll suggestions: {e}")
             raise
     
     # Removed complex optimization methods - using simplified suggestions approach
@@ -114,38 +121,177 @@ class PendingOptimizer:
     
     # Removed complex optimization helper methods - no longer needed
     
-    def _generate_simple_suggestions(self, spec_groups: Dict, target_width: float) -> List[Dict]:
-        """Generate simple suggestions for completing target width rolls using actual pending widths."""
+    def _generate_jumbo_suggestions(self, spec_key: Tuple, items: List[models.PendingOrderItem], target_width: float) -> List[Dict]:
+        """Generate jumbo roll suggestions for a specific paper specification."""
         suggestions = []
         
-        # Generate suggestions for each spec group
-        for spec_key, items in spec_groups.items():
-            # Get unique widths for this spec group
-            unique_widths = set()
-            for item in items:
-                unique_widths.add(float(item.width_inches))
+        # Convert items to width-quantity pairs for easier processing
+        width_quantities = {}
+        for item in items:
+            width = float(item.width_inches)
+            if width not in width_quantities:
+                width_quantities[width] = 0
+            width_quantities[width] += item.quantity_pending
+        
+        # Get available widths sorted by quantity (most available first)
+        available_widths = sorted(width_quantities.keys(), key=lambda w: width_quantities[w], reverse=True)
+        
+        logger.info(f"  📊 Processing {spec_key[1]} {spec_key[0]}GSM: {len(available_widths)} unique widths, {sum(width_quantities.values())} total quantity")
+        logger.info(f"  📊 Available widths: {dict(width_quantities)}")
+        
+        # Create working copy of quantities for consumption
+        remaining_quantities = width_quantities.copy()
+        
+        # Generate jumbo roll suggestions while we have pending items
+        jumbo_count = 0
+        while sum(remaining_quantities.values()) > 0 and jumbo_count < 5:  # Limit to 5 jumbo suggestions per spec
+            jumbo_count += 1
             
-            # Create suggestions for each unique width
-            for width in unique_widths:
-                if width < target_width:  # Only suggest for widths that need completion
-                    needed_width = target_width - width
-                    
-                    suggestion = {
-                        'suggestion_id': str(uuid.uuid4()),
-                        'paper_specs': {
-                            'gsm': spec_key[0],
-                            'shade': spec_key[1],
-                            'bf': spec_key[2]
-                        },
-                        'existing_width': width,
-                        'needed_width': needed_width,
-                        'description': f"{width}\" + {needed_width}\" = {target_width}\""
-                    }
-                    suggestions.append(suggestion)
-                    
-                    logger.info(f"  💡 Suggestion: {width}\" + {needed_width}\" = {target_width}\" for {spec_key[1]} {spec_key[0]}GSM")
+            # Try to create optimized rolls for this jumbo (up to 3 rolls per jumbo)
+            jumbo_rolls = self._create_optimal_jumbo_rolls(remaining_quantities, target_width)
+            
+            # Only create jumbo suggestion if we have actual rolls with existing items
+            if not jumbo_rolls or all(not roll['uses_existing'] for roll in jumbo_rolls):
+                break  # Can't create any more useful combinations using existing items
+            
+            # Create jumbo suggestion
+            suggestion = {
+                'suggestion_id': str(uuid.uuid4()),
+                'paper_specs': {
+                    'gsm': spec_key[0],
+                    'shade': spec_key[1],
+                    'bf': spec_key[2]
+                },
+                'jumbo_number': jumbo_count,
+                'target_width': target_width,
+                'rolls': jumbo_rolls,
+                'summary': {
+                    'total_rolls': len(jumbo_rolls),
+                    'using_existing': sum(1 for roll in jumbo_rolls if roll['uses_existing']),
+                    'new_rolls_needed': sum(1 for roll in jumbo_rolls if not roll['uses_existing']),
+                    'total_waste': sum(roll['waste'] for roll in jumbo_rolls),
+                    'avg_waste': round(sum(roll['waste'] for roll in jumbo_rolls) / len(jumbo_rolls), 2) if jumbo_rolls else 0
+                }
+            }
+            
+            suggestions.append(suggestion)
+            logger.info(f"  📜 Jumbo #{jumbo_count}: {len(jumbo_rolls)} rolls, {suggestion['summary']['using_existing']} using existing, {suggestion['summary']['new_rolls_needed']} new needed")
         
         return suggestions
+    
+    def _create_optimal_jumbo_rolls(self, remaining_quantities: Dict[float, int], target_width: float, max_rolls: int = 3) -> List[Dict]:
+        """Create optimal 118\" roll combinations for a jumbo roll."""
+        rolls = []
+        
+        for roll_num in range(max_rolls):
+            roll = self._create_single_optimal_roll(remaining_quantities, target_width)
+            if roll:
+                # Set the correct roll number
+                roll['roll_number'] = roll_num + 1
+                rolls.append(roll)
+                # Update remaining quantities based on what was used
+                if roll['uses_existing']:
+                    for width, qty in roll['used_widths'].items():
+                        if width in remaining_quantities:
+                            remaining_quantities[width] -= qty
+                            if remaining_quantities[width] <= 0:
+                                del remaining_quantities[width]
+            else:
+                # Stop creating rolls if we can't use existing items
+                # Don't create unnecessary "new roll needed" entries
+                break
+        
+        return rolls
+    
+    def _create_single_optimal_roll(self, available_widths: Dict[float, int], target_width: float) -> Optional[Dict]:
+        """Create a single optimized roll using available pending widths with unlimited pieces."""
+        if not available_widths:
+            return None
+        
+        width_list = [w for w, q in available_widths.items() if q > 0]
+        if not width_list:
+            return None
+        
+        # Use dynamic programming approach to find best combination
+        best_combo = self._find_best_combination(width_list, available_widths, target_width)
+        
+        if best_combo:
+            return {
+                'roll_number': 1,  # Will be set by caller
+                'target_width': target_width,
+                'actual_width': best_combo['total_width'],
+                'waste': best_combo['waste'],
+                'display_as': best_combo.get('display_as', 'waste'),
+                'needed_width': best_combo.get('needed_width', 0),
+                'uses_existing': True,
+                'widths': best_combo['widths'],
+                'used_widths': best_combo['used_widths'],
+                'description': f"{' + '.join(map(str, best_combo['widths']))} = {best_combo['total_width']}\" ({best_combo['display_message']})"
+            }
+        
+        return None  # No good combination found
+    
+    def _find_best_combination(self, width_list: List[float], available_widths: Dict[float, int], target_width: float) -> Optional[Dict]:
+        """Find the best combination of widths to fill target width with minimum waste."""
+        best_combo = None
+        min_waste = float('inf')
+        
+        # Try combinations with increasing number of pieces (up to reasonable limit)
+        max_pieces = min(10, sum(available_widths.values()))  # Reasonable limit
+        
+        for num_pieces in range(1, max_pieces + 1):
+            combo = self._try_combination_with_n_pieces(width_list, available_widths, target_width, num_pieces)
+            if combo and combo['waste'] < min_waste:
+                min_waste = combo['waste']
+                best_combo = combo
+                
+                # If we found a perfect fit or very good fit, stop searching
+                if combo['waste'] <= 2.0:  # Within 2 inches is excellent
+                    break
+        
+        # Only return combinations with reasonable waste (up to 40% of target)
+        if best_combo and best_combo['waste'] <= target_width * 0.4:
+            # Determine if we should show as waste or needed width
+            if best_combo['waste'] <= 5.0:
+                best_combo['display_as'] = 'waste'
+                best_combo['display_message'] = f"waste: {best_combo['waste']:.1f}\""
+            else:
+                best_combo['display_as'] = 'needed'
+                best_combo['needed_width'] = best_combo['waste']
+                best_combo['display_message'] = f"+ {best_combo['waste']:.1f}\" needed"
+            return best_combo
+        
+        return None
+    
+    def _try_combination_with_n_pieces(self, width_list: List[float], available_widths: Dict[float, int], target_width: float, n: int) -> Optional[Dict]:
+        """Try to find best combination using exactly n pieces."""
+        from itertools import combinations_with_replacement
+        
+        best_combo = None
+        min_waste = float('inf')
+        
+        # Generate combinations of n pieces
+        for combo in combinations_with_replacement(width_list, n):
+            # Check if we have enough of each width
+            needed = {}
+            for width in combo:
+                needed[width] = needed.get(width, 0) + 1
+            
+            # Verify availability
+            if all(available_widths.get(w, 0) >= needed.get(w, 0) for w in needed):
+                total_width = sum(combo)
+                if total_width <= target_width:
+                    waste = target_width - total_width
+                    if waste < min_waste:
+                        min_waste = waste
+                        best_combo = {
+                            'widths': list(combo),
+                            'used_widths': needed,
+                            'total_width': total_width,
+                            'waste': waste
+                        }
+        
+        return best_combo
     
     # Removed complex practical combinations method - using simple suggestions
     

@@ -22,22 +22,26 @@ DATABASE_URL = os.getenv(
 logger.info(f"Using database URL: {DATABASE_URL}")
 
 try:
-    # Create engine with connection pooling settings
+    # Create engine with optimized connection pooling settings
     # For ODBC connection strings, we need to be more careful with connection args
     if "odbc_connect=" in DATABASE_URL:
         # Using ODBC connection string format
         engine = create_engine(
             DATABASE_URL,
+            pool_size=8,          # Compromise: some savings, decent concurrency
+            max_overflow=2,       # Allow 2 extra connections for bursts
             pool_pre_ping=True,
-            pool_recycle=3600,
+            pool_recycle=1800,    # Recycle every 30 min
             echo=False  # Set to True for SQL debugging
         )
     else:
         # Using standard SQLAlchemy format
         engine = create_engine(
             DATABASE_URL,
+            pool_size=8,          # Compromise: some savings, decent concurrency
+            max_overflow=2,       # Allow 2 extra connections for bursts
             pool_pre_ping=True,
-            pool_recycle=3600,
+            pool_recycle=1800,    # Recycle every 30 min
             connect_args={"timeout": 30}
         )
     
