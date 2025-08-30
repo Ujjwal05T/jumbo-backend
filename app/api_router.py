@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from .api import clients, users, papers, orders, inventory, plans, workflow, pending_orders, auth, cutting, qr_codes, cut_rolls, dashboard, dispatch, reports, wastage
+from .api import clients, users, papers, orders, inventory, plans, workflow, pending_orders, auth, cutting, qr_codes, cut_rolls, dashboard, dispatch, reports, wastage, past_dispatch
 
 # Create main API router
 api_router = APIRouter()
@@ -23,3 +23,4 @@ api_router.include_router(dashboard.router, prefix="/api", tags=["Dashboard"])
 api_router.include_router(dispatch.router, prefix="/api", tags=["Dispatch Management"])
 api_router.include_router(reports.router, prefix="/api", tags=["Reports"])
 api_router.include_router(wastage.router, prefix="/api", tags=["Wastage Management"])
+api_router.include_router(past_dispatch.router, prefix="/api", tags=["Past Dispatch Management"])

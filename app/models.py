@@ -550,6 +550,65 @@ class DispatchItem(Base):
     inventory = relationship("InventoryMaster")
 
 
+class PastDispatchRecord(Base):
+    """
+    Historical dispatch records for viewing purposes only.
+    Denormalized data - no foreign key relationships to current tables.
+    """
+    __tablename__ = "past_dispatch_record"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PDR-25-08-0001
+    
+    # Dispatch details
+    vehicle_number = Column(String(50), nullable=False)
+    driver_name = Column(String(255), nullable=False)
+    driver_mobile = Column(String(20), nullable=False)
+    
+    # Payment and reference
+    payment_type = Column(String(20), nullable=False, default="bill")  # bill/cash
+    dispatch_date = Column(DateTime, nullable=False, default=datetime.utcnow)
+    dispatch_number = Column(String(100), nullable=False)
+    
+    # Client info (denormalized - no FK)
+    client_name = Column(String(255), nullable=False)  # Stored as text, dropdown in frontend
+    
+    # Status and tracking
+    status = Column(String(50), default="dispatched", nullable=False)  # dispatched, delivered, returned
+    total_items = Column(Integer, nullable=False, default=0)
+    total_weight_kg = Column(Numeric(10, 2), nullable=False, default=0)
+    
+    # Audit fields
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    delivered_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    past_dispatch_items = relationship("PastDispatchItem", back_populates="past_dispatch_record", cascade="all, delete-orphan")
+
+
+class PastDispatchItem(Base):
+    """
+    Historical dispatch items for viewing purposes only.
+    Denormalized data - no foreign key relationships to current inventory.
+    """
+    __tablename__ = "past_dispatch_item"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), nullable=True, index=True)  # MANUALLY ENTERED BY USER
+    past_dispatch_record_id = Column(UNIQUEIDENTIFIER, ForeignKey("past_dispatch_record.id"), nullable=False, index=True)
+    
+    # Physical properties
+    width_inches = Column(Numeric(6, 2), nullable=False)
+    weight_kg = Column(Numeric(8, 2), nullable=False)
+    rate = Column(Numeric(10, 2), nullable=True)  # Rate per unit
+    
+    # Paper specification (denormalized - no FK)
+    paper_spec = Column(String(255), nullable=False)  # e.g., "90gsm, 18.0bf, white"
+    
+    # Relationships
+    past_dispatch_record = relationship("PastDispatchRecord", back_populates="past_dispatch_items")
+
+
 class WastageInventory(Base):
     """
     Wastage inventory for tracking waste material (9-21 inches)

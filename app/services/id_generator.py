@@ -41,9 +41,9 @@ class FrontendIDGenerator:
         },
         "order_master": {
             "prefix": "ORD",
-            "pattern": "{prefix}-{year}-{counter:05d}",
-            "description": "Order Master IDs (ORD-2025-00001, etc.)",
-            "uses_year": True
+            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
+            "description": "Order Master IDs (ORD-25-08-0001, etc.)",
+            "uses_year_month": True
         },
         "order_item": {
             "prefix": "ORI",
@@ -67,9 +67,9 @@ class FrontendIDGenerator:
         },
         "plan_master": {
             "prefix": "PLN",
-            "pattern": "{prefix}-{year}-{counter:05d}",
-            "description": "Plan Master IDs (PLN-2025-00001, etc.)",
-            "uses_year": True
+            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
+            "description": "Plan Master IDs (PLN-25-08-0001, etc.)",
+            "uses_year_month": True
         },
         "production_order_master": {
             "prefix": "PRO",
@@ -88,9 +88,9 @@ class FrontendIDGenerator:
         },
         "dispatch_record": {
             "prefix": "DSP",
-            "pattern": "{prefix}-{year}-{counter:05d}",
-            "description": "Dispatch Record IDs (DSP-2025-00001, etc.)",
-            "uses_year": True
+            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
+            "description": "Dispatch Record IDs (DSP-25-08-0001, etc.)",
+            "uses_year_month": True
         },
         "dispatch_item": {
             "prefix": "DSI",
@@ -101,6 +101,12 @@ class FrontendIDGenerator:
             "prefix": "WS",
             "pattern": "{prefix}-{counter:05d}",
             "description": "Wastage Inventory IDs (WS-00001, WS-00002, etc.)"
+        },
+        "past_dispatch_record": {
+            "prefix": "PDR",
+            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
+            "description": "Past Dispatch Record IDs (PDR-25-08-0001, etc.)",
+            "uses_year_month": True
         }
     }
     
@@ -131,15 +137,25 @@ class FrontendIDGenerator:
             prefix = config["prefix"]
             pattern = config["pattern"]
             uses_year = config.get("uses_year", False)
+            uses_year_month = config.get("uses_year_month", False)
             
-            # Get current year if needed
-            year = datetime.now().year if uses_year else None
+            # Get current year and month if needed
+            now = datetime.now()
+            year = now.year if (uses_year or uses_year_month) else None
+            month = now.month if uses_year_month else None
             
             # Get next counter value
-            counter = cls._get_next_counter(table_name, db, year)
+            counter = cls._get_next_counter(table_name, db, year, month)
             
             # Generate the ID with automatic digit expansion if needed
-            if uses_year:
+            if uses_year_month:
+                # For year-month-based IDs, use at least 4 digits, expand if needed
+                digits = max(4, len(str(counter)))
+                expanded_pattern = pattern.replace(':04d', f':{digits:02d}d')
+                # Use 2-digit year (last 2 digits of the year)
+                year_2d = year % 100
+                generated_id = expanded_pattern.format(prefix=prefix, year=year_2d, month=month, counter=counter)
+            elif uses_year:
                 # For year-based IDs, use at least 5 digits, expand if needed
                 digits = max(5, len(str(counter)))
                 expanded_pattern = pattern.replace(':05d', f':{digits:02d}d')
@@ -154,7 +170,7 @@ class FrontendIDGenerator:
             return generated_id
     
     @classmethod
-    def _get_next_counter(cls, table_name: str, db: Session, year: int = None) -> int:
+    def _get_next_counter(cls, table_name: str, db: Session, year: int = None, month: int = None) -> int:
         """
         Get the next counter value for the given table.
         Uses database queries to find the highest existing counter.
@@ -163,6 +179,7 @@ class FrontendIDGenerator:
             table_name: The database table name
             db: SQLAlchemy database session
             year: Year filter for year-based IDs
+            month: Month filter for year-month-based IDs
             
         Returns:
             Next counter value (starting from 1)
@@ -170,10 +187,16 @@ class FrontendIDGenerator:
         config = cls.ID_PATTERNS[table_name]
         prefix = config["prefix"]
         uses_year = config.get("uses_year", False)
+        uses_year_month = config.get("uses_year_month", False)
         
         try:
             # Create cache key
-            cache_key = f"{table_name}_{year}" if uses_year and year else table_name
+            if uses_year_month and year and month:
+                cache_key = f"{table_name}_{year}_{month:02d}"
+            elif uses_year and year:
+                cache_key = f"{table_name}_{year}"
+            else:
+                cache_key = table_name
             
             # Check if we have a cached counter
             if cache_key in cls._counter_cache:
@@ -184,7 +207,23 @@ class FrontendIDGenerator:
                 return next_counter
             
             # No cache, query database
-            if uses_year and year:
+            if uses_year_month and year and month:
+                # For year-month-based IDs, find max counter for this year and month (handle variable digits)
+                year_2d = year % 100  # Use 2-digit year
+                pattern_prefix = f"{prefix}-{year_2d:02d}-{month:02d}-"
+                query = text(f"""
+                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
+                    FROM {table_name} WITH (UPDLOCK)
+                    WHERE frontend_id LIKE :pattern_prefix_like 
+                      AND frontend_id IS NOT NULL
+                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
+                """)
+                result = db.execute(query, {
+                    "pattern_prefix": pattern_prefix,
+                    "pattern_prefix_like": f"{pattern_prefix}%"
+                }).scalar()
+                logger.debug(f"Year-month-based counter query for {table_name} ({year_2d:02d}-{month:02d}): max_counter = {result}")
+            elif uses_year and year:
                 # For year-based IDs, find max counter for this year (handle variable digits)
                 pattern_prefix = f"{prefix}-{year}-"
                 query = text(f"""
@@ -274,11 +313,24 @@ class FrontendIDGenerator:
         config = cls.ID_PATTERNS[table_name]
         prefix = config["prefix"]
         uses_year = config.get("uses_year", False)
+        uses_year_month = config.get("uses_year_month", False)
         
         if not frontend_id.startswith(f"{prefix}-"):
             return False
         
-        if uses_year:
+        if uses_year_month:
+            # Expected format: PREFIX-YY-MM-NNNN
+            parts = frontend_id.split("-")
+            if len(parts) != 4:
+                return False
+            try:
+                year = int(parts[1])
+                month = int(parts[2])
+                counter = int(parts[3])
+                return 0 <= year <= 99 and 1 <= month <= 12 and counter > 0
+            except ValueError:
+                return False
+        elif uses_year:
             # Expected format: PREFIX-YYYY-NNNNN
             parts = frontend_id.split("-")
             if len(parts) != 3:
