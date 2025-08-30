@@ -249,35 +249,24 @@ def get_past_dispatch_dropdowns(db: Session = Depends(get_db)):
     try:
         # Get unique client names from client_master
         clients = db.query(models.ClientMaster.company_name).filter(
-            models.ClientMaster.company_name.isnot(None)
+            models.ClientMaster.company_name.isnot(None),
+            models.ClientMaster.status == "active"
         ).distinct().all()
         client_names = [client[0] for client in clients if client[0]]
         
-        # Get unique paper specifications from existing past dispatches and current inventory
-        past_specs = db.query(models.PastDispatchItem.paper_spec).distinct().all()
-        past_paper_specs = [spec[0] for spec in past_specs if spec[0]]
+        # Get all paper specifications from PaperMaster table
+        all_papers = db.query(models.PaperMaster).filter(
+            models.PaperMaster.status == "active"
+        ).all()
         
-        # Get paper specs from current inventory (if available)
-        current_specs = []
-        try:
-            # Try to get from inventory items with paper specs
-            inventory_specs = db.query(models.InventoryMaster).join(
-                models.PaperMaster
-            ).with_entities(
-                models.PaperMaster.gsm,
-                models.PaperMaster.bf,
-                models.PaperMaster.shade
-            ).distinct().all()
-            
-            for spec in inventory_specs:
-                spec_str = f"{spec.gsm}gsm, {spec.bf}bf, {spec.shade}"
-                if spec_str not in current_specs:
-                    current_specs.append(spec_str)
-        except:
-            pass  # If paper specs not available, continue with past specs only
+        # Format paper specs as "GSMgsm, BFbf, shade"
+        all_paper_specs = []
+        for paper in all_papers:
+            spec_str = f"{paper.gsm}gsm, {paper.bf}bf, {paper.shade}"
+            all_paper_specs.append(spec_str)
         
-        # Combine and deduplicate paper specs
-        all_paper_specs = list(set(past_paper_specs + current_specs))
+        # Remove duplicates and sort
+        all_paper_specs = list(set(all_paper_specs))
         all_paper_specs.sort()
         
         return {
