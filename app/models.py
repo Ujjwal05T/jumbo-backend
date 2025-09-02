@@ -59,6 +59,12 @@ class RollType(str, PyEnum):
     ROLL_118 = "118"
     CUT = "cut"
 
+class InventoryItemStatus(str, PyEnum):
+    AVAILABLE = "available"
+    IN_DISPATCH = "in_dispatch" 
+    DISPATCHED = "dispatched"
+    DAMAGED = "damaged"
+
 # ============================================================================
 # MASTER TABLES - Core reference data
 # ============================================================================
@@ -647,6 +653,29 @@ class WastageInventory(Base):
     source_plan = relationship("PlanMaster")
     source_jumbo_roll = relationship("InventoryMaster", foreign_keys=[source_jumbo_roll_id])
     created_by = relationship("UserMaster")
+
+
+# ============================================================================
+# INVENTORY ITEMS - Individual reel tracking with barcode functionality
+# ============================================================================
+
+class InventoryItem(Base):
+    """
+    Individual reel tracking for inventory management.
+    Based on imported stock data with basic fields for display.
+    """
+    __tablename__ = "inventory_items"
+    
+    stock_id = Column(Integer, primary_key=True, autoincrement=True, index=True)
+    sno_from_file = Column(Integer, nullable=True)
+    reel_no = Column(String(50), nullable=True, index=True)
+    gsm = Column(Integer, nullable=True, index=True)
+    bf = Column(Integer, nullable=True, index=True)
+    size = Column(String(50), nullable=True, index=True)  # Original size value as text
+    weight_kg = Column(Float, nullable=True)
+    grade = Column(String(10), nullable=True)
+    stock_date = Column(DateTime, nullable=True)
+    record_imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # ============================================================================

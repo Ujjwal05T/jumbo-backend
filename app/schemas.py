@@ -49,6 +49,12 @@ class PendingOrderStatus(str, Enum):
     RESOLVED = "resolved"
     CANCELLED = "cancelled"
 
+class InventoryItemStatus(str, Enum):
+    AVAILABLE = "available"
+    IN_DISPATCH = "in_dispatch"
+    DISPATCHED = "dispatched"
+    DAMAGED = "damaged"
+
 class RollType(str, Enum):
     JUMBO = "jumbo"
     ROLL_118 = "118"
@@ -873,6 +879,46 @@ class WastageInventory(BaseModel):
 class PaginatedWastageResponse(BaseModel):
     """Paginated response for wastage inventory"""
     items: List[WastageInventory]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+
+
+# ============================================================================
+# INVENTORY ITEMS SCHEMAS - For imported stock data
+# ============================================================================
+
+class InventoryItemBase(BaseModel):
+    """Base schema for inventory items"""
+    sno_from_file: Optional[int] = Field(None, description="Serial number from file")
+    reel_no: Optional[str] = Field(None, description="Reel number")
+    gsm: Optional[int] = Field(None, description="GSM value")
+    bf: Optional[int] = Field(None, description="BF value")
+    size: Optional[str] = Field(None, description="Size as text")
+    weight_kg: Optional[float] = Field(None, description="Weight in kg")
+    grade: Optional[str] = Field(None, description="Grade")
+    stock_date: Optional[datetime] = Field(None, description="Stock date")
+
+class InventoryItemCreate(InventoryItemBase):
+    """Schema for creating inventory items"""
+    pass
+
+class InventoryItemUpdate(InventoryItemBase):
+    """Schema for updating inventory items"""
+    pass
+
+class InventoryItem(InventoryItemBase):
+    """Full inventory item schema with all fields"""
+    stock_id: int = Field(..., description="Primary key")
+    record_imported_at: datetime = Field(..., description="When record was imported")
+    
+    class Config:
+        from_attributes = True
+
+class PaginatedInventoryItemsResponse(BaseModel):
+    """Paginated response for inventory items"""
+    items: List[InventoryItem]
     total: int
     page: int
     per_page: int
