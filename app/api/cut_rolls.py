@@ -188,7 +188,9 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         ).options(
             joinedload(models.InventoryMaster.paper),  # Load paper specs
             joinedload(models.InventoryMaster.parent_118_roll)  # Load 118" roll
-                .joinedload(models.InventoryMaster.parent_jumbo)  # Load jumbo roll via 118" roll
+                .joinedload(models.InventoryMaster.parent_jumbo),  # Load jumbo roll via 118" roll
+            joinedload(models.InventoryMaster.allocated_order)  # Load allocated order
+                .joinedload(models.OrderMaster.client)  # Load client info
         ).filter(
             models.PlanInventoryLink.plan_id == plan_id,
             models.InventoryMaster.roll_type == "cut"
