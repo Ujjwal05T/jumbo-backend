@@ -4,12 +4,38 @@ from sqlalchemy import and_
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime
+import logging
 
 from .base import CRUDBase
 from .. import models, schemas
 
+logger = logging.getLogger(__name__)
+
 
 class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.PlanMasterUpdate]):
+    def _validate_pending_order_id(self, db: Session, pending_id_str: str) -> UUID:
+        """Validate that pending order ID exists before using it as foreign key"""
+        if not pending_id_str:
+            return None
+            
+        try:
+            pending_uuid = UUID(pending_id_str)
+            # Check if the pending order item actually exists
+            pending_exists = db.query(models.PendingOrderItem).filter(
+                models.PendingOrderItem.id == pending_uuid
+            ).first()
+            
+            if pending_exists:
+                logger.info(f"✅ PENDING VALIDATION: Pending order {pending_uuid} exists")
+                return pending_uuid
+            else:
+                logger.warning(f"⚠️ PENDING VALIDATION: Pending order {pending_uuid} not found, setting to None")
+                return None
+                
+        except (ValueError, TypeError) as e:
+            logger.warning(f"⚠️ PENDING VALIDATION: Invalid pending order ID format '{pending_id_str}': {e}")
+            return None
+
     def get_plans(
         self, db: Session, *, skip: int = 0, limit: int = 100, status: str = None
     ) -> List[models.PlanMaster]:
@@ -519,7 +545,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 allocated_to_order_id=best_order.id if best_order else None,
                 # NEW: Save source tracking information from cut roll
                 source_type=cut_roll.get("source_type"),
-                source_pending_id=UUID(cut_roll.get("source_pending_id")) if cut_roll.get("source_pending_id") else None,
+                source_pending_id=self._validate_pending_order_id(db, cut_roll.get("source_pending_id")),
                 # NEW: Link to parent 118" roll for complete hierarchy
                 parent_118_roll_id=parent_118_roll.id if parent_118_roll else None,
                 individual_roll_number=cut_roll.get("individual_roll_number"),
@@ -1125,7 +1151,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         
                         logger.info(f"✅ ADDED ROLLS: Created {len(order_items_created)} order items for order {new_order.frontend_id}")
                         
-                        # Update order totals
+                        # Update order totals  
                         new_order.total_items = len(order_items_created)
                         new_order.total_amount = total_amount
                         
