@@ -803,6 +803,7 @@ class StartProductionRequest(BaseModel):
     selected_cut_rolls: List[SelectedCutRoll] = Field(..., min_items=1, description="Cut rolls selected for production")
     all_available_cuts: List[SelectedCutRoll] = Field(..., description="All cuts that were available for selection")
     wastage_data: List[WastageData] = Field(default=[], description="Wastage data for 9-21 inch waste")
+    added_rolls_data: Dict[str, List[Dict[str, Any]]] = Field(default={}, description="Added rolls data for partial jumbo completion by jumbo_id")
     created_by_id: str = Field(..., description="ID of user starting production")
     jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Dynamic jumbo roll width in inches")
 

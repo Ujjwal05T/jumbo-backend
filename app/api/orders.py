@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 from uuid import UUID
 import logging
 import json
+from datetime import datetime
 
 from .base import get_db, validate_status_transition
 from .. import crud_operations, schemas, models
@@ -486,4 +487,141 @@ def get_warehouse_items(
     except Exception as e:
         logger.error(f"Error getting warehouse items: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# PARTIAL JUMBO COMPLETION - GUPTA PUBLISHING HOUSE ORDER CREATION
+# ============================================================================
+
+@router.post("/orders/create-gupta-completion-order", tags=["Partial Jumbo Completion"])
+async def create_gupta_completion_order(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Create order for Gupta Publishing House to complete partial jumbos.
+    User specifies cut rolls needed to complete partial jumbo.
+    """
+    try:
+        # Parse request data
+        request_data = await request.json()
+        required_rolls = request_data.get("required_rolls", [])
+        created_by_id = request_data.get("created_by_id")
+        notes = request_data.get("notes", "Partial jumbo completion order")
+        
+        if not required_rolls:
+            raise HTTPException(status_code=400, detail="required_rolls cannot be empty")
+        
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
+        
+        # Find Gupta Publishing House client (hardcoded)
+        gupta_client = db.query(models.ClientMaster).filter(
+            models.ClientMaster.company_name.ilike("%Gupta Publishing%")
+        ).first()
+        
+        if not gupta_client:
+            raise HTTPException(
+                status_code=404, 
+                detail="Gupta Publishing House client not found in client master"
+            )
+        
+        logger.info(f"Creating Gupta completion order with {len(required_rolls)} rolls")
+        
+        # Create new order for Gupta Publishing House
+        new_order = models.OrderMaster(
+            client_id=gupta_client.id,
+            status="created",
+            priority="normal", 
+            payment_type="bill",
+            delivery_date=None,
+            created_by_id=created_by_id,
+            created_at=datetime.utcnow()
+        )
+        
+        db.add(new_order)
+        db.flush()  # Get the order ID
+        
+        # Create order items for each required roll
+        order_items = []
+        total_amount = 0
+        
+        for roll_spec in required_rolls:
+            # Extract roll specifications
+            width_inches = float(roll_spec.get("width_inches", 0))
+            paper_id = roll_spec.get("paper_id")
+            rate = float(roll_spec.get("rate", 0))
+            
+            if width_inches <= 0:
+                raise HTTPException(status_code=400, detail="width_inches must be greater than 0")
+            
+            if not paper_id:
+                raise HTTPException(status_code=400, detail="paper_id is required for each roll")
+            
+            # Calculate quantities (standard: 1 inch = 13kg)
+            quantity_kg = width_inches * 13
+            amount = quantity_kg * rate
+            total_amount += amount
+            
+            # Create order item
+            order_item = models.OrderItem(
+                order_id=new_order.id,
+                paper_id=paper_id,
+                width_inches=width_inches,
+                quantity_rolls=1,
+                quantity_kg=quantity_kg,
+                rate=rate,
+                amount=amount,
+                quantity_fulfilled=0,
+                quantity_in_pending=0,
+                item_status="created",
+                created_at=datetime.utcnow()
+            )
+            
+            db.add(order_item)
+            order_items.append(order_item)
+        
+        # Commit the transaction
+        db.commit()
+        db.refresh(new_order)
+        
+        # Prepare response
+        response_data = {
+            "order": {
+                "id": str(new_order.id),
+                "frontend_id": new_order.frontend_id,
+                "client_id": str(new_order.client_id),
+                "client_name": gupta_client.company_name,
+                "status": new_order.status,
+                "priority": new_order.priority,
+                "payment_type": new_order.payment_type,
+                "created_at": new_order.created_at.isoformat(),
+                "total_items": len(order_items),
+                "total_amount": total_amount
+            },
+            "order_items": [
+                {
+                    "id": str(item.id),
+                    "paper_id": str(item.paper_id),
+                    "width_inches": float(item.width_inches),
+                    "quantity_rolls": item.quantity_rolls,
+                    "quantity_kg": float(item.quantity_kg),
+                    "rate": float(item.rate),
+                    "amount": float(item.amount)
+                }
+                for item in order_items
+            ],
+            "message": f"Successfully created Gupta completion order {new_order.frontend_id} with {len(order_items)} items"
+        }
+        
+        logger.info(f"Created Gupta completion order: {new_order.frontend_id}")
+        return response_data
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating Gupta completion order: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create completion order: {str(e)}")
 
