@@ -26,7 +26,7 @@ class PendingOptimizer:
     def get_roll_suggestions(self, wastage: float) -> Dict[str, Any]:
         """
         Generate jumbo roll suggestions based on pending orders.
-        Creates optimal 3-roll combinations per jumbo roll using existing pending items.
+        Creates optimal 1-3 roll combinations per jumbo roll using existing pending items.
         
         Args:
             wastage: Amount to subtract from 119 inches for target width calculation
@@ -35,7 +35,7 @@ class PendingOptimizer:
             Dict containing:
             - target_width: Calculated target width (119 - wastage)
             - wastage: Input wastage amount
-            - jumbo_suggestions: List of jumbo roll suggestions with 3 rolls each
+            - jumbo_suggestions: List of jumbo roll suggestions with 1-3 rolls each
             - summary: Statistics about pending items and suggestions
         """
         try:
@@ -147,7 +147,7 @@ class PendingOptimizer:
         while sum(remaining_quantities.values()) > 0 and jumbo_count < 5:  # Limit to 5 jumbo suggestions per spec
             jumbo_count += 1
             
-            # Try to create optimized rolls for this jumbo (up to 3 rolls per jumbo)
+            # Try to create optimized rolls for this jumbo (1-3 rolls per jumbo, flexible)
             jumbo_rolls = self._create_optimal_jumbo_rolls(remaining_quantities, target_width)
             
             # Only create jumbo suggestion if we have actual rolls with existing items

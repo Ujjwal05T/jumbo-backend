@@ -160,7 +160,7 @@ class PlanCalculationService:
         # Calculate available jumbo rolls based on generated 118" rolls
         cut_rolls = optimization_result.get('cut_rolls_generated', [])
         total_118_rolls = len([roll for roll in cut_rolls if roll.get('source') == 'cutting'])
-        jumbo_rolls_available = total_118_rolls // 3  # Complete jumbos only
+        jumbo_rolls_available = total_118_rolls  # FLEXIBLE: Each 118" roll can be a separate jumbo (1-3 rolls per jumbo)
         
         # Enhanced: Add jumbo roll hierarchy information
         enhanced_cut_rolls, jumbo_roll_details = self._enhance_with_jumbo_hierarchy(cut_rolls)
@@ -171,9 +171,9 @@ class PlanCalculationService:
             'jumbo_roll_width': self.jumbo_roll_width,
             'jumbo_rolls_available': jumbo_rolls_available,
             'individual_118_rolls_available': total_118_rolls,
-            'max_selectable_rolls': jumbo_rolls_available * 3,
-            'complete_jumbos': len([jr for jr in jumbo_roll_details if jr['roll_count'] == 3]),
-            'partial_jumbos': len([jr for jr in jumbo_roll_details if jr['roll_count'] < 3])
+            'max_selectable_rolls': jumbo_rolls_available,  # FLEXIBLE: Can select any number of rolls
+            'complete_jumbos': len([jr for jr in jumbo_roll_details if jr['roll_count'] >= 1]),  # FLEXIBLE: All jumbos with 1+ rolls
+            'partial_jumbos': 0  # FLEXIBLE: No partial jumbos in new system
         })
         
         return {
@@ -221,13 +221,23 @@ class PlanCalculationService:
             # Sort roll numbers to create consistent jumbo groupings
             sorted_roll_numbers = sorted(roll_groups.keys())
             
-            # Group every 3 rolls into a jumbo
-            for i in range(0, len(sorted_roll_numbers), 3):
+            # Group rolls flexibly into jumbos (1-3 rolls per jumbo, optimized grouping)
+            i = 0
+            while i < len(sorted_roll_numbers):
                 jumbo_id = f"JR-{jumbo_counter:03d}"
                 jumbo_frontend_id = f"JR-{jumbo_counter:03d}"
                 
-                # Get up to 3 rolls for this jumbo
-                rolls_in_jumbo = sorted_roll_numbers[i:i+3]
+                # FLEXIBLE: Get 1-3 rolls for this jumbo (adaptive grouping)
+                remaining_rolls = len(sorted_roll_numbers) - i
+                if remaining_rolls >= 3:
+                    rolls_to_take = 3  # Take 3 if we have 3 or more
+                elif remaining_rolls == 2:
+                    rolls_to_take = 2  # Take 2 if only 2 remain
+                else:
+                    rolls_to_take = 1  # Take 1 if only 1 remains
+                
+                rolls_in_jumbo = sorted_roll_numbers[i:i+rolls_to_take]
+                i += rolls_to_take
                 roll_count = len(rolls_in_jumbo)
                 total_cuts = 0
                 total_used_width = 0
@@ -266,7 +276,7 @@ class PlanCalculationService:
                     'total_cuts': total_cuts,
                     'total_used_width': total_used_width,
                     'efficiency_percentage': round(efficiency, 1),
-                    'is_complete': roll_count == 3,
+                    'is_complete': roll_count >= 1,  # FLEXIBLE: Any jumbo with 1+ rolls is complete
                     'roll_numbers': rolls_in_jumbo
                 }
                 

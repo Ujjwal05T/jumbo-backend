@@ -1456,7 +1456,7 @@ class CuttingOptimizer:
         logger.info(f"   📦 Total cut rolls generated: {total_cut_rolls}")
         logger.info(f"   🎯 Total individual 118\" rolls: {total_individual_118_rolls}")
         logger.info(f"   👤 USER CHOICE: {total_individual_118_rolls} individual 118\" rolls available for selection")
-        logger.info(f"   📦 MAX JUMBOS POSSIBLE: {total_individual_118_rolls // 3} complete jumbo rolls")
+        logger.info(f"   📦 MAX JUMBOS POSSIBLE: {total_individual_118_rolls} jumbo rolls (1-3 rolls each, flexible)")
         logger.info(f"   ⏳ Total pending orders: {len(new_pending_orders)}")
         logger.info(f"   📊 Total pending quantity: {total_pending}")
         logger.info(f"   🔧 Specification groups processed: {len(spec_groups)}")
@@ -1504,17 +1504,17 @@ class CuttingOptimizer:
         # NEW FLOW: Return 3 distinct outputs (removed waste inventory)
         result = {
             'cut_rolls_generated': cut_rolls_generated,
-            'jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: 1 jumbo roll = 3 sets of 118" rolls
+            'jumbo_rolls_needed': jumbo_rolls_needed,  # FLEXIBLE: 1 jumbo roll = 1-3 rolls (user choice)
             'pending_orders': new_pending_orders,
             'summary': {
                 'total_cut_rolls': total_cut_rolls,
                 'total_individual_118_rolls': total_individual_118_rolls,
-                'total_jumbo_rolls_needed': jumbo_rolls_needed,  # CORRECTED: Each jumbo roll produces 3×118" rolls
+                'total_jumbo_rolls_needed': jumbo_rolls_needed,  # FLEXIBLE: Each jumbo roll produces 1-3×118" rolls
                 'total_pending_orders': len(new_pending_orders),
                 'total_pending_quantity': total_pending,
                 'specification_groups_processed': len(spec_groups),
                 'high_trim_patterns': len(all_high_trims),
-                'algorithm_note': 'Updated: 1-20" trim accepted, >20" goes to pending, no waste rolls created'
+                'algorithm_note': 'FLEXIBLE: 1-20" trim accepted, >20" goes to pending, 1-3 rolls per jumbo (variable)'
             },
             'high_trim_approved': all_high_trims
         }
