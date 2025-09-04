@@ -93,3 +93,18 @@ def get_roll_suggestions(
     except Exception as e:
         logger.error(f"Error generating roll suggestions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-orders/start-production", response_model=schemas.StartProductionResponse, tags=["Pending Order Items"])
+def start_production_from_pending_orders(
+    request_data: schemas.StartProductionRequest,  # ✅ CHANGED: Use same schema as main planning
+    db: Session = Depends(get_db)
+):
+    """Start production from selected pending orders - same format as main planning"""
+    try:
+        from .. import crud_operations
+        return crud_operations.start_production_from_pending_orders(db=db, request_data=request_data)  # ✅ RENAMED FUNCTION
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting production from pending orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

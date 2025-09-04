@@ -807,6 +807,24 @@ class StartProductionRequest(BaseModel):
     created_by_id: str = Field(..., description="ID of user starting production")
     jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Dynamic jumbo roll width in inches")
 
+# ============================================================================
+# PENDING PRODUCTION SCHEMAS - NEW PENDING TO PRODUCTION FLOW
+# ============================================================================
+
+class SelectedSuggestion(BaseModel):
+    """Individual suggestion selected for production from pending orders"""
+    suggestion_id: str = Field(..., description="Unique suggestion ID")
+    paper_specs: Dict[str, Any] = Field(..., description="Paper specifications (gsm, shade, bf)")
+    rolls: List[Dict[str, Any]] = Field(..., description="Roll details from suggestion")
+    target_width: float = Field(..., gt=0, description="Target width for this suggestion")
+    pending_order_ids: List[str] = Field(..., description="List of pending order IDs this suggestion uses")
+
+class StartPendingProductionRequest(BaseModel):
+    """Request to start production from selected pending order suggestions"""
+    selected_suggestions: List[SelectedSuggestion] = Field(..., min_items=1, description="Selected suggestions for production")
+    created_by_id: str = Field(..., description="ID of user starting production")
+    jumbo_roll_width: int = Field(default=118, ge=50, le=300, description="Dynamic jumbo roll width in inches")
+
 class ProductionStartSummary(BaseModel):
     """Summary of production start operation"""
     orders_updated: int = Field(..., ge=0)

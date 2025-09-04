@@ -154,7 +154,9 @@ class PendingOptimizer:
             if not jumbo_rolls or all(not roll['uses_existing'] for roll in jumbo_rolls):
                 break  # Can't create any more useful combinations using existing items
             
-            # Create jumbo suggestion
+            # Create jumbo suggestion with pending order IDs
+            pending_order_ids = [str(item.id) for item in items]  # Get all pending order IDs for this spec group
+            
             suggestion = {
                 'suggestion_id': str(uuid.uuid4()),
                 'paper_specs': {
@@ -165,6 +167,7 @@ class PendingOptimizer:
                 'jumbo_number': jumbo_count,
                 'target_width': target_width,
                 'rolls': jumbo_rolls,
+                'pending_order_ids': pending_order_ids,  # Add pending order IDs
                 'summary': {
                     'total_rolls': len(jumbo_rolls),
                     'using_existing': sum(1 for roll in jumbo_rolls if roll['uses_existing']),
