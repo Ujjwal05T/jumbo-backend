@@ -829,7 +829,7 @@ class ProductionStartSummary(BaseModel):
     """Summary of production start operation"""
     orders_updated: int = Field(..., ge=0)
     order_items_updated: int = Field(..., ge=0)
-    pending_orders_resolved: int = Field(..., ge=0, description="Number of pending orders resolved (PHASE 1 -> included_in_plan)")
+    pending_orders_resolved: int = Field(..., ge=0, description="Number of pending orders processed (supports partial fulfillment - only fully resolved when quantity_pending=0)")
     inventory_created: int = Field(..., ge=0)
     pending_orders_created_phase2: int = Field(default=0, ge=0, description="Number of PHASE 2 pending orders created from unselected cuts")
     jumbo_rolls_created: int = Field(default=0, ge=0, description="Number of virtual jumbo rolls created")

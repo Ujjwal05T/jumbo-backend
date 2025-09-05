@@ -280,12 +280,34 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     logger.info(f"📊 REQUEST DATA: {len(selected_cut_rolls)} cut_rolls, created_by: {created_by_id}")
     
+    # ====== DETAILED LOGGING: Frontend Request Analysis ======
+    logger.info("🔍 FRONTEND REQUEST ANALYSIS:")
+    logger.info(f"📦 Raw selected_cut_rolls type: {type(selected_cut_rolls)}")
+    logger.info(f"📦 Raw all_available_cuts type: {type(all_available_cuts)}")
+    logger.info(f"📦 Raw selected_cut_rolls length: {len(selected_cut_rolls)}")
+    
+    # Log each individual selected cut roll for debugging
+    for i, cut_roll in enumerate(selected_cut_rolls):
+        logger.info(f"📋 Selected Roll #{i+1}:")
+        logger.info(f"   Type: {type(cut_roll)}")
+        if hasattr(cut_roll, 'model_dump'):
+            roll_data = cut_roll.model_dump()
+        else:
+            roll_data = dict(cut_roll)
+        logger.info(f"   Data: {roll_data}")
+        logger.info(f"   Width: {roll_data.get('width_inches', 'MISSING')}")
+        logger.info(f"   Paper: GSM={roll_data.get('gsm', 'MISSING')}, BF={roll_data.get('bf', 'MISSING')}, Shade={roll_data.get('shade', 'MISSING')}")
+        logger.info(f"   Source: {roll_data.get('source_pending_id', 'MISSING')}")
+        logger.info(f"   Roll#: {roll_data.get('individual_roll_number', 'MISSING')}")
+        logger.info("   ---")
+    
     # Extract all pending order IDs from cut_rolls (they have source_pending_id)
     # Convert Pydantic objects to dicts for easier access
     selected_cut_rolls_dict = [cut_roll.model_dump() if hasattr(cut_roll, 'model_dump') else dict(cut_roll) for cut_roll in selected_cut_rolls]
     all_pending_order_ids = [cut_roll.get("source_pending_id") for cut_roll in selected_cut_rolls_dict if cut_roll.get("source_pending_id")]
     
-    logger.info(f"🔄 CUT ROLLS RECEIVED: {len(selected_cut_rolls)} cut_rolls with {len(all_pending_order_ids)} pending order references")
+    logger.info(f"🔄 CUT ROLLS PROCESSED: {len(selected_cut_rolls_dict)} processed, {len(all_pending_order_ids)} with pending IDs")
+    logger.info(f"🆔 PENDING ORDER IDs: {all_pending_order_ids}")
     
     # ✅ NEW APPROACH: Reuse the EXACT same logic as main production but without plan_id
     # The cut_rolls are already in the correct format from frontend
@@ -328,11 +350,13 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # No order updates needed for pending flow (no existing orders)
     
-    # Update pending orders status (Task 6: Pending order status updates)
+    # Update pending orders with proper quantity tracking (Task 6: Pending order status updates)
+    # IMPROVEMENT: Now supports partial fulfillment - only marks as "resolved" when quantity_pending reaches 0
+    # Allows remaining quantities to appear in future suggestion cycles
     unique_pending_ids = list(set(all_pending_order_ids))
     updated_pending_orders = []
     
-    logger.info(f"📝 PENDING STATUS UPDATE: Processing {len(unique_pending_ids)} unique pending orders")
+    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(unique_pending_ids)} unique pending orders with partial fulfillment tracking")
     
     for pending_id in unique_pending_ids:
         try:
@@ -358,53 +382,115 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             
             if pending_order:
                 logger.info(f"✅ Found pending order {pending_order.frontend_id}")
-                # Mark as resolved since it's been used in production
-                pending_order._status = "resolved"
-                pending_order.updated_at = datetime.utcnow()
+                logger.info(f"📊 Current quantities - Pending: {pending_order.quantity_pending}, Fulfilled: {pending_order.quantity_fulfilled}")
+                
+                # Count how many times this pending_id appears in selected cut_rolls (proper quantity tracking)
+                fulfilled_count = sum(1 for cut_roll in selected_cut_rolls_dict 
+                                    if cut_roll.get("source_pending_id") == str(pending_uuid))
+                
+                logger.info(f"🔢 Fulfilling {fulfilled_count} rolls from pending order {pending_order.frontend_id}")
+                
+                # EDGE CASE HANDLING: Validate we don't exceed available quantity
+                # This prevents negative quantities if frontend sends more rolls than available
+                if fulfilled_count > pending_order.quantity_pending:
+                    logger.warning(f"⚠️ Attempting to fulfill {fulfilled_count} rolls but only {pending_order.quantity_pending} pending. Capping to available quantity.")
+                    fulfilled_count = pending_order.quantity_pending
+                
+                # EDGE CASE HANDLING: Skip if no rolls to fulfill (defensive programming)
+                if fulfilled_count <= 0:
+                    logger.warning(f"⚠️ No rolls to fulfill for pending order {pending_order.frontend_id}")
+                    continue
+                
+                # Update quantities with proper tracking
+                pending_order.quantity_fulfilled += fulfilled_count
+                pending_order.quantity_pending -= fulfilled_count
+                
+                # Update status based on remaining quantity
+                if pending_order.quantity_pending <= 0:
+                    # Fully satisfied - mark as resolved
+                    pending_order._status = "resolved"
+                    pending_order.resolved_at = datetime.utcnow()
+                    logger.info(f"✅ FULLY RESOLVED: {pending_order.frontend_id} - {fulfilled_count} rolls fulfilled, 0 remaining")
+                else:
+                    # Partially satisfied - keep as pending for remaining quantity
+                    pending_order._status = "pending" 
+                    # Don't set resolved_at for partial fulfillment
+                    logger.info(f"📋 PARTIALLY FULFILLED: {pending_order.frontend_id} - {fulfilled_count} rolls fulfilled, {pending_order.quantity_pending} remaining")
+                
+                # Always mark as updated for tracking
                 updated_pending_orders.append(str(pending_order.id))
-                logger.info(f"🔄 Updated status: {pending_order.frontend_id} -> resolved")
+                logger.info(f"🔄 Updated quantities: Pending={pending_order.quantity_pending}, Fulfilled={pending_order.quantity_fulfilled}, Status={pending_order._status}")
             else:
                 logger.warning(f"❌ Pending order not found: {pending_id}")
         except Exception as e:
             logger.error(f"❌ Error updating pending order {pending_id}: {e}")
     
-    # ✅ COPY EXACT INVENTORY CREATION from main production - Group by paper spec and individual_roll_number
+    # ====== DETAILED LOGGING: Paper Specification Grouping ======
+    logger.info("🔬 PAPER SPEC GROUPING ANALYSIS:")
     jumbo_roll_width = request_data.jumbo_roll_width or 118
+    logger.info(f"📏 Jumbo roll width: {jumbo_roll_width}")
     
     # Group selected cut rolls by paper specification first, then by individual_roll_number (EXACT COPY)
     paper_spec_groups = {}  # {paper_spec_key: {roll_number: [cut_rolls]}}
     
-    logger.info(f"📦 GROUPING: Starting paper specification grouping for {len(selected_cut_rolls_dict)} cut rolls")
+    logger.info(f"📦 GROUPING START: Processing {len(selected_cut_rolls_dict)} cut rolls for paper spec grouping")
+    logger.info("🔍 Analyzing each cut roll for grouping logic:")
     
     for i, cut_roll in enumerate(selected_cut_rolls_dict):
+        logger.info(f"🔍 Processing Cut Roll #{i+1}:")
+        logger.info(f"   Raw data: {cut_roll}")
+        
         individual_roll_number = cut_roll.get("individual_roll_number")
+        logger.info(f"   Individual roll number: {individual_roll_number}")
+        
         if individual_roll_number:
             # Create paper specification key (gsm, bf, shade)
             paper_spec_key = (
                 cut_roll.get("gsm"),
-                cut_roll.get("bf"),
+                cut_roll.get("bf"), 
                 cut_roll.get("shade")
             )
             
-            logger.info(f"📦 Cut Roll {i+1}: Roll #{individual_roll_number}, Spec: {paper_spec_key}")
+            logger.info(f"   Paper spec key: {paper_spec_key}")
+            logger.info(f"   Width: {cut_roll.get('width_inches')}")
+            logger.info(f"   Source pending ID: {cut_roll.get('source_pending_id')}")
             
             # Initialize paper spec group if not exists
             if paper_spec_key not in paper_spec_groups:
                 paper_spec_groups[paper_spec_key] = {}
-                logger.info(f"📦 NEW PAPER SPEC: Created group for {paper_spec_key}")
+                logger.info(f"   ✅ CREATED NEW PAPER SPEC GROUP: {paper_spec_key}")
             
             # Initialize roll number group within this paper spec
             if individual_roll_number not in paper_spec_groups[paper_spec_key]:
                 paper_spec_groups[paper_spec_key][individual_roll_number] = []
-                logger.info(f"📦 NEW ROLL GROUP: Added roll #{individual_roll_number} to spec {paper_spec_key}")
+                logger.info(f"   ✅ CREATED NEW ROLL GROUP: #{individual_roll_number} in {paper_spec_key}")
+            else:
+                logger.info(f"   📋 USING EXISTING ROLL GROUP: #{individual_roll_number} in {paper_spec_key}")
             
             # Add cut roll to the appropriate group
             paper_spec_groups[paper_spec_key][individual_roll_number].append(cut_roll)
-            logger.info(f"📦 ADDED: Cut roll to spec {paper_spec_key}, roll #{individual_roll_number}")
+            current_count = len(paper_spec_groups[paper_spec_key][individual_roll_number])
+            logger.info(f"   ✅ ADDED to group: Now {current_count} rolls in #{individual_roll_number} for {paper_spec_key}")
+            logger.info(f"   📋 Added roll data: Width={cut_roll.get('width_inches')}, Source={cut_roll.get('source_pending_id')}")
         else:
             logger.warning(f"📦 SKIPPED: Cut roll {i+1} has no individual_roll_number")
             
-    logger.info(f"📦 PAPER SPEC GROUPING: Found {len(paper_spec_groups)} unique paper specifications")
+    logger.info(f"📦 PAPER SPEC GROUPING COMPLETE: Found {len(paper_spec_groups)} unique paper specifications")
+    
+    # ====== DETAILED LOGGING: Final Grouping Summary ======
+    logger.info("🔬 FINAL GROUPING SUMMARY:")
+    for spec_key, roll_groups in paper_spec_groups.items():
+        gsm, bf, shade = spec_key
+        logger.info(f"📋 Paper Spec: {gsm}gsm, {bf}bf, {shade}")
+        total_rolls_in_spec = 0
+        for roll_number, cut_rolls in roll_groups.items():
+            roll_count = len(cut_rolls)
+            total_rolls_in_spec += roll_count
+            logger.info(f"   Roll #{roll_number}: {roll_count} cut rolls")
+            for j, roll in enumerate(cut_rolls):
+                logger.info(f"     Cut #{j+1}: {roll.get('width_inches')}\" (ID: {roll.get('source_pending_id', 'N/A')})")
+        logger.info(f"   🔢 Total rolls for this spec: {total_rolls_in_spec}")
+        logger.info("   ---")
     
     for spec_key, cut_rolls_for_spec in paper_spec_groups.items():
         gsm, bf, shade = spec_key
@@ -479,11 +565,18 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 created_118_rolls.append(roll_118)
                 logger.info(f"📏 Created 118\" roll: {roll_118.frontend_id}")
     
-    # Now create cut rolls following the existing pattern
-    logger.info(f"🔧 CUT ROLL CREATION: Processing {len(selected_cut_rolls_dict)} cut rolls")
+    # ====== DETAILED LOGGING: Cut Roll Inventory Creation ======
+    logger.info("🔧 CUT ROLL INVENTORY CREATION:")
+    logger.info(f"📦 Total cut rolls to process: {len(selected_cut_rolls_dict)}")
+    logger.info("🔍 Processing each selected cut roll for inventory creation:")
+    
     for i, cut_roll in enumerate(selected_cut_rolls_dict):
         try:
-            logger.info(f"🔧 Processing cut roll {i+1}/{len(selected_cut_rolls_dict)}: {cut_roll['width_inches']}\" {cut_roll['gsm']}gsm")
+            logger.info(f"🔧 ===== PROCESSING CUT ROLL #{i+1}/{len(selected_cut_rolls_dict)} =====")
+            logger.info(f"📦 Cut roll data: {cut_roll}")
+            logger.info(f"📏 Dimensions: {cut_roll.get('width_inches')}\" x {cut_roll.get('weight_kg', 'N/A')}kg")
+            logger.info(f"📋 Paper: GSM={cut_roll.get('gsm')}, BF={cut_roll.get('bf')}, Shade={cut_roll.get('shade')}")
+            logger.info(f"🔗 Source: pending_id={cut_roll.get('source_pending_id')}, roll_number={cut_roll.get('individual_roll_number')}")
             
             # Find the paper record for this cut roll
             cut_roll_paper = db.query(models.PaperMaster).filter(
@@ -493,36 +586,56 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             ).first()
             
             if not cut_roll_paper:
-                logger.error(f"❌ Paper not found for cut roll {i+1}: {cut_roll['gsm']}gsm {cut_roll['bf']}bf {cut_roll['shade']}")
+                logger.error(f"❌ PAPER LOOKUP FAILED: No paper found for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']}")
+                logger.error(f"❌ SKIPPING cut roll #{i+1} due to missing paper record")
                 continue
             else:
-                logger.info(f"✅ Found paper: {cut_roll_paper.frontend_id}")
+                logger.info(f"✅ PAPER FOUND: {cut_roll_paper.frontend_id} (ID: {cut_roll_paper.id})")
             
             # Find a suitable 118" roll to attach this cut to
+            logger.info(f"🔍 Looking for suitable 118\" parent roll...")
             suitable_118_roll = db.query(models.InventoryMaster).filter(
                 models.InventoryMaster.paper_id == cut_roll_paper.id,
                 models.InventoryMaster.roll_type == "118",
                 models.InventoryMaster.status == "consumed"
             ).first()
             
+            if suitable_118_roll:
+                logger.info(f"✅ Found parent 118\" roll: {suitable_118_roll.frontend_id}")
+            else:
+                logger.warning(f"⚠️ No suitable 118\" parent roll found - will create cut roll without parent")
+            
             # Create the cut roll inventory record with ORDER LINKING
-            logger.info(f"🔧 Creating inventory item with barcode generation...")
+            logger.info(f"🔧 Generating identifiers for inventory creation...")
             barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
             frontend_id = FrontendIDGenerator.generate_frontend_id("inventory_master", db)
             logger.info(f"🔧 Generated IDs - Barcode: {barcode_id}, Frontend: {frontend_id}")
             
             # ✅ CRITICAL: Link cut roll to original order for client tracking
+            logger.info(f"🔗 Attempting to link cut roll to original order...")
             order_id = cut_roll.get("order_id")
+            logger.info(f"🔗 Order ID from cut_roll: {order_id}")
             if order_id:
                 try:
                     order_uuid = UUID(order_id)
-                    logger.info(f"✅ Linking cut roll to original order: {order_id}")
+                    logger.info(f"✅ VALID ORDER LINK: {order_id}")
                 except (ValueError, TypeError):
-                    logger.warning(f"❌ Invalid order_id format: {order_id}")
+                    logger.warning(f"❌ INVALID ORDER ID FORMAT: {order_id}")
                     order_uuid = None
             else:
-                logger.warning(f"❌ No order_id found in cut_roll data")
+                logger.warning(f"❌ NO ORDER ID: Missing order_id in cut_roll data")
                 order_uuid = None
+            
+            # Create inventory item with full logging
+            logger.info(f"🏗️ CREATING INVENTORY RECORD:")
+            logger.info(f"   Paper ID: {cut_roll_paper.id}")
+            logger.info(f"   Width: {cut_roll['width_inches']}\"")
+            logger.info(f"   QR Code: {cut_roll['qr_code']}")
+            logger.info(f"   Barcode: {barcode_id}")
+            logger.info(f"   Frontend ID: {frontend_id}")
+            logger.info(f"   Parent 118 Roll: {suitable_118_roll.id if suitable_118_roll else 'None'}")
+            logger.info(f"   Individual Roll #: {cut_roll.get('individual_roll_number', 1)}")
+            logger.info(f"   Allocated to Order: {order_uuid}")
             
             inventory_item = models.InventoryMaster(
                 paper_id=cut_roll_paper.id,
@@ -542,11 +655,14 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 allocated_to_order_id=order_uuid  # ✅ LINK TO ORIGINAL ORDER FOR CLIENT INFO
             )
             
-            logger.info(f"🔧 Adding inventory item to database...")
+            logger.info(f"💾 SAVING TO DATABASE:")
             db.add(inventory_item)
             db.flush()  # Get the ID immediately
             created_inventory.append(inventory_item)
-            logger.info(f"✂️ Created cut roll: {inventory_item.frontend_id} ({cut_roll['width_inches']}\") ID: {inventory_item.id}")
+            logger.info(f"✅ SUCCESSFULLY CREATED: {inventory_item.frontend_id} (DB ID: {inventory_item.id})")
+            logger.info(f"📋 FINAL INVENTORY: Width={inventory_item.width_inches}\", Paper={cut_roll_paper.frontend_id}, QR={inventory_item.qr_code}")
+            logger.info(f"===== END CUT ROLL #{i+1} =====")
+            logger.info("")  # Empty line for readability
             
         except Exception as e:
             logger.error(f"❌ Error creating cut roll inventory {i+1}: {e}")
@@ -661,6 +777,35 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
         logger.error(f"❌ DATABASE ROLLBACK: Commit failed: {e}")
         raise
     
+    # ====== FINAL SUMMARY LOGGING ======
+    logger.info("🎯 ===== FINAL PRODUCTION SUMMARY =====")
+    logger.info(f"📊 INPUT SUMMARY:")
+    logger.info(f"   Selected cut rolls from frontend: {len(selected_cut_rolls)}")
+    logger.info(f"   Pending order IDs found: {len(all_pending_order_ids)}")
+    logger.info(f"   Unique pending orders processed: {len(unique_pending_ids)}")
+    
+    logger.info(f"📊 PROCESSING RESULTS:")
+    logger.info(f"   Paper specifications found: {len(paper_spec_groups)}")
+    logger.info(f"   Jumbo rolls created: {len(created_jumbo_rolls)}")
+    logger.info(f"   118\" rolls created: {len(created_118_rolls)}")
+    logger.info(f"   Cut roll inventory created: {len(created_inventory)}")
+    logger.info(f"   Pending orders updated: {len(updated_pending_orders)}")
+    
+    logger.info(f"📊 INVENTORY DETAILS:")
+    for i, inv in enumerate(created_inventory, 1):
+        logger.info(f"   #{i}: {inv.frontend_id} - {inv.width_inches}\" ({inv.qr_code})")
+    
+    logger.info(f"📊 SUCCESS RATIO: {len(created_inventory)}/{len(selected_cut_rolls)} cut rolls successfully created")
+    
+    if len(created_inventory) != len(selected_cut_rolls):
+        logger.warning(f"⚠️ MISMATCH DETECTED: {len(selected_cut_rolls)} selected vs {len(created_inventory)} created")
+        logger.warning(f"⚠️ This indicates some rolls failed to process - check error logs above")
+    else:
+        logger.info(f"✅ PERFECT MATCH: All selected rolls were successfully processed")
+    
+    logger.info("🎯 ===== END PRODUCTION SUMMARY =====")
+    logger.info("")
+
     # Return response matching StartProductionResponse format
     return {
         "plan_id": str(db_plan.id),
@@ -696,7 +841,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 "created_at": inv.created_at.isoformat() if inv.created_at else None
             } for inv in created_inventory
         ],
-        "message": f"Production started successfully from pending suggestions - Plan {db_plan.frontend_id} completed: Resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_plan_links)} plan links"
+        "message": f"Production started successfully from pending suggestions - Plan {db_plan.frontend_id} completed: Processed {len(updated_pending_orders)} pending orders (with partial fulfillment tracking), created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_plan_links)} plan links"
     }
 
 
