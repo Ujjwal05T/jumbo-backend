@@ -4,6 +4,7 @@ from sqlalchemy import and_, func, desc
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from collections import defaultdict
+import json
 
 from .base import CRUDBase
 from .. import models, schemas
@@ -329,14 +330,78 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # Create plan record (same pattern as main production)
     plan_name = f"Pending Production Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
-    cut_pattern = {"selected_cut_rolls": selected_cut_rolls_dict, "source": "pending_orders"}
+    
+    # ✅ NEW: Create cut_pattern array with same structure as regular orders
+    cut_pattern = []
+    for index, cut_roll in enumerate(selected_cut_rolls_dict):
+        # Get company name from pending order's original order
+        company_name = 'Unknown Company'
+        
+        # Find pending order to get original order details
+        if cut_roll.get("source_pending_id"):
+            try:
+                pending_order = db.query(models.PendingOrderItem).filter(
+                    models.PendingOrderItem.id == UUID(cut_roll["source_pending_id"])
+                ).first()
+                
+                if pending_order and pending_order.original_order and pending_order.original_order.client:
+                    company_name = pending_order.original_order.client.company_name
+                    logger.info(f"✅ Found company: {company_name} for pending order {pending_order.frontend_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not resolve company for pending order {cut_roll.get('source_pending_id')}: {e}")
+        
+        # Create cut_pattern entry with same structure as regular orders
+        cut_pattern_entry = {
+            "width": cut_roll.get("width_inches", 0),
+            "gsm": cut_roll.get("gsm", 0),
+            "bf": cut_roll.get("bf", 0.0),
+            "shade": cut_roll.get("shade", "unknown"),
+            "individual_roll_number": cut_roll.get("individual_roll_number", 1),
+            "source": "cutting",  # Standard source for cut rolls
+            "order_id": cut_roll.get("order_id", cut_roll.get("source_pending_id")),  # Use order_id or fallback to pending_id
+            "selected": True,  # All pending production rolls are selected by user
+            "source_type": "pending_order",  # Mark as coming from pending orders
+            "source_pending_id": cut_roll.get("source_pending_id"),
+            "company_name": company_name
+        }
+        
+        cut_pattern.append(cut_pattern_entry)
+        logger.info(f"📋 Cut Pattern Entry #{index+1}: {cut_roll.get('width_inches', 0)}\" - {company_name}")
+    
+    logger.info(f"✅ Created cut_pattern array with {len(cut_pattern)} entries (same structure as regular orders)")
+    
+    # ✅ CALCULATE ACTUAL WASTE PERCENTAGE from cut roll data
+    total_waste_percentage = 0.0
+    if cut_pattern:
+        # Group cut rolls by individual_roll_number to calculate waste per 118" roll
+        roll_groups = {}
+        for cut_entry in cut_pattern:
+            roll_num = cut_entry.get("individual_roll_number", 1)
+            if roll_num not in roll_groups:
+                roll_groups[roll_num] = []
+            roll_groups[roll_num].append(cut_entry.get("width", 0))
+        
+        # Calculate waste for each 118" roll
+        total_waste = 0.0
+        total_rolls = len(roll_groups)
+        
+        for roll_num, widths in roll_groups.items():
+            used_width = sum(widths)  # Total width used in this 118" roll
+            waste_width = jumbo_roll_width - used_width  # Waste = Planning width - Used width
+            waste_percentage = (waste_width / jumbo_roll_width) * 100 if jumbo_roll_width > 0 else 0
+            total_waste += waste_percentage
+            logger.info(f"📊 Roll #{roll_num}: Used {used_width}\", Waste {waste_width}\" ({waste_percentage:.1f}%)")
+        
+        # Average waste percentage across all rolls
+        total_waste_percentage = total_waste / total_rolls if total_rolls > 0 else 0.0
+        logger.info(f"📊 AVERAGE WASTE PERCENTAGE: {total_waste_percentage:.1f}% across {total_rolls} rolls")
     
     db_plan = models.PlanMaster(
         id=uuid4(),
         frontend_id=FrontendIDGenerator.generate_frontend_id("plan_master", db),
         name=plan_name,
-        cut_pattern=str(cut_pattern),  # JSON string of suggestions
-        expected_waste_percentage=0.0,  # No waste expected from suggestions
+        cut_pattern=json.dumps(cut_pattern),  # JSON string of cut_pattern array (same structure as regular orders)
+        expected_waste_percentage=total_waste_percentage,  # ✅ FIXED: Calculate actual waste from cut roll data
         actual_waste_percentage=0.0,
         status="in_progress",  # Start directly in progress
         created_by_id=UUID(created_by_id),
