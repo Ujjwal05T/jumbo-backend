@@ -281,41 +281,30 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     logger.info(f"📊 REQUEST DATA: {len(selected_cut_rolls)} cut_rolls, created_by: {created_by_id}")
     
-    # ====== DETAILED LOGGING: Frontend Request Analysis ======
-    logger.info("🔍 FRONTEND REQUEST ANALYSIS:")
-    logger.info(f"📦 Raw selected_cut_rolls type: {type(selected_cut_rolls)}")
-    logger.info(f"📦 Raw all_available_cuts type: {type(all_available_cuts)}")
-    logger.info(f"📦 Raw selected_cut_rolls length: {len(selected_cut_rolls)}")
-    
-    # Log each individual selected cut roll for debugging
-    for i, cut_roll in enumerate(selected_cut_rolls):
-        logger.info(f"📋 Selected Roll #{i+1}:")
-        logger.info(f"   Type: {type(cut_roll)}")
-        if hasattr(cut_roll, 'model_dump'):
-            roll_data = cut_roll.model_dump()
-        else:
-            roll_data = dict(cut_roll)
-        logger.info(f"   Data: {roll_data}")
-        logger.info(f"   Width: {roll_data.get('width_inches', 'MISSING')}")
-        logger.info(f"   Paper: GSM={roll_data.get('gsm', 'MISSING')}, BF={roll_data.get('bf', 'MISSING')}, Shade={roll_data.get('shade', 'MISSING')}")
-        logger.info(f"   Source: {roll_data.get('source_pending_id', 'MISSING')}")
-        logger.info(f"   Roll#: {roll_data.get('individual_roll_number', 'MISSING')}")
-        logger.info("   ---")
     
     # Extract all pending order IDs from cut_rolls (they have source_pending_id)
     # Convert Pydantic objects to dicts for easier access
     selected_cut_rolls_dict = [cut_roll.model_dump() if hasattr(cut_roll, 'model_dump') else dict(cut_roll) for cut_roll in selected_cut_rolls]
+    
+    # DEBUG: Log each cut roll to see what we're processing
+    logger.info("🔍 DEBUGGING CUT ROLLS:")
+    for i, cut_roll in enumerate(selected_cut_rolls_dict):
+        logger.info(f"   Roll {i+1}: source_pending_id='{cut_roll.get('source_pending_id')}', source_type='{cut_roll.get('source_type')}', width={cut_roll.get('width_inches')}")
+    
     all_pending_order_ids = [cut_roll.get("source_pending_id") for cut_roll in selected_cut_rolls_dict if cut_roll.get("source_pending_id")]
     
     logger.info(f"🔄 CUT ROLLS PROCESSED: {len(selected_cut_rolls_dict)} processed, {len(all_pending_order_ids)} with pending IDs")
     logger.info(f"🆔 PENDING ORDER IDs: {all_pending_order_ids}")
     
-    # ✅ NEW APPROACH: Reuse the EXACT same logic as main production but without plan_id
-    # The cut_rolls are already in the correct format from frontend
-    logger.info("🎯 REUSING MAIN PRODUCTION LOGIC: Using same approach as start_production_for_plan")
-    
-    # Use the existing production logic but without a plan_id
-    # We'll adapt the core logic from start_production_for_plan
+    # Additional debugging: Check if we have any pending order IDs at all
+    if not all_pending_order_ids:
+        logger.error("❌ CRITICAL: No pending order IDs found in cut_rolls! This means no quantity updates will happen.")
+        logger.error("   This could mean:")
+        logger.error("   1. Frontend is not sending source_pending_id field")
+        logger.error("   2. All source_pending_id values are null/empty") 
+        logger.error("   3. Cut rolls are not from pending orders")
+    else:
+        logger.info(f"✅ Found {len(all_pending_order_ids)} pending order IDs to process")
     
     # Track entities
     updated_orders = []
@@ -324,9 +313,6 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     created_jumbo_rolls = []
     created_118_rolls = []
     created_wastage = []
-    
-    # Create a PlanMaster record for proper tracking (like main production flow)
-    logger.info("📋 PLAN CREATION: Creating PlanMaster record for pending production")
     
     # Create plan record (same pattern as main production)
     plan_name = f"Pending Production Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
@@ -373,24 +359,44 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # ✅ CALCULATE ACTUAL WASTE PERCENTAGE from cut roll data
     total_waste_percentage = 0.0
     if cut_pattern:
-        # Group cut rolls by individual_roll_number to calculate waste per 118" roll
+        # Group cut rolls by (paper_spec, individual_roll_number) to calculate waste per 118" roll
+        # This ensures different paper specs don't get mixed in waste calculations
         roll_groups = {}
         for cut_entry in cut_pattern:
             roll_num = cut_entry.get("individual_roll_number", 1)
-            if roll_num not in roll_groups:
-                roll_groups[roll_num] = []
-            roll_groups[roll_num].append(cut_entry.get("width", 0))
+            
+            # Create paper specification key with validation
+            gsm = cut_entry.get("gsm", 0) or 0
+            bf = cut_entry.get("bf", 0.0) or 0.0  
+            shade = cut_entry.get("shade", "Unknown") or "Unknown"
+            paper_key = (gsm, bf, shade)
+            
+            # Create composite key: (paper_spec, roll_number)
+            composite_key = (paper_key, roll_num)
+            
+            if composite_key not in roll_groups:
+                roll_groups[composite_key] = []
+            roll_groups[composite_key].append(cut_entry.get("width", 0))
         
         # Calculate waste for each 118" roll
         total_waste = 0.0
         total_rolls = len(roll_groups)
         
-        for roll_num, widths in roll_groups.items():
+        for composite_key, widths in roll_groups.items():
+            paper_key, roll_num = composite_key
+            gsm, bf, shade = paper_key
+            
             used_width = sum(widths)  # Total width used in this 118" roll
             waste_width = jumbo_roll_width - used_width  # Waste = Planning width - Used width
+            
+            # Ensure waste is never negative (clamp to 0 if used_width exceeds jumbo_roll_width)
+            if waste_width < 0:
+                logger.warning(f"⚠️  Roll #{roll_num} ({shade} {gsm}GSM): Used width {used_width}\" exceeds jumbo width {jumbo_roll_width}\" - setting waste to 0")
+                waste_width = 0
+            
             waste_percentage = (waste_width / jumbo_roll_width) * 100 if jumbo_roll_width > 0 else 0
             total_waste += waste_percentage
-            logger.info(f"📊 Roll #{roll_num}: Used {used_width}\", Waste {waste_width}\" ({waste_percentage:.1f}%)")
+            logger.info(f"📊 Roll #{roll_num} ({shade} {gsm}GSM): Used {used_width}\", Waste {waste_width}\" ({waste_percentage:.1f}%)")
         
         # Average waste percentage across all rolls
         total_waste_percentage = total_waste / total_rolls if total_rolls > 0 else 0.0
@@ -440,6 +446,17 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 logger.error(f"❌ Invalid UUID format for '{pending_id}': {uuid_error}")
                 continue
             
+            # DEBUG: Check if pending order exists in database  
+            pending_order_any_status = db.query(models.PendingOrderItem).filter(
+                models.PendingOrderItem.id == pending_uuid
+            ).first()
+            
+            if not pending_order_any_status:
+                logger.error(f"❌ CRITICAL: Pending order {pending_uuid} NOT FOUND in database at all!")
+                continue
+            else:
+                logger.info(f"✅ Found pending order {pending_uuid} with status: {pending_order_any_status._status}")
+            
             pending_order = db.query(models.PendingOrderItem).filter(
                 models.PendingOrderItem.id == pending_uuid,
                 models.PendingOrderItem._status == "pending"
@@ -451,24 +468,25 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 
                 # Count how many times this pending_id appears in selected cut_rolls (proper quantity tracking)
                 fulfilled_count = sum(1 for cut_roll in selected_cut_rolls_dict 
-                                    if cut_roll.get("source_pending_id") == str(pending_uuid))
-                
+                                    if str(cut_roll.get("source_pending_id", "")) == str(pending_uuid))
                 logger.info(f"🔢 Fulfilling {fulfilled_count} rolls from pending order {pending_order.frontend_id}")
-                
-                # EDGE CASE HANDLING: Validate we don't exceed available quantity
-                # This prevents negative quantities if frontend sends more rolls than available
-                if fulfilled_count > pending_order.quantity_pending:
-                    logger.warning(f"⚠️ Attempting to fulfill {fulfilled_count} rolls but only {pending_order.quantity_pending} pending. Capping to available quantity.")
-                    fulfilled_count = pending_order.quantity_pending
                 
                 # EDGE CASE HANDLING: Skip if no rolls to fulfill (defensive programming)
                 if fulfilled_count <= 0:
                     logger.warning(f"⚠️ No rolls to fulfill for pending order {pending_order.frontend_id}")
                     continue
                 
-                # Update quantities with proper tracking
+                # Update quantities with proper tracking - count each cut piece
+                # Note: We don't cap fulfilled_count because the pending order represents a requirement
+                # that can be fulfilled by multiple cut pieces
                 pending_order.quantity_fulfilled += fulfilled_count
-                pending_order.quantity_pending -= fulfilled_count
+                
+                # Only reduce quantity_pending if we're fulfilling the requirement
+                # (Don't go below 0)
+                quantity_to_reduce = min(fulfilled_count, pending_order.quantity_pending)
+                pending_order.quantity_pending -= quantity_to_reduce
+                
+                logger.info(f"📊 Updated fulfillment: +{fulfilled_count} fulfilled, -{quantity_to_reduce} pending")
                 
                 # Update status based on remaining quantity
                 if pending_order.quantity_pending <= 0:
@@ -842,25 +860,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
         logger.error(f"❌ DATABASE ROLLBACK: Commit failed: {e}")
         raise
     
-    # ====== FINAL SUMMARY LOGGING ======
-    logger.info("🎯 ===== FINAL PRODUCTION SUMMARY =====")
-    logger.info(f"📊 INPUT SUMMARY:")
-    logger.info(f"   Selected cut rolls from frontend: {len(selected_cut_rolls)}")
-    logger.info(f"   Pending order IDs found: {len(all_pending_order_ids)}")
-    logger.info(f"   Unique pending orders processed: {len(unique_pending_ids)}")
-    
-    logger.info(f"📊 PROCESSING RESULTS:")
-    logger.info(f"   Paper specifications found: {len(paper_spec_groups)}")
-    logger.info(f"   Jumbo rolls created: {len(created_jumbo_rolls)}")
-    logger.info(f"   118\" rolls created: {len(created_118_rolls)}")
-    logger.info(f"   Cut roll inventory created: {len(created_inventory)}")
-    logger.info(f"   Pending orders updated: {len(updated_pending_orders)}")
-    
-    logger.info(f"📊 INVENTORY DETAILS:")
-    for i, inv in enumerate(created_inventory, 1):
-        logger.info(f"   #{i}: {inv.frontend_id} - {inv.width_inches}\" ({inv.qr_code})")
-    
-    logger.info(f"📊 SUCCESS RATIO: {len(created_inventory)}/{len(selected_cut_rolls)} cut rolls successfully created")
+    logger.info(f"✅ Production complete: {len(created_inventory)} inventory items, {len(updated_pending_orders)} pending orders updated")
     
     if len(created_inventory) != len(selected_cut_rolls):
         logger.warning(f"⚠️ MISMATCH DETECTED: {len(selected_cut_rolls)} selected vs {len(created_inventory)} created")

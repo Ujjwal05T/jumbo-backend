@@ -28,7 +28,7 @@ def create_pending_order_item(pending: schemas.PendingOrderItemCreate, db: Sessi
 @router.get("/pending-order-items", response_model=List[schemas.PendingOrderItem], tags=["Pending Order Items"])
 def get_pending_order_items(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 1000,
     status: str = "pending",
     db: Session = Depends(get_db)
 ):
