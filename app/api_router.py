@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from .api import clients, users, papers, orders, inventory, plans, workflow, pending_orders, auth, cutting, qr_codes, cut_rolls, dashboard, dispatch, reports, wastage, past_dispatch, inventory_items
+from .api import clients, users, papers, orders, inventory, plans, workflow, pending_orders, auth, cutting, qr_codes, cut_rolls, dashboard, dispatch, reports, wastage, past_dispatch, inventory_items, gpt_planning
 
 # Create main API router
 api_router = APIRouter()
@@ -25,3 +25,6 @@ api_router.include_router(reports.router, prefix="/api", tags=["Reports"])
 api_router.include_router(wastage.router, prefix="/api", tags=["Wastage Management"])
 api_router.include_router(past_dispatch.router, prefix="/api", tags=["Past Dispatch Management"])
 api_router.include_router(inventory_items.router, prefix="/api/inventory-items", tags=["Inventory Items"])
+
+# GPT Planning endpoints
+api_router.include_router(gpt_planning.router, prefix="/api", tags=["GPT Planning"])
