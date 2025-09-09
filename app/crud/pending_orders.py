@@ -421,92 +421,44 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # No order updates needed for pending flow (no existing orders)
     
-    # Update pending orders with proper quantity tracking (Task 6: Pending order status updates)
-    # IMPROVEMENT: Now supports partial fulfillment - only marks as "resolved" when quantity_pending reaches 0
-    # Allows remaining quantities to appear in future suggestion cycles
-    unique_pending_ids = list(set(all_pending_order_ids))
+    # Update pending orders - each cut_roll reduces pending quantity by 1 (exact plans.py pattern)
     updated_pending_orders = []
     
-    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(unique_pending_ids)} unique pending orders with partial fulfillment tracking")
+    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(selected_cut_rolls_dict)} cut_rolls individually")
     
-    for pending_id in unique_pending_ids:
+    # Process each cut_roll (plans.py approach)
+    for i, cut_roll in enumerate(selected_cut_rolls_dict):
+        source_pending_id = cut_roll.get("source_pending_id")
+        
+        if not source_pending_id:
+            continue
+            
         try:
-            logger.info(f"🔍 Processing pending_id: '{pending_id}' (type: {type(pending_id)})")
+            pending_uuid = UUID(source_pending_id)
             
-            # Validate pending_id format
-            if not pending_id or not isinstance(pending_id, str):
-                logger.warning(f"❌ Invalid pending_id format: {pending_id}")
-                continue
-                
-            # Try to convert to UUID with better error handling
-            try:
-                pending_uuid = UUID(pending_id)
-                logger.info(f"✅ Valid UUID: {pending_uuid}")
-            except (ValueError, TypeError) as uuid_error:
-                logger.error(f"❌ Invalid UUID format for '{pending_id}': {uuid_error}")
-                continue
-            
-            # DEBUG: Check if pending order exists in database  
-            pending_order_any_status = db.query(models.PendingOrderItem).filter(
-                models.PendingOrderItem.id == pending_uuid
-            ).first()
-            
-            if not pending_order_any_status:
-                logger.error(f"❌ CRITICAL: Pending order {pending_uuid} NOT FOUND in database at all!")
-                continue
-            else:
-                logger.info(f"✅ Found pending order {pending_uuid} with status: {pending_order_any_status._status}")
-            
+            # Get pending order
             pending_order = db.query(models.PendingOrderItem).filter(
                 models.PendingOrderItem.id == pending_uuid,
                 models.PendingOrderItem._status == "pending"
             ).first()
             
-            if pending_order:
-                logger.info(f"✅ Found pending order {pending_order.frontend_id}")
-                logger.info(f"📊 Current quantities - Pending: {pending_order.quantity_pending}, Fulfilled: {pending_order.quantity_fulfilled}")
+            if pending_order and pending_order.quantity_pending > 0:
+                logger.info(f"🔢 Cut roll {i+1}: {pending_order.frontend_id} ({pending_order.quantity_pending} -> {pending_order.quantity_pending-1})")
                 
-                # Count how many times this pending_id appears in selected cut_rolls (proper quantity tracking)
-                fulfilled_count = sum(1 for cut_roll in selected_cut_rolls_dict 
-                                    if str(cut_roll.get("source_pending_id", "")) == str(pending_uuid))
-                logger.info(f"🔢 Fulfilling {fulfilled_count} rolls from pending order {pending_order.frontend_id}")
+                # Each cut_roll reduces pending by exactly 1
+                pending_order.quantity_fulfilled = (pending_order.quantity_fulfilled or 0) + 1
+                pending_order.quantity_pending = max(0, pending_order.quantity_pending - 1)
                 
-                # EDGE CASE HANDLING: Skip if no rolls to fulfill (defensive programming)
-                if fulfilled_count <= 0:
-                    logger.warning(f"⚠️ No rolls to fulfill for pending order {pending_order.frontend_id}")
-                    continue
-                
-                # Update quantities with proper tracking - count each cut piece
-                # Note: We don't cap fulfilled_count because the pending order represents a requirement
-                # that can be fulfilled by multiple cut pieces
-                pending_order.quantity_fulfilled += fulfilled_count
-                
-                # Only reduce quantity_pending if we're fulfilling the requirement
-                # (Don't go below 0)
-                quantity_to_reduce = min(fulfilled_count, pending_order.quantity_pending)
-                pending_order.quantity_pending -= quantity_to_reduce
-                
-                logger.info(f"📊 Updated fulfillment: +{fulfilled_count} fulfilled, -{quantity_to_reduce} pending")
-                
-                # Update status based on remaining quantity
+                # Update status
                 if pending_order.quantity_pending <= 0:
-                    # Fully satisfied - mark as resolved
                     pending_order._status = "resolved"
                     pending_order.resolved_at = datetime.utcnow()
-                    logger.info(f"✅ FULLY RESOLVED: {pending_order.frontend_id} - {fulfilled_count} rolls fulfilled, 0 remaining")
-                else:
-                    # Partially satisfied - keep as pending for remaining quantity
-                    pending_order._status = "pending" 
-                    # Don't set resolved_at for partial fulfillment
-                    logger.info(f"📋 PARTIALLY FULFILLED: {pending_order.frontend_id} - {fulfilled_count} rolls fulfilled, {pending_order.quantity_pending} remaining")
                 
-                # Always mark as updated for tracking
                 updated_pending_orders.append(str(pending_order.id))
-                logger.info(f"🔄 Updated quantities: Pending={pending_order.quantity_pending}, Fulfilled={pending_order.quantity_fulfilled}, Status={pending_order._status}")
-            else:
-                logger.warning(f"❌ Pending order not found: {pending_id}")
+                
         except Exception as e:
-            logger.error(f"❌ Error updating pending order {pending_id}: {e}")
+            logger.error(f"❌ Error processing cut roll {i+1}: {e}")
+            continue
     
     # ====== DETAILED LOGGING: Paper Specification Grouping ======
     logger.info("🔬 PAPER SPEC GROUPING ANALYSIS:")

@@ -14,7 +14,7 @@ class MigrationConfig:
     
     # Database connection settings
     # Option 1: Direct connection string
-    DATABASE_URL: Optional[str] = r"mssql+pyodbc:///?odbc_connect=DRIVER={ODBC Driver 17 for SQL Server};SERVER=157.20.215.187,1433;DATABASE=JumboRollDB;UID=Indus;PWD=Param@99811;Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=30"
+    DATABASE_URL: Optional[str] = r"mssql+pyodbc:///?odbc_connect=DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost\SQLEXPRESS;DATABASE=JumboRollDB;Trusted_Connection=yes"
     
     # Migration settings
     BATCH_SIZE: int = 100  # Process records in batches of this size
