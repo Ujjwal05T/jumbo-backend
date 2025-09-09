@@ -3,10 +3,15 @@
 Frontend ID Migration Script
 ============================
 
-Converts existing year-month based frontend IDs to simple sequential format.
+Converts existing frontend IDs from various formats to simple sequential format.
 
-Before: ORD-25-08-0001, PLN-25-08-0001, DSP-25-08-0001
-After:  ORD-000001, PLN-000001, DSP-000001
+Handles multiple input formats:
+- ORD-2025-001 (year-number)
+- ORD-2025-09-0001 (year-month-number) 
+- ORD-2025-00001 (year-number with more digits)
+- Any other non-standard formats
+
+Standardizes ALL to: ORD-00001, PLN-00001, DSP-00001, PDR-00001
 
 IMPORTANT: 
 1. Take database backup before running
@@ -41,26 +46,42 @@ logger = logging.getLogger(__name__)
 class FrontendIDMigrator:
     """Handles migration of frontend IDs from year-month format to sequential format."""
     
-    # Tables that use year-month format and need migration
+    # Tables that need migration from various formats to simple sequential format
     TABLES_TO_MIGRATE = {
         "order_master": {
             "prefix": "ORD",
-            "old_pattern": r"%-%-%-%",  # ORD-YY-MM-NNNN
+            "old_patterns": [
+                "ORD-____-__-____",     # ORD-YYYY-MM-NNNN format
+                "ORD-____-__%",         # ORD-YYYY-NNNN format (any number of digits)
+                "ORD-%-%-___%"          # ORD-YY-MM-NNN format (legacy)
+            ],
             "description": "Order Master records"
         },
         "plan_master": {
             "prefix": "PLN", 
-            "old_pattern": r"%-%-%-%",  # PLN-YY-MM-NNNN
+            "old_patterns": [
+                "PLN-____-__-____",     # PLN-YYYY-MM-NNNN format
+                "PLN-____-__%",         # PLN-YYYY-NNNN format (any number of digits)
+                "PLN-%-%-___%"          # PLN-YY-MM-NNN format (legacy)
+            ],
             "description": "Plan Master records"
         },
         "dispatch_record": {
             "prefix": "DSP",
-            "old_pattern": r"%-%-%-%",  # DSP-YY-MM-NNNN
+            "old_patterns": [
+                "DSP-____-__-____",     # DSP-YYYY-MM-NNNN format
+                "DSP-____-__%",         # DSP-YYYY-NNNN format (any number of digits)
+                "DSP-%-%-___%"          # DSP-YY-MM-NNN format (legacy)
+            ],
             "description": "Dispatch Record records"
         },
         "past_dispatch_record": {
             "prefix": "PDR",
-            "old_pattern": r"%-%-%-%",  # PDR-YY-MM-NNNN
+            "old_patterns": [
+                "PDR-____-__-____",     # PDR-YYYY-MM-NNNN format
+                "PDR-____-__%",         # PDR-YYYY-NNNN format (any number of digits)
+                "PDR-%-%-___%"          # PDR-YY-MM-NNN format (legacy)
+            ],
             "description": "Past Dispatch Record records"
         }
     }
@@ -110,15 +131,24 @@ class FrontendIDMigrator:
                     logger.warning(f"⚠️  Table {table_name} does not exist, skipping...")
                     continue
                 
-                # Count records with old format
-                old_format_query = text(f"""
-                    SELECT COUNT(*) as old_format_count
-                    FROM {table_name}
-                    WHERE frontend_id LIKE :pattern
-                      AND frontend_id IS NOT NULL
-                """)
-                
-                old_count = db.execute(old_format_query, {"pattern": config["old_pattern"]}).scalar()
+                # Count records with old formats (any of the patterns)
+                old_count = 0
+                for pattern in config["old_patterns"]:
+                    old_format_query = text(f"""
+                        SELECT COUNT(*) as old_format_count
+                        FROM {table_name}
+                        WHERE frontend_id LIKE :pattern
+                          AND frontend_id IS NOT NULL
+                          AND frontend_id NOT LIKE :new_pattern
+                    """)
+                    
+                    # Exclude records that already have the new format (PREFIX-NNNNN)
+                    new_pattern = f"{config['prefix']}-_____"  # 5 digits exactly
+                    count = db.execute(old_format_query, {
+                        "pattern": pattern,
+                        "new_pattern": new_pattern
+                    }).scalar()
+                    old_count += count
                 
                 # Count total records
                 total_query = text(f"SELECT COUNT(*) FROM {table_name}")
@@ -159,15 +189,28 @@ class FrontendIDMigrator:
             logger.info(f"🚀 {'DRY RUN: ' if dry_run else ''}Migrating {table_name}...")
             
             # Get all records with old format IDs, ordered by creation date
+            # Build a query to match any of the old patterns but not the new format
+            pattern_conditions = []
+            params = {}
+            
+            for i, pattern in enumerate(config["old_patterns"]):
+                pattern_conditions.append(f"frontend_id LIKE :pattern_{i}")
+                params[f"pattern_{i}"] = pattern
+            
+            # Exclude records that already have the new format (PREFIX-NNNNN with exactly 5 digits)
+            new_pattern = f"{config['prefix']}-_____"
+            params["new_pattern"] = new_pattern
+            
             fetch_query = text(f"""
                 SELECT id, frontend_id, created_at
                 FROM {table_name}
-                WHERE frontend_id LIKE :pattern
+                WHERE ({' OR '.join(pattern_conditions)})
                   AND frontend_id IS NOT NULL
+                  AND frontend_id NOT LIKE :new_pattern
                 ORDER BY created_at ASC, id ASC
             """)
             
-            records = db.execute(fetch_query, {"pattern": config["old_pattern"]}).fetchall()
+            records = db.execute(fetch_query, params).fetchall()
             
             if not records:
                 logger.info(f"  ✅ No records to migrate in {table_name}")
@@ -179,7 +222,7 @@ class FrontendIDMigrator:
             
             for record in records:
                 old_id = record.frontend_id
-                new_id = f"{prefix}-{counter:06d}"
+                new_id = f"{prefix}-{counter:05d}"  # Use exactly 5 digits as specified
                 
                 # Log the change
                 log_entry = f"{old_id} → {new_id}"
@@ -187,11 +230,10 @@ class FrontendIDMigrator:
                 
                 if not dry_run:
                     try:
-                        # Update the record
+                        # Update the record (only update frontend_id)
                         update_query = text(f"""
                             UPDATE {table_name}
-                            SET frontend_id = :new_id,
-                                updated_at = GETDATE()
+                            SET frontend_id = :new_id
                             WHERE id = :record_id
                         """)
                         

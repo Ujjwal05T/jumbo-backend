@@ -1,8 +1,6 @@
-from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import Dict, Callable
-import threading
+from typing import Dict
 import logging
 
 
@@ -11,279 +9,134 @@ logger = logging.getLogger(__name__)
 class FrontendIDGenerator:
     """
     Service for generating human-readable frontend IDs for all models.
-    Each model has a unique prefix and pattern.
+    Uses SQL Server sequences for thread-safe, high-performance ID generation.
     
-    Thread-safe implementation to prevent duplicate ID generation in concurrent scenarios.
+    All IDs now use simple sequential format: PREFIX-00001, PREFIX-00002, etc.
+    No more year/month based IDs - everything is sequential for consistency.
     """
     
-    # Thread lock to ensure atomic ID generation
-    _id_generation_lock = threading.Lock()
-    
-    # In-memory counter cache to avoid repeated database queries
-    _counter_cache = {}
-    
-    # ID Patterns for each model
+    # ID Patterns for each model - now all use simple sequential format with sequences
     ID_PATTERNS: Dict[str, Dict[str, str]] = {
         "client_master": {
             "prefix": "CL",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "client_master_seq",
             "description": "Client Master IDs (CL-00001, CL-00002, etc.)"
         },
         "user_master": {
             "prefix": "USR", 
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "user_master_seq",
             "description": "User Master IDs (USR-00001, USR-00002, etc.)"
         },
         "paper_master": {
             "prefix": "PAP",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "paper_master_seq",
             "description": "Paper Master IDs (PAP-00001, PAP-00002, etc.)"
         },
         "order_master": {
             "prefix": "ORD",
-            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
-            "description": "Order Master IDs (ORD-25-08-0001, etc.)",
-            "uses_year_month": True
+            "sequence_name": "order_master_seq",
+            "description": "Order Master IDs (ORD-00001, ORD-00002, etc.)"
         },
         "order_item": {
             "prefix": "ORI",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "order_item_seq",
             "description": "Order Item IDs (ORI-00001, ORI-00002, etc.)"
         },
         "pending_order_master": {
             "prefix": "POM",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "pending_order_master_seq",
             "description": "Pending Order Master IDs (POM-00001, POM-00002, etc.)"
         },
         "pending_order_item": {
             "prefix": "POI",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "pending_order_item_seq",
             "description": "Pending Order Item IDs (POI-00001, POI-00002, etc.)"
         },
         "inventory_master": {
             "prefix": "INV",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "inventory_master_seq",
             "description": "Inventory Master IDs (INV-00001, INV-00002, etc.)"
         },
         "plan_master": {
             "prefix": "PLN",
-            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
-            "description": "Plan Master IDs (PLN-25-08-0001, etc.)",
-            "uses_year_month": True
+            "sequence_name": "plan_master_seq",
+            "description": "Plan Master IDs (PLN-00001, PLN-00002, etc.)"
         },
         "production_order_master": {
             "prefix": "PRO",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "production_order_master_seq",
             "description": "Production Order Master IDs (PRO-00001, PRO-00002, etc.)"
         },
         "plan_order_link": {
             "prefix": "POL",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "plan_order_link_seq",
             "description": "Plan Order Link IDs (POL-00001, POL-00002, etc.)"
         },
         "plan_inventory_link": {
             "prefix": "PIL",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "plan_inventory_link_seq",
             "description": "Plan Inventory Link IDs (PIL-00001, PIL-00002, etc.)"
         },
         "dispatch_record": {
             "prefix": "DSP",
-            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
-            "description": "Dispatch Record IDs (DSP-25-08-0001, etc.)",
-            "uses_year_month": True
+            "sequence_name": "dispatch_record_seq",
+            "description": "Dispatch Record IDs (DSP-00001, DSP-00002, etc.)"
         },
         "dispatch_item": {
             "prefix": "DSI",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "dispatch_item_seq",
             "description": "Dispatch Item IDs (DSI-00001, DSI-00002, etc.)"
         },
         "wastage_inventory": {
             "prefix": "WS",
-            "pattern": "{prefix}-{counter:05d}",
+            "sequence_name": "wastage_inventory_seq",
             "description": "Wastage Inventory IDs (WS-00001, WS-00002, etc.)"
         },
         "past_dispatch_record": {
             "prefix": "PDR",
-            "pattern": "{prefix}-{year:02d}-{month:02d}-{counter:04d}",
-            "description": "Past Dispatch Record IDs (PDR-25-08-0001, etc.)",
-            "uses_year_month": True
+            "sequence_name": "past_dispatch_record_seq",
+            "description": "Past Dispatch Record IDs (PDR-00001, PDR-00002, etc.)"
         }
     }
     
     @classmethod
     def generate_frontend_id(cls, table_name: str, db: Session) -> str:
         """
-        Generate a human-readable frontend ID for the given table.
-        Thread-safe implementation to prevent duplicate IDs in concurrent scenarios.
+        Generate a human-readable frontend ID using SQL Server sequences.
         
         Args:
             table_name: The database table name
             db: SQLAlchemy database session
             
         Returns:
-            Generated frontend ID string
+            Generated frontend ID string (e.g., "ORD-00001")
             
         Raises:
             ValueError: If table_name is not supported
         """
-        # Use thread lock to ensure atomic ID generation
-        with cls._id_generation_lock:
-            logger.debug(f"Acquiring lock for ID generation: {table_name}")
-            
-            if table_name not in cls.ID_PATTERNS:
-                raise ValueError(f"Unsupported table name: {table_name}")
-            
-            config = cls.ID_PATTERNS[table_name]
-            prefix = config["prefix"]
-            pattern = config["pattern"]
-            uses_year = config.get("uses_year", False)
-            uses_year_month = config.get("uses_year_month", False)
-            
-            # Get current year and month if needed
-            now = datetime.now()
-            year = now.year if (uses_year or uses_year_month) else None
-            month = now.month if uses_year_month else None
-            
-            # Get next counter value
-            counter = cls._get_next_counter(table_name, db, year, month)
-            
-            # Generate the ID with automatic digit expansion if needed
-            if uses_year_month:
-                # For year-month-based IDs, use at least 4 digits, expand if needed
-                digits = max(4, len(str(counter)))
-                expanded_pattern = pattern.replace(':04d', f':{digits:02d}d')
-                # Use 2-digit year (last 2 digits of the year)
-                year_2d = year % 100
-                generated_id = expanded_pattern.format(prefix=prefix, year=year_2d, month=month, counter=counter)
-            elif uses_year:
-                # For year-based IDs, use at least 5 digits, expand if needed
-                digits = max(5, len(str(counter)))
-                expanded_pattern = pattern.replace(':05d', f':{digits:02d}d')
-                generated_id = expanded_pattern.format(prefix=prefix, year=year, counter=counter)
-            else:
-                # For simple IDs, use at least 5 digits, expand if needed
-                digits = max(5, len(str(counter)))
-                expanded_pattern = pattern.replace(':05d', f':{digits:02d}d')
-                generated_id = expanded_pattern.format(prefix=prefix, counter=counter)
-            
-            logger.debug(f"Generated ID for {table_name}: {generated_id}")
-            return generated_id
-    
-    @classmethod
-    def _get_next_counter(cls, table_name: str, db: Session, year: int = None, month: int = None) -> int:
-        """
-        Get the next counter value for the given table.
-        Uses database queries to find the highest existing counter.
+        if table_name not in cls.ID_PATTERNS:
+            raise ValueError(f"Unsupported table name: {table_name}. Supported tables: {list(cls.ID_PATTERNS.keys())}")
         
-        Args:
-            table_name: The database table name
-            db: SQLAlchemy database session
-            year: Year filter for year-based IDs
-            month: Month filter for year-month-based IDs
-            
-        Returns:
-            Next counter value (starting from 1)
-        """
         config = cls.ID_PATTERNS[table_name]
         prefix = config["prefix"]
-        uses_year = config.get("uses_year", False)
-        uses_year_month = config.get("uses_year_month", False)
+        sequence_name = config["sequence_name"]
         
         try:
-            # Create cache key
-            if uses_year_month and year and month:
-                cache_key = f"{table_name}_{year}_{month:02d}"
-            elif uses_year and year:
-                cache_key = f"{table_name}_{year}"
-            else:
-                cache_key = table_name
+            # Get next value from sequence - this is atomic and thread-safe
+            query = text(f"SELECT NEXT VALUE FOR {sequence_name}")
+            counter = db.execute(query).scalar()
             
-            # Check if we have a cached counter
-            if cache_key in cls._counter_cache:
-                # Use cached counter and increment it
-                cls._counter_cache[cache_key] += 1
-                next_counter = cls._counter_cache[cache_key]
-                logger.debug(f"Using cached counter for {cache_key}: {next_counter}")
-                return next_counter
+            # Format the ID with exactly 5 digits
+            generated_id = f"{prefix}-{counter:05d}"
             
-            # No cache, query database
-            if uses_year_month and year and month:
-                # For year-month-based IDs, find max counter for this year and month (handle variable digits)
-                year_2d = year % 100  # Use 2-digit year
-                pattern_prefix = f"{prefix}-{year_2d:02d}-{month:02d}-"
-                query = text(f"""
-                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
-                    FROM {table_name} WITH (UPDLOCK)
-                    WHERE frontend_id LIKE :pattern_prefix_like 
-                      AND frontend_id IS NOT NULL
-                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
-                """)
-                result = db.execute(query, {
-                    "pattern_prefix": pattern_prefix,
-                    "pattern_prefix_like": f"{pattern_prefix}%"
-                }).scalar()
-                logger.debug(f"Year-month-based counter query for {table_name} ({year_2d:02d}-{month:02d}): max_counter = {result}")
-            elif uses_year and year:
-                # For year-based IDs, find max counter for this year (handle variable digits)
-                pattern_prefix = f"{prefix}-{year}-"
-                query = text(f"""
-                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
-                    FROM {table_name} WITH (UPDLOCK)
-                    WHERE frontend_id LIKE :pattern_prefix_like 
-                      AND frontend_id IS NOT NULL
-                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
-                """)
-                result = db.execute(query, {
-                    "pattern_prefix": pattern_prefix,
-                    "pattern_prefix_like": f"{pattern_prefix}%"
-                }).scalar()
-                logger.debug(f"Year-based counter query for {table_name} ({year}): max_counter = {result}")
-            else:
-                # For simple counters, find max counter overall (handle variable digits)
-                pattern_prefix = f"{prefix}-"
-                query = text(f"""
-                    SELECT MAX(CAST(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id)) AS INT)) as max_counter 
-                    FROM {table_name} WITH (UPDLOCK)
-                    WHERE frontend_id LIKE :pattern_prefix_like 
-                      AND frontend_id IS NOT NULL
-                      AND ISNUMERIC(SUBSTRING(frontend_id, LEN(:pattern_prefix) + 1, LEN(frontend_id))) = 1
-                """)
-                result = db.execute(query, {
-                    "pattern_prefix": pattern_prefix,
-                    "pattern_prefix_like": f"{pattern_prefix}%"
-                }).scalar()
-                logger.debug(f"Simple counter query for {table_name}: max_counter = {result}")
-            
-            # Calculate next counter and cache it
-            next_counter = (result or 0) + 1
-            cls._counter_cache[cache_key] = next_counter
-            logger.debug(f"Cached new counter for {cache_key}: {next_counter}")
-            return next_counter
+            logger.debug(f"Generated ID for {table_name}: {generated_id} (sequence: {sequence_name}, counter: {counter})")
+            return generated_id
             
         except Exception as e:
-            logger.error(f"Error getting next counter for {table_name}: {e}")
+            logger.error(f"Error generating frontend ID for {table_name}: {e}")
+            logger.error(f"Make sure sequence '{sequence_name}' exists in the database")
             raise
     
-    @classmethod
-    def clear_counter_cache(cls, table_name: str = None):
-        """
-        Clear the counter cache for a specific table or all tables.
-        Useful for testing or when database state changes externally.
-        
-        Args:
-            table_name: Optional table name to clear. If None, clears all cache.
-        """
-        with cls._id_generation_lock:
-            if table_name:
-                # Clear specific table entries (including year-based variants)
-                keys_to_remove = [key for key in cls._counter_cache.keys() if key.startswith(table_name)]
-                for key in keys_to_remove:
-                    del cls._counter_cache[key]
-                logger.info(f"Cleared counter cache for {table_name}")
-            else:
-                # Clear all cache
-                cls._counter_cache.clear()
-                logger.info("Cleared all counter cache")
     
     @classmethod
     def get_all_patterns(cls) -> Dict[str, Dict[str, str]]:
@@ -312,42 +165,70 @@ class FrontendIDGenerator:
         
         config = cls.ID_PATTERNS[table_name]
         prefix = config["prefix"]
-        uses_year = config.get("uses_year", False)
-        uses_year_month = config.get("uses_year_month", False)
         
+        # All IDs now use format: PREFIX-NNNNN (exactly 5 digits)
         if not frontend_id.startswith(f"{prefix}-"):
             return False
         
-        if uses_year_month:
-            # Expected format: PREFIX-YY-MM-NNNN
-            parts = frontend_id.split("-")
-            if len(parts) != 4:
-                return False
+        parts = frontend_id.split("-")
+        if len(parts) != 2:
+            return False
+        
+        try:
+            counter = int(parts[1])
+            # Check if it's exactly 5 digits and positive
+            return len(parts[1]) == 5 and counter > 0
+        except ValueError:
+            return False
+    
+    @classmethod
+    def get_sequence_status(cls, db: Session) -> Dict[str, Dict]:
+        """
+        Get the current status of all sequences.
+        Useful for debugging and monitoring.
+        
+        Returns:
+            Dictionary with sequence names and their current values
+        """
+        status = {}
+        
+        for table_name, config in cls.ID_PATTERNS.items():
+            sequence_name = config["sequence_name"]
             try:
-                year = int(parts[1])
-                month = int(parts[2])
-                counter = int(parts[3])
-                return 0 <= year <= 99 and 1 <= month <= 12 and counter > 0
-            except ValueError:
-                return False
-        elif uses_year:
-            # Expected format: PREFIX-YYYY-NNNNN
-            parts = frontend_id.split("-")
-            if len(parts) != 3:
-                return False
-            try:
-                year = int(parts[1])
-                counter = int(parts[2])
-                return 2020 <= year <= 2050 and counter > 0
-            except ValueError:
-                return False
-        else:
-            # Expected format: PREFIX-NNNNN
-            parts = frontend_id.split("-")
-            if len(parts) != 2:
-                return False
-            try:
-                counter = int(parts[1])
-                return counter > 0
-            except ValueError:
-                return False
+                # Get current sequence info
+                query = text("""
+                    SELECT 
+                        current_value,
+                        start_value,
+                        increment
+                    FROM sys.sequences 
+                    WHERE name = :seq_name
+                """)
+                result = db.execute(query, {"seq_name": sequence_name}).fetchone()
+                
+                if result:
+                    status[sequence_name] = {
+                        "table": table_name,
+                        "prefix": config["prefix"],
+                        "current_value": result.current_value,
+                        "start_value": result.start_value,
+                        "increment": result.increment,
+                        "exists": True
+                    }
+                else:
+                    status[sequence_name] = {
+                        "table": table_name,
+                        "prefix": config["prefix"],
+                        "exists": False,
+                        "error": "Sequence not found"
+                    }
+                    
+            except Exception as e:
+                status[sequence_name] = {
+                    "table": table_name,
+                    "prefix": config["prefix"],
+                    "exists": False,
+                    "error": str(e)
+                }
+        
+        return status

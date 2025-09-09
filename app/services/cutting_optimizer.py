@@ -193,21 +193,40 @@ class CuttingOptimizer:
                     logger.debug(f"    {pattern_info}")
                 
                 if width_productions:
+                    # Meet demand but don't massively over-produce
                     model.Add(sum(width_productions) >= demand[width])
-                    logger.debug(f"    ✅ Constraint added: sum >= {demand[width]}")
+                    model.Add(sum(width_productions) <= demand[width] * 3)  # Max 3x over-production per width
+                    logger.debug(f"    ✅ Constraint added: {demand[width]} <= sum <= {demand[width] * 3}")
                 else:
                     logger.error(f"❌ CONSTRAINT ERROR: No patterns can produce width {width}")
                     logger.debug(f"Available patterns: {[(p.lanes, p.coeff) for p in patterns[:5]]}")
                     return {'status': 'Infeasible', 'message': f'No patterns can produce width {width}'}
             
-            # Objective: minimize total trim (scaled to integers for CP-SAT)
+            # Add overall production constraint to prevent massive over-production
+            total_demand = sum(demand.values())
+            total_production_terms = []
+            for i, pattern in enumerate(patterns):
+                pieces_per_pattern = len(pattern.lanes)  # Number of pieces this pattern produces
+                total_production_terms.append(pattern_vars[i] * pieces_per_pattern)
+            
+            if total_production_terms:
+                total_production = sum(total_production_terms)
+                model.Add(total_production <= total_demand * 2)  # Max 2x total over-production
+                logger.debug(f"🔍 OR-TOOLS DEBUG: Total production constraint: <= {total_demand * 2} pieces (need {total_demand})")
+            
+            # Objective: minimize number of patterns first, then trim (scaled to integers for CP-SAT)
             trim_terms = []
             for i, pattern in enumerate(patterns):
                 # Scale trim by 100 to work with integers
                 scaled_trim = int(pattern.trim * 100)
                 trim_terms.append(pattern_vars[i] * scaled_trim)
             
-            model.Minimize(sum(trim_terms))
+            # Primary objective: minimize number of patterns (prevent over-production)
+            total_patterns = sum(pattern_vars)
+            total_trim = sum(trim_terms)
+            
+            # Weighted objective: heavily prioritize fewer patterns, then minimize trim
+            model.Minimize(total_patterns * 10000 + total_trim)
             
             # Solve the model
             import time
@@ -1718,7 +1737,18 @@ class CuttingOptimizer:
             'high_trim_approved': all_high_trims
         }
         
+        # Log detailed result structure before returning
         logger.info(f"🎯 OPTIMIZER COMPLETED: Returning result with {len(result)} main sections")
+        logger.info(f"🔍 RESULT STRUCTURE: Keys = {list(result.keys())}")
+        logger.info(f"🔍 cut_rolls_generated: Type = {type(result['cut_rolls_generated'])}, Length = {len(result['cut_rolls_generated'])}")
+        logger.info(f"🔍 jumbo_rolls_needed: {result['jumbo_rolls_needed']}")
+        logger.info(f"🔍 pending_orders: Length = {len(result['pending_orders'])}")
+        
+        if result['cut_rolls_generated']:
+            logger.info(f"🔍 SAMPLE CUT ROLL: {result['cut_rolls_generated'][0]}")
+        else:
+            logger.warning("🚨 cut_rolls_generated is EMPTY!")
+            
         return result
 
     def generate_optimized_plan(
