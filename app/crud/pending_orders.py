@@ -265,7 +265,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
 def start_production_from_pending_orders_impl(db: Session, *, request_data) -> Dict[str, Any]:
     """Start production from selected pending orders - same as main planning but for pending flow"""
     import logging
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from uuid import uuid4
     from ..services.id_generator import FrontendIDGenerator
     from ..services.barcode_generator import BarcodeGenerator
@@ -289,9 +289,16 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # DEBUG: Log each cut roll to see what we're processing
     logger.info("🔍 DEBUGGING CUT ROLLS:")
     for i, cut_roll in enumerate(selected_cut_rolls_dict):
-        logger.info(f"   Roll {i+1}: source_pending_id='{cut_roll.get('source_pending_id')}', source_type='{cut_roll.get('source_type')}', width={cut_roll.get('width_inches')}")
+        logger.info(f"   Roll {i+1}: source_pending_id='{cut_roll.get('source_pending_id')}', source_type='{cut_roll.get('source_type')}', width={cut_roll.get('width_inches')}, is_manual={cut_roll.get('is_manual_cut', False)}")
     
-    all_pending_order_ids = [cut_roll.get("source_pending_id") for cut_roll in selected_cut_rolls_dict if cut_roll.get("source_pending_id")]
+    # Separate manual cuts from regular pending order cuts
+    regular_cut_rolls = [cut_roll for cut_roll in selected_cut_rolls_dict if cut_roll.get("source_pending_id")]
+    manual_cut_rolls = [cut_roll for cut_roll in selected_cut_rolls_dict if cut_roll.get("is_manual_cut", False)]
+    
+    logger.info(f"🔄 SEPARATED CUTS: {len(regular_cut_rolls)} regular, {len(manual_cut_rolls)} manual")
+ 
+    
+    all_pending_order_ids = [cut_roll.get("source_pending_id") for cut_roll in regular_cut_rolls]
     
     logger.info(f"🔄 CUT ROLLS PROCESSED: {len(selected_cut_rolls_dict)} processed, {len(all_pending_order_ids)} with pending IDs")
     logger.info(f"🆔 PENDING ORDER IDs: {all_pending_order_ids}")
@@ -421,16 +428,24 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # No order updates needed for pending flow (no existing orders)
     
-    # Update pending orders - each cut_roll reduces pending quantity by 1 (exact plans.py pattern)
+    # Update pending orders - FIXED: Individual processing with deduplication (plans.py pattern)
     updated_pending_orders = []
     
-    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(selected_cut_rolls_dict)} cut_rolls individually")
+    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(regular_cut_rolls)} regular cut_rolls with deduplication")
     
-    # Process each cut_roll (plans.py approach)
-    for i, cut_roll in enumerate(selected_cut_rolls_dict):
+    # CRITICAL: Track which pending orders we've already processed to avoid duplicate updates
+    processed_pending_orders = set()
+    
+    # Process each regular cut_roll with deduplication - manual cuts don't have pending orders to update
+    for i, cut_roll in enumerate(regular_cut_rolls):
         source_pending_id = cut_roll.get("source_pending_id")
         
         if not source_pending_id:
+            continue
+            
+        # CRITICAL: Check if we already processed this pending order
+        if source_pending_id in processed_pending_orders:
+            logger.info(f"   → Skipping cut roll {i+1}: Already processed pending order {source_pending_id[:8]}...")
             continue
             
         try:
@@ -443,22 +458,139 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             ).first()
             
             if pending_order and pending_order.quantity_pending > 0:
-                logger.info(f"🔢 Cut roll {i+1}: {pending_order.frontend_id} ({pending_order.quantity_pending} -> {pending_order.quantity_pending-1})")
+                # Count total cut_rolls for this pending_id (this is the key fix!)
+                total_cut_rolls_for_pending = sum(1 for cr in regular_cut_rolls 
+                                                if cr.get("source_pending_id") == source_pending_id)
                 
-                # Each cut_roll reduces pending by exactly 1
-                pending_order.quantity_fulfilled = (pending_order.quantity_fulfilled or 0) + 1
-                pending_order.quantity_pending = max(0, pending_order.quantity_pending - 1)
+                old_pending = pending_order.quantity_pending
+                old_fulfilled = pending_order.quantity_fulfilled or 0
+                
+                logger.info(f"🔢 Processing pending {pending_order.frontend_id}: {total_cut_rolls_for_pending} cut_rolls found")
+                logger.info(f"   → Before: pending={old_pending}, fulfilled={old_fulfilled}")
+                
+                # Apply the total reduction ONCE
+                pending_order.quantity_fulfilled = old_fulfilled + total_cut_rolls_for_pending
+                pending_order.quantity_pending = max(0, old_pending - total_cut_rolls_for_pending)
+                
+                logger.info(f"   → After: pending={pending_order.quantity_pending}, fulfilled={pending_order.quantity_fulfilled}")
                 
                 # Update status
                 if pending_order.quantity_pending <= 0:
                     pending_order._status = "resolved"
                     pending_order.resolved_at = datetime.utcnow()
+                    logger.info(f"   → Status: RESOLVED (fully fulfilled)")
+                else:
+                    logger.info(f"   → Status: PARTIAL ({pending_order.quantity_pending} still pending)")
                 
                 updated_pending_orders.append(str(pending_order.id))
+                
+                # Mark this pending order as processed
+                processed_pending_orders.add(source_pending_id)
                 
         except Exception as e:
             logger.error(f"❌ Error processing cut roll {i+1}: {e}")
             continue
+    
+    # ====== MANUAL CUTS PROCESSING: Create Orders for Manual Cuts ======
+    created_manual_orders = []
+    created_manual_order_items = []
+    client_orders = {}  # Initialize outside so it's accessible during inventory creation
+    
+    if manual_cut_rolls:
+        logger.info(f"🔧 MANUAL CUTS: Processing {len(manual_cut_rolls)} manual cuts to create orders")
+        
+        # Group manual cuts by (client_id + paper_specs + width)
+        manual_cut_groups = {}
+        for cut_roll in manual_cut_rolls:
+            client_id = cut_roll.get("manual_cut_client_id")
+            gsm = cut_roll.get("gsm", 0)
+            bf = cut_roll.get("bf", 0.0)
+            shade = cut_roll.get("shade", "")
+            width = cut_roll.get("width_inches", 0.0)
+            
+            # Create grouping key
+            group_key = f"{client_id}|{gsm}|{bf}|{shade}|{width}"
+            
+            if group_key not in manual_cut_groups:
+                manual_cut_groups[group_key] = {
+                    'client_id': client_id,
+                    'client_name': cut_roll.get("manual_cut_client_name", "Unknown"),
+                    'gsm': gsm,
+                    'bf': bf,
+                    'shade': shade,
+                    'width': width,
+                    'cuts': []
+                }
+            manual_cut_groups[group_key]['cuts'].append(cut_roll)
+        
+        logger.info(f"📊 Manual cuts grouped into {len(manual_cut_groups)} unique (client+spec+width) combinations")
+        
+        # Create orders for each client (using the client_orders dict defined above)
+        
+        for group_key, group_data in manual_cut_groups.items():
+            client_id = group_data['client_id']
+            
+            # Create or get OrderMaster for this client
+            if client_id not in client_orders:
+                try:
+                    # Get client info
+                    client = db.query(models.Client).filter(models.Client.id == UUID(client_id)).first()
+                    if not client:
+                        logger.error(f"❌ Client {client_id} not found, skipping manual cuts")
+                        continue
+                    
+                    # Create OrderMaster
+                    order_master = models.OrderMaster(
+                        frontend_id=f"MAN-{datetime.utcnow().strftime('%y%m%d')}-{len(client_orders) + 1:03d}",
+                        client_id=UUID(client_id),
+                        status="created",
+                        order_date=datetime.utcnow().date(),
+                        created_at=datetime.utcnow(),
+                        delivery_date=datetime.utcnow().date() + timedelta(days=7)  # Default 7 days
+                    )
+                    
+                    db.add(order_master)
+                    db.flush()  # Get the ID
+                    
+                    client_orders[client_id] = order_master
+                    created_manual_orders.append(str(order_master.id))
+                    
+                    logger.info(f"✅ Created OrderMaster {order_master.frontend_id} for client {client.company_name}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error creating order for client {client_id}: {e}")
+                    continue
+            
+            # Create OrderItem for this group
+            try:
+                order_master = client_orders[client_id]
+                quantity = len(group_data['cuts'])  # Number of manual cuts for this spec+width
+                
+                order_item = models.OrderItem(
+                    frontend_id=f"{order_master.frontend_id}-{len(created_manual_order_items) + 1:02d}",
+                    order_id=order_master.id,
+                    width_inches=group_data['width'],
+                    quantity_rolls=quantity,
+                    quantity_fulfilled=0,
+                    quantity_in_pending=0,  # Manual cuts don't go to pending
+                    gsm=group_data['gsm'],
+                    bf=group_data['bf'],
+                    shade=group_data['shade'],
+                    item_status="created",
+                    created_at=datetime.utcnow()
+                )
+                
+                db.add(order_item)
+                db.flush()
+                
+                created_manual_order_items.append(str(order_item.id))
+                logger.info(f"✅ Created OrderItem {order_item.frontend_id}: {quantity}x {group_data['width']}\" ({group_data['gsm']}gsm, {group_data['shade']})")
+                
+            except Exception as e:
+                logger.error(f"❌ Error creating order item for group {group_key}: {e}")
+                continue
+        
+        logger.info(f"🎉 MANUAL CUTS COMPLETE: Created {len(created_manual_orders)} orders, {len(created_manual_order_items)} order items")
     
     # ====== DETAILED LOGGING: Paper Specification Grouping ======
     logger.info("🔬 PAPER SPEC GROUPING ANALYSIS:")
@@ -468,10 +600,12 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # Group selected cut rolls by paper specification first, then by individual_roll_number (EXACT COPY)
     paper_spec_groups = {}  # {paper_spec_key: {roll_number: [cut_rolls]}}
     
-    logger.info(f"📦 GROUPING START: Processing {len(selected_cut_rolls_dict)} cut rolls for paper spec grouping")
+    # Combine regular and manual cuts for plan creation
+    all_cut_rolls_for_plan = regular_cut_rolls + manual_cut_rolls
+    logger.info(f"📦 GROUPING START: Processing {len(all_cut_rolls_for_plan)} cut rolls ({len(regular_cut_rolls)} regular + {len(manual_cut_rolls)} manual) for paper spec grouping")
     logger.info("🔍 Analyzing each cut roll for grouping logic:")
     
-    for i, cut_roll in enumerate(selected_cut_rolls_dict):
+    for i, cut_roll in enumerate(all_cut_rolls_for_plan):
         logger.info(f"🔍 Processing Cut Roll #{i+1}:")
         logger.info(f"   Raw data: {cut_roll}")
         
@@ -646,20 +780,33 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             frontend_id = FrontendIDGenerator.generate_frontend_id("inventory_master", db)
             logger.info(f"🔧 Generated IDs - Barcode: {barcode_id}, Frontend: {frontend_id}")
             
-            # ✅ CRITICAL: Link cut roll to original order for client tracking
-            logger.info(f"🔗 Attempting to link cut roll to original order...")
-            order_id = cut_roll.get("order_id")
-            logger.info(f"🔗 Order ID from cut_roll: {order_id}")
-            if order_id:
-                try:
-                    order_uuid = UUID(order_id)
-                    logger.info(f"✅ VALID ORDER LINK: {order_id}")
-                except (ValueError, TypeError):
-                    logger.warning(f"❌ INVALID ORDER ID FORMAT: {order_id}")
+            # ✅ CRITICAL: Link cut roll to order (original for regular cuts, manual for manual cuts)
+            logger.info(f"🔗 Attempting to link cut roll to order...")
+            
+            # Check if this is a manual cut
+            if cut_roll.get("is_manual_cut", False):
+                # Manual cut - link to the created manual order
+                client_id = cut_roll.get("manual_cut_client_id")
+                if client_id and client_id in client_orders:
+                    order_uuid = client_orders[client_id].id
+                    logger.info(f"✅ MANUAL CUT ORDER LINK: {order_uuid} (client: {client_id})")
+                else:
+                    logger.warning(f"❌ MANUAL CUT: No manual order found for client {client_id}")
                     order_uuid = None
             else:
-                logger.warning(f"❌ NO ORDER ID: Missing order_id in cut_roll data")
-                order_uuid = None
+                # Regular cut - link to original order
+                order_id = cut_roll.get("order_id")
+                logger.info(f"🔗 Order ID from cut_roll: {order_id}")
+                if order_id:
+                    try:
+                        order_uuid = UUID(order_id)
+                        logger.info(f"✅ REGULAR CUT ORDER LINK: {order_id}")
+                    except (ValueError, TypeError):
+                        logger.warning(f"❌ INVALID ORDER ID FORMAT: {order_id}")
+                        order_uuid = None
+                else:
+                    logger.warning(f"❌ NO ORDER ID: Missing order_id in cut_roll data")
+                    order_uuid = None
             
             # Create inventory item with full logging
             logger.info(f"🏗️ CREATING INVENTORY RECORD:")
@@ -835,7 +982,9 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             "inventory_created": len(created_inventory),
             "pending_orders_created_phase2": len(created_pending_from_unused),
             "jumbo_rolls_created": len(created_jumbo_rolls),
-            "intermediate_118_rolls_created": len(created_118_rolls)
+            "intermediate_118_rolls_created": len(created_118_rolls),
+            "manual_orders_created": len(created_manual_orders),
+            "manual_order_items_created": len(created_manual_order_items)
         },
         "details": {
             "updated_orders": updated_orders,  # Already List[str]
@@ -845,7 +994,9 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             "created_jumbo_rolls": [str(jr.id) for jr in created_jumbo_rolls],  # List[str]
             "created_118_rolls": [str(r118.id) for r118 in created_118_rolls],  # List[str]
             "created_wastage": [str(w.id) for w in created_wastage],  # List[str]
-            "created_gupta_orders": []  # List[str] - empty for pending flow
+            "created_gupta_orders": [],  # List[str] - empty for pending flow
+            "created_manual_orders": created_manual_orders,  # List[str]
+            "created_manual_order_items": created_manual_order_items  # List[str]
         },
         "created_inventory_details": [
             {

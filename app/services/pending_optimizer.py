@@ -90,11 +90,15 @@ class PendingOptimizer:
     # Removed old suggestion methods - using simplified approach
     
     def _group_by_orders(self, pending_items: List[models.PendingOrderItem]) -> Dict[str, Dict]:
-        """Group pending items by original order with order/client context."""
+        """Group pending items by original order AND paper specs to handle mixed-spec orders."""
         order_groups = {}
         for item in pending_items:
             order_id = str(item.original_order_id)
-            if order_id not in order_groups:
+            # FIXED: Create composite key with order_id + paper_specs to handle mixed-spec orders
+            paper_spec_key = f"{item.gsm}_{item.bf}_{item.shade}"
+            composite_key = f"{order_id}|{paper_spec_key}"
+            
+            if composite_key not in order_groups:
                 # Get order and client info from the joined query
                 order_info = {
                     'order_id': order_id,
@@ -107,9 +111,9 @@ class PendingOptimizer:
                     },
                     'pending_items': []
                 }
-                order_groups[order_id] = order_info
+                order_groups[composite_key] = order_info
             
-            order_groups[order_id]['pending_items'].append(item)
+            order_groups[composite_key]['pending_items'].append(item)
         return order_groups
     
     def _group_by_specs(self, pending_items: List[models.PendingOrderItem]) -> Dict[Tuple, List[models.PendingOrderItem]]:
