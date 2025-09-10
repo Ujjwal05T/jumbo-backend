@@ -428,24 +428,73 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # No order updates needed for pending flow (no existing orders)
     
-    # Update pending orders - FIXED: Individual processing with deduplication (plans.py pattern)
+    # Update pending orders - Process each cut_roll individually (each represents 1 piece)
     updated_pending_orders = []
     
-    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(regular_cut_rolls)} regular cut_rolls with deduplication")
+    logger.info(f"📝 PENDING QUANTITY UPDATE: Processing {len(regular_cut_rolls)} regular cut_rolls individually")
     
-    # CRITICAL: Track which pending orders we've already processed to avoid duplicate updates
-    processed_pending_orders = set()
+    if len(regular_cut_rolls) == 0:
+        logger.error("❌ CRITICAL: No regular_cut_rolls found! Cannot update pending quantities!")
+        logger.error("   This means all cut_rolls were classified as manual or invalid")
+        return
     
-    # Process each regular cut_roll with deduplication - manual cuts don't have pending orders to update
+    # COMPREHENSIVE DATABASE VERIFICATION: Get BEFORE state
+    logger.info("🔍 PRE-PRODUCTION DATABASE STATE:")
+    unique_pending_ids = list(set(cut_roll.get("source_pending_id") for cut_roll in regular_cut_rolls if cut_roll.get("source_pending_id")))
+    
+    before_state = {}
+    total_before = 0
+    for pending_id in unique_pending_ids:
+        try:
+            pending_uuid = UUID(pending_id)
+            pending_order = db.query(models.PendingOrderItem).filter(
+                models.PendingOrderItem.id == pending_uuid
+            ).first()
+            if pending_order:
+                before_state[pending_id] = {
+                    'frontend_id': pending_order.frontend_id,
+                    'width': pending_order.width_inches,
+                    'pending': pending_order.quantity_pending,
+                    'fulfilled': pending_order.quantity_fulfilled or 0,
+                    'status': pending_order._status
+                }
+                total_before += pending_order.quantity_pending
+                logger.info(f"   → {pending_order.frontend_id}: {pending_order.quantity_pending} pending, {pending_order.quantity_fulfilled or 0} fulfilled")
+        except Exception as e:
+            logger.error(f"   → Error reading {pending_id[:8]}: {e}")
+    
+    logger.info(f"📊 TOTAL PENDING BEFORE PRODUCTION: {total_before}")
+    
+    # Calculate expected reductions per pending order
+    expected_reductions = {}
+    for cut_roll in regular_cut_rolls:
+        pending_id = cut_roll.get("source_pending_id")
+        if pending_id:
+            expected_reductions[pending_id] = expected_reductions.get(pending_id, 0) + 1
+    
+    logger.info("🎯 EXPECTED REDUCTIONS:")
+    for pending_id, expected in expected_reductions.items():
+        if pending_id in before_state:
+            logger.info(f"   → {before_state[pending_id]['frontend_id']}: -{expected} (from {before_state[pending_id]['pending']} to {max(0, before_state[pending_id]['pending'] - expected)})")
+    
+    expected_total_reduction = sum(expected_reductions.values())
+    logger.info(f"📊 TOTAL EXPECTED REDUCTION: -{expected_total_reduction} (from {total_before} to {total_before - expected_total_reduction})")
+    
+    # Process each regular cut_roll individually - each cut_roll = 1 piece reduction
+    successful_reductions = 0
+    skipped_reductions = 0
+    
     for i, cut_roll in enumerate(regular_cut_rolls):
         source_pending_id = cut_roll.get("source_pending_id")
         
+        logger.info(f"🔍 PROCESSING Cut roll {i+1}: source_pending_id='{source_pending_id}'")
+        
         if not source_pending_id:
+            logger.warning(f"⚠️ Cut roll {i+1}: No source_pending_id, skipping")
             continue
-            
-        # CRITICAL: Check if we already processed this pending order
-        if source_pending_id in processed_pending_orders:
-            logger.info(f"   → Skipping cut roll {i+1}: Already processed pending order {source_pending_id[:8]}...")
+        
+        if source_pending_id == "None" or source_pending_id == "null":
+            logger.warning(f"⚠️ Cut roll {i+1}: source_pending_id is 'None' string, skipping")
             continue
             
         try:
@@ -458,37 +507,39 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             ).first()
             
             if pending_order and pending_order.quantity_pending > 0:
-                # Count total cut_rolls for this pending_id (this is the key fix!)
-                total_cut_rolls_for_pending = sum(1 for cr in regular_cut_rolls 
-                                                if cr.get("source_pending_id") == source_pending_id)
-                
                 old_pending = pending_order.quantity_pending
                 old_fulfilled = pending_order.quantity_fulfilled or 0
                 
-                logger.info(f"🔢 Processing pending {pending_order.frontend_id}: {total_cut_rolls_for_pending} cut_rolls found")
+                logger.info(f"🔢 Cut roll {i+1}: Reducing pending {pending_order.frontend_id[:8]} by 1")
                 logger.info(f"   → Before: pending={old_pending}, fulfilled={old_fulfilled}")
                 
-                # Apply the total reduction ONCE
-                pending_order.quantity_fulfilled = old_fulfilled + total_cut_rolls_for_pending
-                pending_order.quantity_pending = max(0, old_pending - total_cut_rolls_for_pending)
+                # Reduce by 1 for each cut_roll
+                pending_order.quantity_fulfilled = old_fulfilled + 1
+                pending_order.quantity_pending = max(0, old_pending - 1)
                 
                 logger.info(f"   → After: pending={pending_order.quantity_pending}, fulfilled={pending_order.quantity_fulfilled}")
                 
-                # Update status
-                if pending_order.quantity_pending <= 0:
+                # Update status if fully resolved
+                if pending_order.quantity_pending <= 0 and pending_order._status != "resolved":
                     pending_order._status = "resolved"
                     pending_order.resolved_at = datetime.utcnow()
                     logger.info(f"   → Status: RESOLVED (fully fulfilled)")
-                else:
+                elif pending_order.quantity_pending > 0:
                     logger.info(f"   → Status: PARTIAL ({pending_order.quantity_pending} still pending)")
                 
-                updated_pending_orders.append(str(pending_order.id))
+                # Add to updated list only once per unique pending order
+                pending_id_str = str(pending_order.id)
+                if pending_id_str not in updated_pending_orders:
+                    updated_pending_orders.append(pending_id_str)
                 
-                # Mark this pending order as processed
-                processed_pending_orders.add(source_pending_id)
+                successful_reductions += 1
+            else:
+                logger.warning(f"⚠️ Cut roll {i+1}: Pending order not found or already at 0 quantity")
+                skipped_reductions += 1
                 
         except Exception as e:
             logger.error(f"❌ Error processing cut roll {i+1}: {e}")
+            skipped_reductions += 1
             continue
     
     # ====== MANUAL CUTS PROCESSING: Create Orders for Manual Cuts ======
@@ -592,37 +643,20 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
         
         logger.info(f"🎉 MANUAL CUTS COMPLETE: Created {len(created_manual_orders)} orders, {len(created_manual_order_items)} order items")
     
-    # ====== DETAILED LOGGING: Paper Specification Grouping ======
-    logger.info("🔬 PAPER SPEC GROUPING ANALYSIS:")
+    # Group cut rolls by paper specification
     jumbo_roll_width = request_data.jumbo_roll_width or 118
-    logger.info(f"📏 Jumbo roll width: {jumbo_roll_width}")
-    
-    # Group selected cut rolls by paper specification first, then by individual_roll_number (EXACT COPY)
-    paper_spec_groups = {}  # {paper_spec_key: {roll_number: [cut_rolls]}}
-    
-    # Combine regular and manual cuts for plan creation
+    paper_spec_groups = {}
     all_cut_rolls_for_plan = regular_cut_rolls + manual_cut_rolls
-    logger.info(f"📦 GROUPING START: Processing {len(all_cut_rolls_for_plan)} cut rolls ({len(regular_cut_rolls)} regular + {len(manual_cut_rolls)} manual) for paper spec grouping")
-    logger.info("🔍 Analyzing each cut roll for grouping logic:")
     
     for i, cut_roll in enumerate(all_cut_rolls_for_plan):
-        logger.info(f"🔍 Processing Cut Roll #{i+1}:")
-        logger.info(f"   Raw data: {cut_roll}")
-        
         individual_roll_number = cut_roll.get("individual_roll_number")
-        logger.info(f"   Individual roll number: {individual_roll_number}")
         
         if individual_roll_number:
-            # Create paper specification key (gsm, bf, shade)
             paper_spec_key = (
                 cut_roll.get("gsm"),
                 cut_roll.get("bf"), 
                 cut_roll.get("shade")
             )
-            
-            logger.info(f"   Paper spec key: {paper_spec_key}")
-            logger.info(f"   Width: {cut_roll.get('width_inches')}")
-            logger.info(f"   Source pending ID: {cut_roll.get('source_pending_id')}")
             
             # Initialize paper spec group if not exists
             if paper_spec_key not in paper_spec_groups:
@@ -644,22 +678,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
         else:
             logger.warning(f"📦 SKIPPED: Cut roll {i+1} has no individual_roll_number")
             
-    logger.info(f"📦 PAPER SPEC GROUPING COMPLETE: Found {len(paper_spec_groups)} unique paper specifications")
-    
-    # ====== DETAILED LOGGING: Final Grouping Summary ======
-    logger.info("🔬 FINAL GROUPING SUMMARY:")
-    for spec_key, roll_groups in paper_spec_groups.items():
-        gsm, bf, shade = spec_key
-        logger.info(f"📋 Paper Spec: {gsm}gsm, {bf}bf, {shade}")
-        total_rolls_in_spec = 0
-        for roll_number, cut_rolls in roll_groups.items():
-            roll_count = len(cut_rolls)
-            total_rolls_in_spec += roll_count
-            logger.info(f"   Roll #{roll_number}: {roll_count} cut rolls")
-            for j, roll in enumerate(cut_rolls):
-                logger.info(f"     Cut #{j+1}: {roll.get('width_inches')}\" (ID: {roll.get('source_pending_id', 'N/A')})")
-        logger.info(f"   🔢 Total rolls for this spec: {total_rolls_in_spec}")
-        logger.info("   ---")
+    # Create inventory hierarchy
     
     for spec_key, cut_rolls_for_spec in paper_spec_groups.items():
         gsm, bf, shade = spec_key
@@ -734,18 +753,11 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 created_118_rolls.append(roll_118)
                 logger.info(f"📏 Created 118\" roll: {roll_118.frontend_id}")
     
-    # ====== DETAILED LOGGING: Cut Roll Inventory Creation ======
-    logger.info("🔧 CUT ROLL INVENTORY CREATION:")
-    logger.info(f"📦 Total cut rolls to process: {len(selected_cut_rolls_dict)}")
-    logger.info("🔍 Processing each selected cut roll for inventory creation:")
+    # Create cut roll inventory
+    logger.info(f"🔧 Creating {len(selected_cut_rolls_dict)} cut roll inventory items...")
     
     for i, cut_roll in enumerate(selected_cut_rolls_dict):
         try:
-            logger.info(f"🔧 ===== PROCESSING CUT ROLL #{i+1}/{len(selected_cut_rolls_dict)} =====")
-            logger.info(f"📦 Cut roll data: {cut_roll}")
-            logger.info(f"📏 Dimensions: {cut_roll.get('width_inches')}\" x {cut_roll.get('weight_kg', 'N/A')}kg")
-            logger.info(f"📋 Paper: GSM={cut_roll.get('gsm')}, BF={cut_roll.get('bf')}, Shade={cut_roll.get('shade')}")
-            logger.info(f"🔗 Source: pending_id={cut_roll.get('source_pending_id')}, roll_number={cut_roll.get('individual_roll_number')}")
             
             # Find the paper record for this cut roll
             cut_roll_paper = db.query(models.PaperMaster).filter(
@@ -755,48 +767,28 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             ).first()
             
             if not cut_roll_paper:
-                logger.error(f"❌ PAPER LOOKUP FAILED: No paper found for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']}")
-                logger.error(f"❌ SKIPPING cut roll #{i+1} due to missing paper record")
+                logger.error(f"❌ No paper found for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']} - skipping")
                 continue
-            else:
-                logger.info(f"✅ PAPER FOUND: {cut_roll_paper.frontend_id} (ID: {cut_roll_paper.id})")
             
             # Find a suitable 118" roll to attach this cut to
-            logger.info(f"🔍 Looking for suitable 118\" parent roll...")
             suitable_118_roll = db.query(models.InventoryMaster).filter(
                 models.InventoryMaster.paper_id == cut_roll_paper.id,
                 models.InventoryMaster.roll_type == "118",
                 models.InventoryMaster.status == "consumed"
             ).first()
             
-            if suitable_118_roll:
-                logger.info(f"✅ Found parent 118\" roll: {suitable_118_roll.frontend_id}")
-            else:
-                logger.warning(f"⚠️ No suitable 118\" parent roll found - will create cut roll without parent")
-            
-            # Create the cut roll inventory record with ORDER LINKING
-            logger.info(f"🔧 Generating identifiers for inventory creation...")
+            # Create the cut roll inventory record
             barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
             frontend_id = FrontendIDGenerator.generate_frontend_id("inventory_master", db)
-            logger.info(f"🔧 Generated IDs - Barcode: {barcode_id}, Frontend: {frontend_id}")
             
-            # ✅ CRITICAL: Link cut roll to order (original for regular cuts, manual for manual cuts)
-            logger.info(f"🔗 Attempting to link cut roll to order...")
-            
-            # Check if this is a manual cut
+            # Link cut roll to order
             if cut_roll.get("is_manual_cut", False):
-                # Manual cut - link to the created manual order
+                # Manual cut - link to created manual order
                 client_id = cut_roll.get("manual_cut_client_id")
-                if client_id and client_id in client_orders:
-                    order_uuid = client_orders[client_id].id
-                    logger.info(f"✅ MANUAL CUT ORDER LINK: {order_uuid} (client: {client_id})")
-                else:
-                    logger.warning(f"❌ MANUAL CUT: No manual order found for client {client_id}")
-                    order_uuid = None
+                order_uuid = client_orders[client_id].id if client_id and client_id in client_orders else None
             else:
                 # Regular cut - link to original order
                 order_id = cut_roll.get("order_id")
-                logger.info(f"🔗 Order ID from cut_roll: {order_id}")
                 if order_id:
                     try:
                         order_uuid = UUID(order_id)
@@ -837,14 +829,9 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 allocated_to_order_id=order_uuid  # ✅ LINK TO ORIGINAL ORDER FOR CLIENT INFO
             )
             
-            logger.info(f"💾 SAVING TO DATABASE:")
             db.add(inventory_item)
-            db.flush()  # Get the ID immediately
+            db.flush()
             created_inventory.append(inventory_item)
-            logger.info(f"✅ SUCCESSFULLY CREATED: {inventory_item.frontend_id} (DB ID: {inventory_item.id})")
-            logger.info(f"📋 FINAL INVENTORY: Width={inventory_item.width_inches}\", Paper={cut_roll_paper.frontend_id}, QR={inventory_item.qr_code}")
-            logger.info(f"===== END CUT ROLL #{i+1} =====")
-            logger.info("")  # Empty line for readability
             
         except Exception as e:
             logger.error(f"❌ Error creating cut roll inventory {i+1}: {e}")
@@ -852,14 +839,9 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             import traceback
             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
     
-    # Link all created inventory items to the plan via PlanInventoryLink
-    logger.info(f"🔗 PLAN LINKING: Creating PlanInventoryLink records")
+    # Link inventory items to plan
     created_plan_links = []
-    
-    # ✅ FIX: Only link CUT ROLLS to the plan (frontend looks for roll_type="cut")
-    # Jumbo and 118" rolls are for hierarchy tracking, but plan should show cut rolls only
     valid_inventory_items = [item for item in created_inventory if item and item.id is not None]
-    logger.info(f"🔗 PLAN LINKING: Linking {len(valid_inventory_items)} CUT ROLLS to plan (jumbo/118\" rolls are for hierarchy only)")
     
     for inventory_item in valid_inventory_items:
         try:
@@ -873,7 +855,6 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             
             db.add(plan_link)
             created_plan_links.append(plan_link)
-            logger.info(f"🔗 Linked {inventory_item.frontend_id} to plan {db_plan.frontend_id}")
             
         except Exception as e:
             logger.error(f"❌ Error creating plan inventory link for {inventory_item.frontend_id}: {e}")
@@ -950,10 +931,91 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     db_plan.completed_at = datetime.utcnow()
     logger.info(f"✅ Plan {db_plan.frontend_id} marked as completed")
     
+    # Summary of reductions
+    logger.info(f"📊 REDUCTION SUMMARY: {successful_reductions} successful, {skipped_reductions} skipped, {len(regular_cut_rolls)} total cut_rolls")
+    
     # Commit all changes
+    logger.info(f"📝 ABOUT TO COMMIT: {len(updated_pending_orders)} pending orders updated")
+    
+    # VERIFICATION: Check actual database state before commit
+    logger.info("🔍 PRE-COMMIT VERIFICATION: Checking pending orders in session...")
+    for pending_id_str in set(updated_pending_orders):  # Remove duplicates
+        try:
+            pending_uuid = UUID(pending_id_str)
+            pending_order = db.query(models.PendingOrderItem).filter(
+                models.PendingOrderItem.id == pending_uuid
+            ).first()
+            if pending_order:
+                logger.info(f"   → {pending_order.frontend_id}: pending={pending_order.quantity_pending}, fulfilled={pending_order.quantity_fulfilled}, status={pending_order._status}")
+        except Exception as e:
+            logger.error(f"   → Error checking {pending_id_str[:8]}: {e}")
+    
     try:
         db.commit()
         logger.info("✅ DATABASE COMMIT: All changes committed successfully")
+        
+        # COMPREHENSIVE POST-COMMIT VERIFICATION: Check actual final state  
+        logger.info("🔍 POST-PRODUCTION DATABASE STATE:")
+        after_state = {}
+        total_after = 0
+        actual_total_reduction = 0
+        
+        for pending_id in unique_pending_ids:
+            try:
+                pending_uuid = UUID(pending_id)
+                pending_order = db.query(models.PendingOrderItem).filter(
+                    models.PendingOrderItem.id == pending_uuid
+                ).first()
+                if pending_order and pending_id in before_state:
+                    before = before_state[pending_id]
+                    actual_reduction = before['pending'] - pending_order.quantity_pending
+                    expected_reduction = expected_reductions.get(pending_id, 0)
+                    
+                    after_state[pending_id] = {
+                        'frontend_id': pending_order.frontend_id,
+                        'width': pending_order.width_inches,
+                        'pending': pending_order.quantity_pending,
+                        'fulfilled': pending_order.quantity_fulfilled or 0,
+                        'status': pending_order._status
+                    }
+                    
+                    total_after += pending_order.quantity_pending
+                    actual_total_reduction += actual_reduction
+                    
+                    if actual_reduction == expected_reduction:
+                        logger.info(f"   ✅ {pending_order.frontend_id}: {before['pending']} → {pending_order.quantity_pending} (-{actual_reduction}) CORRECT")
+                    else:
+                        logger.error(f"   ❌ {pending_order.frontend_id}: {before['pending']} → {pending_order.quantity_pending} (-{actual_reduction}) EXPECTED -{expected_reduction}")
+                        
+            except Exception as e:
+                logger.error(f"   → Error checking {pending_id[:8]}: {e}")
+        
+        logger.info(f"📊 FINAL VERIFICATION:")
+        logger.info(f"   → Total before: {total_before}")
+        logger.info(f"   → Total after: {total_after}")
+        logger.info(f"   → Expected reduction: -{expected_total_reduction}")
+        logger.info(f"   → Actual reduction: -{actual_total_reduction}")
+        logger.info(f"   → Cut_rolls sent: {len(regular_cut_rolls)}")
+        logger.info(f"   → Successful reductions: {successful_reductions}")
+        logger.info(f"   → Skipped reductions: {skipped_reductions}")
+        
+        if actual_total_reduction == expected_total_reduction:
+            logger.info("✅ PERFECT MATCH: Database reduction matches expectations")
+        else:
+            logger.error(f"❌ MISMATCH: Expected -{expected_total_reduction}, got -{actual_total_reduction}, difference: {expected_total_reduction - actual_total_reduction}")
+        
+        # Additional verification logs
+        logger.info("🔍 POST-COMMIT VERIFICATION: Re-querying database...")
+        for pending_id_str in set(updated_pending_orders):  # Remove duplicates
+            try:
+                pending_uuid = UUID(pending_id_str)
+                pending_order = db.query(models.PendingOrderItem).filter(
+                    models.PendingOrderItem.id == pending_uuid
+                ).first()
+                if pending_order:
+                    logger.info(f"   → {pending_order.frontend_id}: pending={pending_order.quantity_pending}, fulfilled={pending_order.quantity_fulfilled}, status={pending_order._status}")
+            except Exception as e:
+                logger.error(f"   → Error re-checking {pending_id_str[:8]}: {e}")
     except Exception as e:
         db.rollback()
         logger.error(f"❌ DATABASE ROLLBACK: Commit failed: {e}")

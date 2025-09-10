@@ -96,13 +96,30 @@ def get_roll_suggestions(
 
 @router.post("/pending-orders/start-production", response_model=schemas.StartProductionResponse, tags=["Pending Order Items"])
 def start_production_from_pending_orders(
-    request_data: schemas.StartProductionRequest,  # ✅ CHANGED: Use same schema as main planning
+    request_data: Dict[str, Any],  # Accept raw data to debug validation issues
     db: Session = Depends(get_db)
 ):
     """Start production from selected pending orders - same format as main planning"""
     try:
+        # Debug: Log the incoming request data structure
+        logger.info(f"🔍 RAW REQUEST DATA KEYS: {list(request_data.keys())}")
+        logger.info(f"🔍 SELECTED CUT ROLLS COUNT: {len(request_data.get('selected_cut_rolls', []))}")
+        
+        if 'selected_cut_rolls' in request_data and len(request_data['selected_cut_rolls']) > 0:
+            sample_roll = request_data['selected_cut_rolls'][0]
+            logger.info(f"🔍 SAMPLE CUT ROLL KEYS: {list(sample_roll.keys())}")
+            logger.info(f"🔍 SAMPLE VALUES: paper_id={sample_roll.get('paper_id')}, created_by_id={request_data.get('created_by_id')}")
+        
+        # Try to validate against schema and catch detailed errors
+        try:
+            validated_data = schemas.StartProductionRequest(**request_data)
+            logger.info("✅ VALIDATION PASSED")
+        except Exception as validation_error:
+            logger.error(f"❌ VALIDATION ERROR: {str(validation_error)}")
+            raise HTTPException(status_code=422, detail=f"Validation error: {str(validation_error)}")
+        
         from .. import crud_operations
-        return crud_operations.start_production_from_pending_orders(db=db, request_data=request_data)  # ✅ RENAMED FUNCTION
+        return crud_operations.start_production_from_pending_orders(db=db, request_data=validated_data)
     except HTTPException:
         raise
     except Exception as e:

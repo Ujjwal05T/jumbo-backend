@@ -773,7 +773,7 @@ class DispatchRecord(BaseModel):
 
 class SelectedCutRoll(BaseModel):
     """Individual cut roll selected for production"""
-    paper_id: str = Field(..., description="Paper ID for this cut roll")
+    paper_id: Optional[str] = Field(None, description="Paper ID for this cut roll - can be resolved from specs for pending orders")
     width_inches: float = Field(..., gt=0, description="Width in inches")
     qr_code: str = Field(..., description="QR code for tracking")
     gsm: int = Field(..., gt=0)
