@@ -783,8 +783,13 @@ class SelectedCutRoll(BaseModel):
     trim_left: Optional[float] = Field(None, ge=0, description="Trim left in inches")
     order_id: Optional[str] = Field(None, description="Source order ID")
     # CRITICAL: Add source tracking fields for pending order resolution
-    source_type: Optional[str] = Field(None, description="Source type: 'regular_order' or 'pending_order'")
+    source_type: Optional[str] = Field(None, description="Source type: 'regular_order', 'pending_order', or 'manual_cut'")
     source_pending_id: Optional[str] = Field(None, description="ID of source pending order if applicable")
+    # Manual cut specific fields
+    is_manual_cut: Optional[bool] = Field(None, description="True if this is a manual cut")
+    manual_cut_client_id: Optional[str] = Field(None, description="Client ID for manual cuts")
+    manual_cut_client_name: Optional[str] = Field(None, description="Client name for manual cuts")
+    description: Optional[str] = Field(None, description="Description for manual cuts")
 
 class WastageData(BaseModel):
     """Wastage data for tracking waste material (9-21 inches)"""
