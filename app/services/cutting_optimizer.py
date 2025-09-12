@@ -1719,6 +1719,30 @@ class CuttingOptimizer:
             for i, pending in enumerate(new_pending_orders):
                 logger.info(f"🔍 Final return {i+1}: {pending}")
         
+        # SORTING: Sort cut rolls by paper specification first, then by wastage (trim_left) within each spec
+        logger.info(f"🔄 SORTING: Sorting {len(cut_rolls_generated)} cut rolls by paper spec and wastage")
+        
+        def sort_key(roll):
+            # Primary sort: Major paper specification (GSM, Shade only) - groups main paper types
+            major_spec = (roll.get('gsm', 0), roll.get('shade', ''))
+            # Secondary sort: Wastage amount (trim_left) - groups similar wastage together
+            wastage = roll.get('trim_left', 0)
+            # Tertiary sort: BF for sub-grouping within same wastage
+            bf = roll.get('bf', 0.0)
+            # Quaternary sort: Width for consistent ordering
+            width = roll.get('width', 0)
+            return (major_spec, wastage, bf, width)
+        
+        # Apply sorting to group rolls as requested:
+        # JR-001 -> 3" wastage in set 1 | 3" wastage in set 2 | 3" wastage in set 3
+        # JR-002 -> 13" wastage in set 1 | 13" wastage in set 2 | 13" wastage in set 3
+        cut_rolls_generated.sort(key=sort_key)
+        
+        logger.info(f"✅ SORTING: Completed sorting by paper spec and wastage")
+        if cut_rolls_generated:
+            logger.info(f"🔍 SORTING RESULT - First roll: GSM:{cut_rolls_generated[0].get('gsm')}, Shade:{cut_rolls_generated[0].get('shade')}, Trim:{cut_rolls_generated[0].get('trim_left')}\"")
+            logger.info(f"🔍 SORTING RESULT - Last roll: GSM:{cut_rolls_generated[-1].get('gsm')}, Shade:{cut_rolls_generated[-1].get('shade')}, Trim:{cut_rolls_generated[-1].get('trim_left')}\"")
+        
         # NEW FLOW: Return 3 distinct outputs (removed waste inventory)
         result = {
             'cut_rolls_generated': cut_rolls_generated,

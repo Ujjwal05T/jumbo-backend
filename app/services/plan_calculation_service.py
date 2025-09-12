@@ -218,8 +218,21 @@ class PlanCalculationService:
         jumbo_counter = 1
         
         for spec_key, roll_groups in spec_groups.items():
-            # Sort roll numbers to create consistent jumbo groupings
-            sorted_roll_numbers = sorted(roll_groups.keys())
+            # Sort roll numbers by AVERAGE WASTAGE instead of roll number for wastage-based JR assignment
+            def get_avg_wastage(roll_num):
+                rolls_in_group = roll_groups[roll_num]
+                if not rolls_in_group:
+                    return 999  # High value for empty groups
+                total_trim = sum(roll.get('trim_left', 0) for roll in rolls_in_group)
+                return total_trim / len(rolls_in_group)
+            
+            # WASTAGE-BASED SORTING: JR-001 gets lowest wastage, JR-002 gets medium, etc.
+            sorted_roll_numbers = sorted(roll_groups.keys(), key=get_avg_wastage)
+            
+            logger.info(f"🔄 JR ASSIGNMENT: Sorted rolls by wastage for {spec_key}")
+            for i, roll_num in enumerate(sorted_roll_numbers[:5]):  # Log first 5
+                avg_waste = get_avg_wastage(roll_num)
+                logger.info(f"  Roll {roll_num}: {avg_waste:.1f}\" avg wastage → will be in JR-{jumbo_counter + i // 3:03d}")
             
             # Group rolls flexibly into jumbos (1-3 rolls per jumbo, optimized grouping)
             i = 0
@@ -267,6 +280,19 @@ class PlanCalculationService:
                     avg_width_per_roll = total_used_width / roll_count
                     efficiency = (avg_width_per_roll / self.jumbo_roll_width) * 100
                 
+                # Calculate average wastage for this jumbo
+                total_wastage = 0
+                wastage_count = 0
+                for roll_num in rolls_in_jumbo:
+                    for cut_roll in roll_groups[roll_num]:
+                        total_wastage += cut_roll.get('trim_left', 0)
+                        wastage_count += 1
+                
+                avg_wastage = total_wastage / wastage_count if wastage_count > 0 else 0
+                
+                # Log the wastage grouping result
+                logger.info(f"✅ {jumbo_id}: {avg_wastage:.1f}\" avg wastage ({wastage_count} cuts)")
+                
                 # Create jumbo roll detail
                 jumbo_detail = {
                     'jumbo_id': jumbo_id,
@@ -276,6 +302,7 @@ class PlanCalculationService:
                     'total_cuts': total_cuts,
                     'total_used_width': total_used_width,
                     'efficiency_percentage': round(efficiency, 1),
+                    'average_wastage': round(avg_wastage, 1),  # NEW: Add average wastage to jumbo details
                     'is_complete': roll_count >= 1,  # FLEXIBLE: Any jumbo with 1+ rolls is complete
                     'roll_numbers': rolls_in_jumbo
                 }
