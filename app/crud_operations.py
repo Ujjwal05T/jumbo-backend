@@ -207,7 +207,10 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
                         'min_length': 1600,  # Default since OrderItem doesn't have min_length
                         'client_name': order.client.company_name if order.client else 'Unknown',
                         'client_id': str(order.client.id) if order.client else None,
-                        'paper_id': str(item.paper.id)
+                        'paper_id': str(item.paper.id),
+                        'source_type': 'regular_order',           # FIX: Add source type for consistency
+                        'source_order_id': str(order.id),        # FIX: Add source order ID
+                        'source_pending_id': None                # FIX: Regular orders don't have pending ID
                     })
     
     return order_requirements

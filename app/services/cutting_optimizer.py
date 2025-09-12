@@ -1440,10 +1440,12 @@ class CuttingOptimizer:
                 'source_type': req['source_type'],
                 'source_order_id': req.get('source_order_id'),
                 'source_pending_id': req.get('source_pending_id'),
-                'quantity': req['quantity']
+                'quantity': req['quantity'],
+                'client_name': req.get('client_name', 'Unknown'),  # FIX: Add client mapping to source tracking
+                'client_id': req.get('client_id')                  # FIX: Add client ID to source tracking
             }
             spec_groups[spec_key]['source_tracking'][width].append(source_entry)
-            logger.info(f"  📋 SOURCE TRACKING: width={width}\", type={req['source_type']}, pending_id={req.get('source_pending_id')}")
+            logger.info(f"  📋 SOURCE TRACKING: width={width}\", type={req['source_type']}, client={req.get('client_name', 'Unknown')}, pending_id={req.get('source_pending_id')}")
         
         logger.info(f"📊 OPTIMIZER: Final spec_groups structure:")
         for spec_key, group_data in spec_groups.items():
@@ -1591,9 +1593,15 @@ class CuttingOptimizer:
                             'source_type': source_info.get('source_type', 'regular_order'),
                             'source_order_id': source_info.get('source_order_id'),
                             'source_pending_id': source_info.get('source_pending_id'),
-                            'order_id': source_info.get('source_order_id')  # Keep existing field for backward compatibility
+                            'order_id': source_info.get('source_order_id'),  # Keep existing field for backward compatibility
+                            'client_name': source_info.get('client_name', 'Unknown'),  # FIX: Include client name from source
+                            'client_id': source_info.get('client_id')                  # FIX: Include client ID from source
                         }
                         cut_rolls_generated.append(cut_roll)
+                        
+                        # DEBUG: Log client mapping success
+                        if individual_118_rolls_needed <= 5:  # Only log first 5 rolls to avoid spam
+                            logger.info(f"  ✂️ CUT ROLL #{len(cut_rolls_generated)}: {width}\" → client: {cut_roll.get('client_name', 'Unknown')}")
             else:
                 logger.info(f"   ✅ OPTIMIZER: All orders fulfilled from inventory, no cutting needed")
             

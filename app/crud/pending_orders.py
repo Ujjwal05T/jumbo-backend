@@ -67,8 +67,13 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         
         # CRITICAL: Filter out pending items already used in active plans
         # AND exclude algorithm limitation pending orders (since original orders were reduced)
+        # FIX: Load original order and client relationships for client name mapping
         pending_items = (
             db.query(models.PendingOrderItem)
+            .options(
+                joinedload(models.PendingOrderItem.original_order)
+                .joinedload(models.OrderMaster.client)
+            )
             .filter(
                 and_(
                     models.PendingOrderItem._status == "pending",
@@ -87,6 +92,14 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         # Convert to optimizer format
         pending_requirements = []
         for item in pending_items:
+            # FIX: Add client information from loaded relationships
+            client_name = 'Unknown'
+            client_id = None
+            
+            if item.original_order and item.original_order.client:
+                client_name = item.original_order.client.company_name
+                client_id = str(item.original_order.client.id)
+            
             pending_requirements.append({
                 'width': float(item.width_inches),
                 'quantity': item.quantity_pending,
@@ -95,7 +108,9 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
                 'shade': item.shade,
                 'pending_order_id': str(item.id),
                 'original_order_id': str(item.original_order_id),
-                'reason': item.reason
+                'reason': item.reason,
+                'client_name': client_name,  # FIX: Now includes client name
+                'client_id': client_id        # FIX: Now includes client ID
             })
         
         return pending_requirements

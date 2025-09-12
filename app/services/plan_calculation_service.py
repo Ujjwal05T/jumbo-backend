@@ -125,7 +125,12 @@ class PlanCalculationService:
                 'bf': float(pending.get('bf', 0)),
                 'shade': pending.get('shade', ''),
                 'pending_id': str(pending.get('pending_order_id', 'unknown')),
-                'reason': pending.get('reason', 'unknown')
+                'reason': pending.get('reason', 'unknown'),
+                'client_name': pending.get('client_name', 'Unknown'),  # FIX: Pass through client name
+                'client_id': pending.get('client_id'),                 # FIX: Pass through client ID
+                'source_type': 'pending_order',                       # FIX: Add source type for tracking
+                'source_pending_id': str(pending.get('pending_order_id', 'unknown')),  # FIX: Add source pending ID
+                'source_order_id': str(pending.get('original_order_id', 'unknown'))    # FIX: Add source order ID
             }
             pending_requirements.append(pending_req)
         return pending_requirements
