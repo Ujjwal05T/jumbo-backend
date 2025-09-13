@@ -394,12 +394,21 @@ class InventoryMaster(Base):
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     
+    # Wastage tracking fields
+    is_wastage_roll = Column(Boolean, default=False, nullable=False, index=True)
+    wastage_source_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)
+    wastage_source_plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=True, index=True)
+    
     # Relationships
     paper = relationship("PaperMaster", back_populates="inventory_items")
     created_by = relationship("UserMaster", back_populates="inventory_created")
-    allocated_order = relationship("OrderMaster")
+    allocated_order = relationship("OrderMaster", foreign_keys=[allocated_to_order_id])
     source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
     plan_inventory = relationship("PlanInventoryLink", back_populates="inventory")
+    
+    # Wastage relationships
+    wastage_source_order = relationship("OrderMaster", foreign_keys=[wastage_source_order_id])
+    wastage_source_plan = relationship("PlanMaster", foreign_keys=[wastage_source_plan_id])
     
     # Jumbo roll hierarchy relationships
     parent_jumbo = relationship("InventoryMaster", foreign_keys=[parent_jumbo_id], remote_side=[id])

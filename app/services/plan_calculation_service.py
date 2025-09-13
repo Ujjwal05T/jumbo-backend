@@ -66,19 +66,25 @@ class PlanCalculationService:
             if include_available_inventory:
                 available_inventory = self._get_available_inventory(paper_specs)
             
-            logger.info(f"CALCULATION: Processing {len(order_requirements)} orders, "
-                       f"{len(pending_requirements)} pending, {len(available_inventory)} inventory")
+            # WASTAGE ALLOCATION: Check and allocate available wastage before planning
+            wastage_allocations, reduced_order_requirements = self._check_and_reduce_orders_with_wastage(order_requirements)
             
-            # PURE CALCULATION: Run optimization algorithm
+            logger.info(f"CALCULATION: Processing {len(order_requirements)} orders, "
+                       f"{len(pending_requirements)} pending, {len(available_inventory)} inventory, "
+                       f"{len(wastage_allocations)} wastage matches")
+            
+            # PURE CALCULATION: Run optimization algorithm with reduced order requirements
             optimization_result = self.optimizer.optimize_with_new_algorithm(
-                order_requirements=order_requirements,
+                order_requirements=reduced_order_requirements,
                 pending_orders=pending_requirements,
                 available_inventory=available_inventory,
                 interactive=False
             )
             
-            # CALCULATION ONLY: Process and format results
-            return self._format_calculation_result(optimization_result, order_ids)
+            # CALCULATION ONLY: Process and format results including wastage allocations
+            result = self._format_calculation_result(optimization_result, order_ids)
+            result['wastage_allocations'] = wastage_allocations
+            return result
             
         except Exception as e:
             logger.error(f"Error in plan calculation: {str(e)}")
@@ -316,3 +322,142 @@ class PlanCalculationService:
                 jumbo_counter += 1
         
         return enhanced_cut_rolls, jumbo_roll_details
+    
+    def _check_wastage_allocations(self, order_requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Check available wastage rolls that can fulfill order requirements.
+        Returns list of potential wastage allocations without making database changes.
+        """
+        from ..crud.inventory import CRUDInventory
+        from .. import models
+        
+        wastage_allocations = []
+        inventory_crud = CRUDInventory(models.InventoryMaster)
+        
+        for order_req in order_requirements:
+            paper_id = order_req.get('paper_id')
+            width_inches = order_req.get('width_inches')
+            
+            logger.info(f"🔍 ORDER REQ: Looking for wastage matching Order {order_req.get('order_id')} - "
+                       f"Width: {width_inches}\", Paper: {paper_id}")
+            
+            # Find available wastage rolls for this specification
+            available_wastage = inventory_crud.get_available_wastage_rolls(
+                self.db,
+                paper_id=paper_id,
+                width_inches=width_inches
+            )
+            
+            logger.info(f"🔍 QUERY RESULT: Found {len(available_wastage)} available wastage rolls")
+            
+            for wastage_roll in available_wastage:
+                # Consider wastage regardless of weight (weight will be set during QR scan)
+                # Log the wastage roll details for debugging
+                logger.info(f"🔍 WASTAGE DEBUG: Found wastage roll {wastage_roll.frontend_id} - "
+                           f"Width: {wastage_roll.width_inches}\", Paper: {wastage_roll.paper_id}, "
+                           f"Weight: {wastage_roll.weight_kg}kg, Status: {wastage_roll.status}")
+                
+                allocation = {
+                    'wastage_id': wastage_roll.id,
+                    'wastage_frontend_id': wastage_roll.frontend_id,
+                    'order_id': order_req.get('order_id'),
+                    'order_item_id': order_req.get('order_item_id'),
+                    'paper_id': paper_id,
+                    'width_inches': width_inches,
+                    'weight_kg': wastage_roll.weight_kg,
+                    'source_order_id': wastage_roll.wastage_source_order_id,
+                    'source_plan_id': wastage_roll.wastage_source_plan_id
+                }
+                wastage_allocations.append(allocation)
+                logger.info(f"✅ WASTAGE MATCH: Allocated {wastage_roll.frontend_id} to order {order_req.get('order_id')}")
+                
+                # Only one wastage roll per order requirement for now
+                break
+        
+        logger.info(f"🔄 WASTAGE ALLOCATION: Found {len(wastage_allocations)} potential wastage matches")
+        return wastage_allocations
+    
+    def _check_and_reduce_orders_with_wastage(self, order_requirements: List[Dict[str, Any]]) -> tuple:
+        """
+        Check available wastage from wastage_inventory table and reduce order item quantities.
+        
+        Returns:
+            Tuple of (wastage_allocations, reduced_order_requirements)
+        """
+        from .. import models
+        
+        wastage_allocations = []
+        reduced_order_requirements = []
+        
+        logger.info(f"🔄 WASTAGE: Checking wastage allocation for {len(order_requirements)} orders")
+        
+        for order_req in order_requirements:
+            paper_id = order_req.get('paper_id')
+            # Handle both 'width_inches' and 'width' field names for compatibility
+            width_inches = order_req.get('width_inches') or order_req.get('width')
+            order_id = order_req.get('order_id')
+            order_item_id = order_req.get('order_item_id')
+            current_quantity = order_req.get('quantity', 0)
+
+            logger.info(f"🔍 ORDER {order_id}: Looking for wastage - Width: {width_inches}\", Paper: {paper_id}, Qty: {current_quantity}")
+            
+            # Find available wastage rolls matching this order's specifications
+            available_wastage = self.db.query(models.WastageInventory).filter(
+                models.WastageInventory.paper_id == paper_id,
+                models.WastageInventory.width_inches == width_inches,
+                models.WastageInventory.status == models.WastageStatus.AVAILABLE.value
+            ).order_by(models.WastageInventory.weight_kg.desc()).all()
+            
+            logger.info(f"🔍 WASTAGE QUERY: Found {len(available_wastage)} available wastage rolls")
+            
+            total_wastage_weight = 0
+            used_wastage = []
+            
+            # Use available wastage to reduce order quantity
+            for wastage_roll in available_wastage:
+                if current_quantity <= 0:
+                    break
+                
+                # Use actual weight or default to 50kg for wastage rolls without weight
+                wastage_weight = float(wastage_roll.weight_kg) if wastage_roll.weight_kg and wastage_roll.weight_kg > 0 else 50.0
+
+                logger.info(f"🔍 WASTAGE ROLL: {wastage_roll.frontend_id} - {wastage_roll.width_inches}\" x {wastage_weight}kg {'(default)' if wastage_roll.weight_kg == 0 else ''}")
+
+                # Always try to allocate wastage rolls (use default weight if needed)
+                if True:  # Always allocate available wastage
+                    # Use this wastage roll
+                    allocation = {
+                        'wastage_id': wastage_roll.id,
+                        'wastage_frontend_id': wastage_roll.frontend_id,
+                        'order_id': order_id,
+                        'order_item_id': order_item_id,
+                        'paper_id': paper_id,
+                        'width_inches': float(width_inches) if width_inches else 0,
+                        'weight_kg': wastage_weight,
+                        'quantity_reduced': min(wastage_weight, current_quantity)
+                    }
+                    
+                    wastage_allocations.append(allocation)
+                    used_wastage.append(wastage_roll)
+                    total_wastage_weight += wastage_weight
+                    current_quantity -= wastage_weight
+                    
+                    logger.info(f"✅ WASTAGE ALLOCATED: {wastage_roll.frontend_id} ({wastage_weight}kg) to order {order_id}, remaining qty: {current_quantity}")
+            
+            # Create reduced order requirement
+            if current_quantity > 0:
+                # Still have remaining quantity after wastage allocation
+                reduced_req = order_req.copy()
+                reduced_req['quantity'] = current_quantity
+                reduced_req['original_quantity'] = order_req.get('quantity', 0)
+                reduced_req['wastage_allocated'] = total_wastage_weight
+                reduced_order_requirements.append(reduced_req)
+                
+                logger.info(f"📉 ORDER REDUCED: {order_id} quantity reduced from {order_req.get('quantity', 0)} to {current_quantity} (wastage: {total_wastage_weight}kg)")
+            else:
+                # Order fully satisfied by wastage
+                logger.info(f"✅ ORDER FULFILLED: {order_id} completely fulfilled by wastage ({total_wastage_weight}kg)")
+        
+        logger.info(f"🔄 WASTAGE SUMMARY: {len(wastage_allocations)} allocations, {len(reduced_order_requirements)} orders need cutting")
+        
+        return wastage_allocations, reduced_order_requirements

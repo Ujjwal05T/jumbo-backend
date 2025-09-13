@@ -1932,14 +1932,31 @@ class CuttingOptimizer:
                 'order_id': str(order.id)
             })
         
-        # Generate optimization result
-        optimization_result = self.optimize_with_new_algorithm(order_requirements, interactive)
+        # Generate optimization result with wastage allocation using PlanCalculationService
+        from .plan_calculation_service import PlanCalculationService
         
-        # Create plan in database
+        calculation_service = PlanCalculationService(db, jumbo_roll_width=self.jumbo_roll_width)
+        calculation_result = calculation_service.calculate_plan_for_orders(
+            order_ids=order_ids,
+            include_pending_orders=True,
+            include_available_inventory=True
+        )
+        
+        # Prepare cut_pattern data including wastage allocations
+        import json
+        cut_pattern_data = {
+            'cut_rolls_generated': calculation_result.get('cut_rolls_generated', []),
+            'jumbo_roll_details': calculation_result.get('jumbo_roll_details', []),
+            'wastage_allocations': calculation_result.get('wastage_allocations', []),
+            'summary': calculation_result.get('summary', {}),
+            'pending_orders': calculation_result.get('pending_orders', [])
+        }
+        
+        # Create plan in database with wastage allocations included
         plan_data = schemas.PlanMasterCreate(
             name=plan_name or f"Auto Plan {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            cut_pattern=optimization_result['jumbo_rolls_used'],
-            expected_waste_percentage=optimization_result['summary']['overall_waste_percentage'],
+            cut_pattern=cut_pattern_data,
+            expected_waste_percentage=calculation_result.get('summary', {}).get('overall_waste_percentage', 0),
             created_by_id=created_by_id,
             order_ids=order_ids,
             inventory_ids=[]  # Will be populated when inventory is allocated

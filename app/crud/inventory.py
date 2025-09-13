@@ -136,39 +136,97 @@ class CRUDInventory(CRUDBase[models.InventoryMaster, schemas.InventoryMasterCrea
             location=inventory.location,
             qr_code=inventory.qr_code,
             barcode_id=inventory.barcode_id,
-            created_by_id=inventory.created_by_id
+            created_by_id=inventory.created_by_id,
+            # Wastage fields (default to non-wastage)
+            is_wastage_roll=getattr(inventory, 'is_wastage_roll', False),
+            wastage_source_order_id=getattr(inventory, 'wastage_source_order_id', None),
+            wastage_source_plan_id=getattr(inventory, 'wastage_source_plan_id', None)
         )
         db.add(db_inventory)
         db.commit()
         db.refresh(db_inventory)
         return db_inventory
     
-    def create_inventory_from_waste(
-        self, db: Session, waste_items: List[Dict[str, Any]], user_id: UUID
+    def create_wastage_rolls_from_plan(
+        self, 
+        db: Session, 
+        *,
+        plan_id: UUID,
+        wastage_items: List[Dict[str, Any]], 
+        user_id: UUID
     ) -> List[models.InventoryMaster]:
-        """Create inventory records from waste items - NEW FLOW"""
-        created_items = []
+        """Create wastage inventory rolls from plan execution (9-21 inches)"""
+        created_wastage = []
         
-        for waste in waste_items:
-            if 20 <= waste['width'] <= 25:  # Only 20-25" waste becomes inventory
-                db_inventory = models.InventoryMaster(
-                    paper_id=waste['paper_id'],
-                    width_inches=waste['width'],
-                    weight_kg=waste.get('weight', 0),
+        for wastage in wastage_items:
+            width = wastage['width_inches']
+            
+            # Only create wastage inventory for 9-21 inch range
+            if 9 <= width <= 21:
+                db_wastage = models.InventoryMaster(
+                    paper_id=wastage['paper_id'],
+                    width_inches=width,
+                    weight_kg=0,  # Will be updated via QR scan
                     roll_type="cut",
                     status="available",
-                    location="warehouse",
-                    created_by_id=user_id
+                    location="waste_storage",
+                    created_by_id=user_id,
+                    # Wastage specific fields
+                    is_wastage_roll=True,
+                    wastage_source_order_id=wastage.get('source_order_id'),
+                    wastage_source_plan_id=plan_id
                 )
-                db.add(db_inventory)
-                created_items.append(db_inventory)
+                db.add(db_wastage)
+                created_wastage.append(db_wastage)
         
-        if created_items:
+        if created_wastage:
             db.commit()
-            for item in created_items:
+            for item in created_wastage:
                 db.refresh(item)
         
-        return created_items
+        return created_wastage
+    
+    def get_available_wastage_rolls(
+        self, 
+        db: Session, 
+        *, 
+        paper_id: UUID = None, 
+        width_inches: float = None
+    ) -> List[models.InventoryMaster]:
+        """Get available wastage rolls for allocation"""
+        query = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.is_wastage_roll == True,
+            models.InventoryMaster.status == "available"
+        ).options(joinedload(models.InventoryMaster.paper))
+        
+        if paper_id:
+            query = query.filter(models.InventoryMaster.paper_id == paper_id)
+        if width_inches:
+            query = query.filter(models.InventoryMaster.width_inches == width_inches)
+            
+        return query.order_by(models.InventoryMaster.weight_kg.desc()).all()
+    
+    def allocate_wastage_to_order(
+        self, 
+        db: Session, 
+        *, 
+        wastage_id: UUID, 
+        order_id: UUID
+    ) -> Optional[models.InventoryMaster]:
+        """Allocate wastage roll to an order"""
+        wastage_roll = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.id == wastage_id,
+            models.InventoryMaster.is_wastage_roll == True,
+            models.InventoryMaster.status == "available"
+        ).first()
+        
+        if wastage_roll:
+            wastage_roll.allocated_to_order_id = order_id
+            wastage_roll.status = "allocated"
+            db.commit()
+            db.refresh(wastage_roll)
+            
+        return wastage_roll
     
     def update_inventory_item(
         self, db: Session, *, inventory_id: UUID, inventory_update: schemas.InventoryMasterUpdate

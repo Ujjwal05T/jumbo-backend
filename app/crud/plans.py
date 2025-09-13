@@ -193,6 +193,44 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         updated_pending_orders = []
         created_jumbo_rolls = []
         created_118_rolls = []
+        allocated_wastage = []
+        
+        # NEW: STEP 1 - Convert pre-calculated wastage allocations to InventoryMaster entries
+        logger.info(f"🔄 STEP 1: Converting wastage allocations to cut rolls for plan {plan_id}")
+        
+        # Check if plan has pre-calculated wastage allocations stored in cut_pattern
+        try:
+            import json
+            cut_pattern_data = json.loads(db_plan.cut_pattern) if isinstance(db_plan.cut_pattern, str) else db_plan.cut_pattern
+
+            # Debug the structure of cut_pattern_data
+            logger.info(f"🔍 WASTAGE DEBUG: cut_pattern_data type = {type(cut_pattern_data)}")
+            if isinstance(cut_pattern_data, dict):
+                logger.info(f"🔍 WASTAGE DEBUG: cut_pattern_data keys = {list(cut_pattern_data.keys())}")
+                wastage_allocations = cut_pattern_data.get('wastage_allocations', [])
+            elif isinstance(cut_pattern_data, list):
+                logger.warning("⚠️ WASTAGE: cut_pattern_data is a list, expected dict with wastage_allocations")
+                wastage_allocations = []
+            else:
+                logger.warning(f"⚠️ WASTAGE: Unexpected cut_pattern_data type: {type(cut_pattern_data)}")
+                wastage_allocations = []
+
+            logger.info(f"🔄 WASTAGE: Found {len(wastage_allocations)} pre-calculated wastage allocations")
+            
+            if wastage_allocations:
+                allocated_wastage = self._convert_wastage_allocations_to_cut_rolls(
+                    db, 
+                    wastage_allocations=wastage_allocations,
+                    plan_id=plan_id,
+                    user_id=request_data.get("created_by_id")
+                )
+                logger.info(f"✅ WASTAGE: Successfully converted {len(allocated_wastage)} wastage allocations to cut rolls")
+            else:
+                logger.info("ℹ️ WASTAGE: No pre-calculated wastage allocations found")
+                
+        except Exception as e:
+            logger.error(f"❌ WASTAGE: Error during wastage allocation conversion: {e}")
+            # Continue with normal production even if wastage conversion fails
         
         # Update related order statuses to "in_process"
         for plan_order in db_plan.plan_orders:
@@ -1203,6 +1241,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "jumbo_rolls_created": len(created_jumbo_rolls),
                 "intermediate_118_rolls_created": len(created_118_rolls),
                 "wastage_items_created": len(created_wastage),
+                "wastage_items_allocated": len(allocated_wastage),
                 "gupta_orders_created": len(created_gupta_orders)
             },
             "details": {
@@ -1213,6 +1252,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "created_jumbo_rolls": [str(jr.id) for jr in created_jumbo_rolls],
                 "created_118_rolls": [str(r118.id) for r118 in created_118_rolls],
                 "created_wastage": [str(w.id) for w in created_wastage],
+                "allocated_wastage": [str(w.id) for w in allocated_wastage],
                 "created_gupta_orders": [order["order"]["frontend_id"] for order in created_gupta_orders]
             },
             "created_inventory_details": [
@@ -1241,6 +1281,276 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             ],
             "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_wastage)} wastage items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
         }
+    
+    def allocate_wastage_for_orders(
+        self, 
+        db: Session, 
+        *, 
+        wastage_allocations: List[Dict[str, Any]],
+        user_id: UUID
+    ) -> List[models.InventoryMaster]:
+        """
+        Allocate available wastage rolls to orders.
+        This happens before creating new cuts.
+        """
+        from ..crud.inventory import CRUDInventory
+        
+        inventory_crud = CRUDInventory(models.InventoryMaster)
+        allocated_wastage = []
+        
+        for allocation in wastage_allocations:
+            # Allocate the wastage roll to the order
+            wastage_roll = inventory_crud.allocate_wastage_to_order(
+                db,
+                wastage_id=allocation['wastage_id'],
+                order_id=allocation['order_id']
+            )
+            
+            if wastage_roll:
+                allocated_wastage.append(wastage_roll)
+                
+                # Update order item fulfillment
+                order_item = db.query(models.OrderItem).filter(
+                    models.OrderItem.id == allocation['order_item_id']
+                ).first()
+                
+                if order_item:
+                    order_item.quantity_fulfilled += 1
+                    logger.info(f"🔄 WASTAGE ALLOCATED: {wastage_roll.frontend_id} → Order {allocation['order_id']}")
+        
+        db.commit()
+        return allocated_wastage
+    
+    def generate_wastage_from_plan(
+        self, 
+        db: Session, 
+        *, 
+        plan_id: UUID,
+        cut_pattern: List[Dict[str, Any]],
+        user_id: UUID
+    ) -> List[models.InventoryMaster]:
+        """
+        Generate wastage inventory from plan execution.
+        Creates InventoryMaster entries for 9-21 inch wastage.
+        """
+        from ..crud.inventory import CRUDInventory
+        
+        inventory_crud = CRUDInventory(models.InventoryMaster)
+        wastage_items = []
+        
+        # Extract wastage from cut pattern
+        for pattern_item in cut_pattern:
+            if 'wastage' in pattern_item or 'trim' in pattern_item:
+                # Calculate wastage widths from cutting pattern
+                trim_left = pattern_item.get('trim_left', 0)
+                trim_right = pattern_item.get('trim_right', 0)
+                
+                for trim_width in [trim_left, trim_right]:
+                    if 9 <= trim_width <= 21:  # Only viable wastage
+                        wastage_item = {
+                            'width_inches': trim_width,
+                            'paper_id': pattern_item.get('paper_id'),
+                            'source_order_id': pattern_item.get('order_id')
+                        }
+                        wastage_items.append(wastage_item)
+        
+        # Create wastage inventory entries
+        created_wastage = inventory_crud.create_wastage_rolls_from_plan(
+            db,
+            plan_id=plan_id,
+            wastage_items=wastage_items,
+            user_id=user_id
+        )
+        
+        logger.info(f"🔄 WASTAGE GENERATED: Created {len(created_wastage)} wastage rolls from plan {plan_id}")
+        return created_wastage
+    
+    def _check_wastage_allocations_from_wastage_table(
+        self,
+        db: Session,
+        order_requirements: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Check available wastage rolls from WastageInventory table that can fulfill order requirements.
+        """
+        wastage_allocations = []
+        
+        for order_req in order_requirements:
+            paper_id = order_req.get('paper_id')
+            width_inches = order_req.get('width_inches')
+            
+            logger.info(f"🔍 ORDER REQ: Looking for wastage matching Order {order_req.get('order_id')} - "
+                       f"Width: {width_inches}\", Paper: {paper_id}")
+            
+            # Find available wastage rolls for this specification from WastageInventory table
+            available_wastage = db.query(models.WastageInventory).filter(
+                models.WastageInventory.paper_id == paper_id,
+                models.WastageInventory.width_inches == width_inches,
+                models.WastageInventory.status == models.WastageStatus.AVAILABLE.value
+            ).all()
+            
+            logger.info(f"🔍 QUERY RESULT: Found {len(available_wastage)} available wastage rolls")
+            
+            for wastage_roll in available_wastage:
+                logger.info(f"🔍 WASTAGE DEBUG: Found wastage roll {wastage_roll.frontend_id} - "
+                           f"Width: {wastage_roll.width_inches}\", Paper: {wastage_roll.paper_id}, "
+                           f"Weight: {wastage_roll.weight_kg}kg, Status: {wastage_roll.status}")
+                
+                allocation = {
+                    'wastage_id': wastage_roll.id,
+                    'wastage_frontend_id': wastage_roll.frontend_id,
+                    'order_id': order_req.get('order_id'),
+                    'order_item_id': order_req.get('order_item_id'),
+                    'paper_id': paper_id,
+                    'width_inches': width_inches,
+                    'weight_kg': wastage_roll.weight_kg,
+                    'source_plan_id': wastage_roll.source_plan_id
+                }
+                wastage_allocations.append(allocation)
+                logger.info(f"✅ WASTAGE MATCH: Allocated {wastage_roll.frontend_id} to order {order_req.get('order_id')}")
+                
+                # Only one wastage roll per order requirement for now
+                break
+        
+        logger.info(f"🔄 WASTAGE ALLOCATION: Found {len(wastage_allocations)} potential wastage matches")
+        return wastage_allocations
+    
+    def allocate_wastage_from_wastage_table(
+        self,
+        db: Session,
+        *,
+        wastage_allocations: List[Dict[str, Any]],
+        user_id: UUID
+    ) -> List[models.WastageInventory]:
+        """
+        Allocate available wastage rolls from WastageInventory table to orders.
+        """
+        allocated_wastage = []
+        
+        for allocation in wastage_allocations:
+            # Find and update the wastage roll status
+            wastage_roll = db.query(models.WastageInventory).filter(
+                models.WastageInventory.id == allocation['wastage_id']
+            ).first()
+            
+            if wastage_roll and wastage_roll.status == models.WastageStatus.AVAILABLE.value:
+                # Mark wastage as used
+                wastage_roll.status = models.WastageStatus.USED.value
+                allocated_wastage.append(wastage_roll)
+                
+                # Update order item fulfillment
+                order_item = db.query(models.OrderItem).filter(
+                    models.OrderItem.id == allocation['order_item_id']
+                ).first()
+                
+                if order_item:
+                    order_item.quantity_fulfilled += 1
+                    logger.info(f"🔄 WASTAGE ALLOCATED: {wastage_roll.frontend_id} → Order {allocation['order_id']}")
+        
+        db.commit()
+        return allocated_wastage
+    
+    def _convert_wastage_allocations_to_cut_rolls(
+        self,
+        db: Session,
+        wastage_allocations: List[Dict[str, Any]],
+        plan_id: UUID,
+        user_id: UUID
+    ) -> List[models.InventoryMaster]:
+        """
+        Convert pre-calculated wastage allocations to InventoryMaster entries with is_wastage_roll=1.
+        This creates the cut roll entries for wastage that was allocated during planning.
+        """
+        logger = logging.getLogger(__name__)
+        created_cut_rolls = []
+        
+        for allocation in wastage_allocations:
+            try:
+                # Handle UUID conversion for wastage_id
+                wastage_id = allocation['wastage_id']
+                if isinstance(wastage_id, str):
+                    from uuid import UUID
+                    wastage_id = UUID(wastage_id)
+
+                # Handle UUID conversion for order_id
+                order_id = allocation['order_id']
+                if isinstance(order_id, str):
+                    from uuid import UUID
+                    order_id = UUID(order_id)
+
+                # Handle UUID conversion for order_item_id
+                order_item_id = allocation['order_item_id']
+                if isinstance(order_item_id, str):
+                    from uuid import UUID
+                    order_item_id = UUID(order_item_id)
+                
+                # Get the original wastage roll from WastageInventory
+                wastage_roll = db.query(models.WastageInventory).filter(
+                    models.WastageInventory.id == wastage_id
+                ).first()
+                
+                if not wastage_roll:
+                    logger.warning(f"❌ WASTAGE CONVERSION: Wastage roll {wastage_id} not found")
+                    continue
+                
+                if wastage_roll.status != models.WastageStatus.AVAILABLE.value:
+                    logger.warning(f"❌ WASTAGE CONVERSION: Wastage roll {wastage_roll.frontend_id} not available (status: {wastage_roll.status})")
+                    continue
+                
+                # Create InventoryMaster entry for this wastage roll
+                cut_roll = models.InventoryMaster(
+                    paper_id=wastage_roll.paper_id,
+                    width_inches=wastage_roll.width_inches,
+                    weight_kg=wastage_roll.weight_kg,
+                    roll_type="cut",
+                    status="allocated",
+                    allocated_to_order_id=order_id,
+                    is_wastage_roll=True,  # Mark as wastage roll
+                    wastage_source_order_id=order_id,  # Link to order that will use this wastage
+                    wastage_source_plan_id=plan_id,  # Link to current plan
+                    qr_code=f"WCR_{wastage_roll.frontend_id}_{plan_id}",
+                    barcode_id=f"WCRB_{wastage_roll.frontend_id}_{plan_id}",
+                    location="PRODUCTION",
+                    created_by_id=user_id
+                )
+                
+                db.add(cut_roll)
+                db.flush()  # Get the cut roll ID
+                
+                # Mark original wastage as used
+                wastage_roll.status = models.WastageStatus.USED.value
+                
+                # Create plan-inventory link
+                plan_inventory_link = models.PlanInventoryLink(
+                    plan_id=plan_id,
+                    inventory_id=cut_roll.id,
+                    quantity_used=1.0
+                )
+                db.add(plan_inventory_link)
+                
+                # Update order item fulfillment
+                order_item = db.query(models.OrderItem).filter(
+                    models.OrderItem.id == order_item_id
+                ).first()
+                
+                if order_item:
+                    # Reduce the remaining quantity by the wastage weight
+                    wastage_weight = float(wastage_roll.weight_kg) if wastage_roll.weight_kg else 0
+                    order_item.quantity_fulfilled += wastage_weight
+                    order_item.remaining_quantity = max(0, order_item.remaining_quantity - wastage_weight)
+                    
+                    logger.info(f"✅ WASTAGE CONVERTED: {wastage_roll.frontend_id} → {cut_roll.frontend_id} "
+                               f"({wastage_weight}kg) for order {order_id}")
+                
+                created_cut_rolls.append(cut_roll)
+                
+            except Exception as e:
+                logger.error(f"❌ WASTAGE CONVERSION ERROR: {e} for allocation {allocation}")
+                continue
+        
+        db.commit()
+        logger.info(f"🔄 WASTAGE CONVERSION COMPLETE: Created {len(created_cut_rolls)} cut rolls from wastage")
+        return created_cut_rolls
 
 
 plan = CRUDPlan(models.PlanMaster)

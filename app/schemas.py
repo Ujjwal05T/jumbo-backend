@@ -448,6 +448,11 @@ class InventoryMasterBase(BaseModel):
     parent_118_roll_id: Optional[UUID] = Field(None, description="Parent 118 inch roll ID")
     roll_sequence: Optional[int] = Field(None, description="Position within jumbo (1, 2, 3)")
     individual_roll_number: Optional[int] = Field(None, description="From optimization algorithm")
+    
+    # Wastage tracking fields
+    is_wastage_roll: Optional[bool] = Field(False, description="Indicates if this is a wastage roll")
+    wastage_source_order_id: Optional[UUID] = Field(None, description="Original order that generated this wastage")
+    wastage_source_plan_id: Optional[UUID] = Field(None, description="Plan that created this wastage")
 
 class InventoryMasterCreate(InventoryMasterBase):
     created_by_id: UUID
@@ -464,6 +469,11 @@ class InventoryMaster(InventoryMasterBase):
     allocated_to_order_id: Optional[UUID] = None
     created_by_id: UUID
     created_at: datetime
+    
+    # Wastage tracking fields (included in response)
+    is_wastage_roll: bool = Field(False, description="Indicates if this is a wastage roll")
+    wastage_source_order_id: Optional[UUID] = Field(None, description="Original order that generated this wastage")
+    wastage_source_plan_id: Optional[UUID] = Field(None, description="Plan that created this wastage")
     
     # Include related data
     paper: Optional[PaperMaster] = None
