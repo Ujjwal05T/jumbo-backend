@@ -656,6 +656,60 @@ class WastageInventory(Base):
 
 
 # ============================================================================
+# MATERIAL MANAGEMENT - Material master and challan tracking
+# ============================================================================
+
+class MaterialMaster(Base):
+    __tablename__ = "material_master"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    unit_of_measure = Column(String(20), nullable=False)
+    current_quantity = Column(Numeric(12, 3), nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    inward_challans = relationship("InwardChallan", back_populates="material")
+
+class InwardChallan(Base):
+    __tablename__ = "inward_challan"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    party_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
+    vehicle_number = Column(String(50), nullable=True)
+    material_id = Column(UNIQUEIDENTIFIER, ForeignKey("material_master.id"), nullable=False, index=True)
+    slip_no = Column(String(50), nullable=True)
+    gross_weight = Column(Numeric(10, 3), nullable=True)
+    report = Column(Text, nullable=True)
+    net_weight = Column(Numeric(10, 3), nullable=True)
+    bill_no = Column(String(50), nullable=True)
+    cash = Column(Numeric(12, 2), nullable=True)
+    time_in = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
+    time_out = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    party = relationship("ClientMaster")
+    material = relationship("MaterialMaster", back_populates="inward_challans")
+
+class OutwardChallan(Base):
+    __tablename__ = "outward_challan"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    vehicle_number = Column(String(50), nullable=True)
+    purpose = Column(String(255), nullable=True)
+    time_in = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
+    time_out = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
+    party_name = Column(String(255), nullable=True)
+    gross_weight = Column(Numeric(10, 3), nullable=True)
+    net_weight = Column(Numeric(10, 3), nullable=True)
+    bill_no = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+# ============================================================================
 # INVENTORY ITEMS - Individual reel tracking with barcode functionality
 # ============================================================================
 

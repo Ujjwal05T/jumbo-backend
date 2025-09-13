@@ -188,6 +188,98 @@ class PaperMaster(PaperMasterBase):
     class Config:
         from_attributes = True
 
+# Material Master Schemas
+class MaterialMasterBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    unit_of_measure: str = Field(..., min_length=1, max_length=20)
+    current_quantity: float = Field(default=0, ge=0)
+
+class MaterialMasterCreate(MaterialMasterBase):
+    pass
+
+class MaterialMasterUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    unit_of_measure: Optional[str] = Field(None, min_length=1, max_length=20)
+    current_quantity: Optional[float] = Field(None, ge=0)
+
+class MaterialMaster(MaterialMasterBase):
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Inward Challan Schemas
+class InwardChallanBase(BaseModel):
+    party_id: UUID
+    vehicle_number: Optional[str] = Field(None, max_length=50)
+    material_id: UUID
+    slip_no: Optional[str] = Field(None, max_length=50)
+    gross_weight: Optional[float] = Field(None, ge=0)
+    report: Optional[str] = None
+    net_weight: Optional[float] = Field(None, ge=0)
+    bill_no: Optional[str] = Field(None, max_length=50)
+    cash: Optional[float] = Field(None, ge=0)
+    time_in: Optional[str] = None
+    time_out: Optional[str] = None
+
+class InwardChallanCreate(InwardChallanBase):
+    pass
+
+class InwardChallanUpdate(BaseModel):
+    party_id: Optional[UUID] = None
+    vehicle_number: Optional[str] = Field(None, max_length=50)
+    material_id: Optional[UUID] = None
+    slip_no: Optional[str] = Field(None, max_length=50)
+    gross_weight: Optional[float] = Field(None, ge=0)
+    report: Optional[str] = None
+    net_weight: Optional[float] = Field(None, ge=0)
+    bill_no: Optional[str] = Field(None, max_length=50)
+    cash: Optional[float] = Field(None, ge=0)
+    time_in: Optional[str] = None
+    time_out: Optional[str] = None
+
+class InwardChallan(InwardChallanBase):
+    id: UUID
+    date: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Outward Challan Schemas
+class OutwardChallanBase(BaseModel):
+    vehicle_number: Optional[str] = Field(None, max_length=50)
+    purpose: Optional[str] = Field(None, max_length=255)
+    time_in: Optional[str] = None
+    time_out: Optional[str] = None
+    party_name: Optional[str] = Field(None, max_length=255)
+    gross_weight: Optional[float] = Field(None, ge=0)
+    net_weight: Optional[float] = Field(None, ge=0)
+    bill_no: Optional[str] = Field(None, max_length=50)
+
+class OutwardChallanCreate(OutwardChallanBase):
+    pass
+
+class OutwardChallanUpdate(BaseModel):
+    vehicle_number: Optional[str] = Field(None, max_length=50)
+    purpose: Optional[str] = Field(None, max_length=255)
+    time_in: Optional[str] = None
+    time_out: Optional[str] = None
+    party_name: Optional[str] = Field(None, max_length=255)
+    gross_weight: Optional[float] = Field(None, ge=0)
+    net_weight: Optional[float] = Field(None, ge=0)
+    bill_no: Optional[str] = Field(None, max_length=50)
+
+class OutwardChallan(OutwardChallanBase):
+    id: UUID
+    date: datetime
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 # ============================================================================
 # TRANSACTION SCHEMAS - Business operations
 # ============================================================================

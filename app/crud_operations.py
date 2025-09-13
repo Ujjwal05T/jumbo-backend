@@ -19,6 +19,7 @@ from .crud.orders import order, order_item
 from .crud.inventory import inventory
 from .crud.plans import plan
 from .crud.pending_orders import pending_order
+from .crud import material_management
 
 # Import individual functions for backward compatibility
 def create_client(db, client_data):
@@ -156,6 +157,58 @@ def get_pending_order_items(db, skip=0, limit=100, status="pending"):
 
 def get_pending_orders_by_specs(db, paper_specs):
     return pending_order.get_pending_orders_by_specs(db=db, paper_specs=paper_specs)
+
+# ============================================================================
+# MATERIAL MANAGEMENT CRUD FUNCTIONS
+# ============================================================================
+
+# Material Master functions
+def create_material(db, material_data):
+    return material_management.create_material(db=db, material=material_data)
+
+def get_materials(db, skip=0, limit=100):
+    return material_management.get_materials(db=db, skip=skip, limit=limit)
+
+def get_material(db, material_id):
+    return material_management.get_material(db=db, material_id=material_id)
+
+def update_material(db, material_id, material_update):
+    return material_management.update_material(db=db, material_id=material_id, material_update=material_update)
+
+def delete_material(db, material_id):
+    return material_management.delete_material(db=db, material_id=material_id)
+
+# Inward Challan functions
+def create_inward_challan(db, challan_data):
+    return material_management.create_inward_challan(db=db, challan=challan_data)
+
+def get_inward_challans(db, skip=0, limit=100, material_id=None):
+    return material_management.get_inward_challans(db=db, skip=skip, limit=limit, material_id=material_id)
+
+def get_inward_challan(db, challan_id):
+    return material_management.get_inward_challan(db=db, challan_id=challan_id)
+
+def update_inward_challan(db, challan_id, challan_update):
+    return material_management.update_inward_challan(db=db, challan_id=challan_id, challan_update=challan_update)
+
+def delete_inward_challan(db, challan_id):
+    return material_management.delete_inward_challan(db=db, challan_id=challan_id)
+
+# Outward Challan functions
+def create_outward_challan(db, challan_data):
+    return material_management.create_outward_challan(db=db, challan=challan_data)
+
+def get_outward_challans(db, skip=0, limit=100):
+    return material_management.get_outward_challans(db=db, skip=skip, limit=limit)
+
+def get_outward_challan(db, challan_id):
+    return material_management.get_outward_challan(db=db, challan_id=challan_id)
+
+def update_outward_challan(db, challan_id, challan_update):
+    return material_management.update_outward_challan(db=db, challan_id=challan_id, challan_update=challan_update)
+
+def delete_outward_challan(db, challan_id):
+    return material_management.delete_outward_challan(db=db, challan_id=challan_id)
 
 def get_pending_items_summary(db):
     return pending_order.get_pending_items_summary(db=db)
