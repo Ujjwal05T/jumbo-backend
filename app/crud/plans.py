@@ -250,7 +250,25 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # Process selected and unselected cut rolls - get data first
         selected_cut_rolls = request_data.get("selected_cut_rolls", [])
         all_available_cuts = request_data.get("all_available_cuts", [])  # All cuts that were available for selection
-        
+
+        # NEW: Process added rolls early to create Gupta orders first
+        added_rolls = request_data.get("added_rolls_data", [])
+        gupta_order_mapping = {}
+        created_gupta_orders = []  # Initialize as empty list
+
+        if added_rolls:
+            logger.info(f"🔧 EARLY PROCESSING: Creating Gupta orders for {len(added_rolls)} added rolls before inventory creation")
+            created_gupta_orders = self._process_added_rolls_early(
+                db,
+                request_data,
+                selected_cut_rolls
+            )
+            # Get the single Gupta order ID for added rolls
+            gupta_order_id = None
+            if created_gupta_orders:
+                gupta_order_id = created_gupta_orders[0].get("order", {}).get("id")
+                logger.info(f"🔧 EARLY PROCESSING: Created Gupta order with ID: {gupta_order_id}")
+
         # Initialize tracking lists
         created_inventory = []
         
@@ -520,19 +538,43 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             # Find the best matching order for this cut roll
             best_order = None
             cut_roll_width = cut_roll.get("width", cut_roll.get("width_inches", 0))  # Try both field names
-            
-            # Look through all orders associated with this plan
-            for plan_order in db_plan.plan_orders:
-                order = plan_order.order
-                if order:
-                    # Check if this order has items matching the cut roll specs
-                    for order_item in order.order_items:
-                        if (str(order_item.paper_id) == str(cut_roll_paper_id) and 
-                            abs(float(order_item.width_inches) - float(cut_roll_width)) < 0.01):
-                            best_order = order
-                            break
-                if best_order:
-                    break
+
+            # NEW: Check if this is an added roll and use Gupta order mapping
+            # Identify added rolls by source_type or order_id pattern
+            is_added_roll = (
+                cut_roll.get("source_type") == "added_completion" or
+                str(cut_roll.get("order_id", "")).startswith("GUPTA_")
+            )
+
+            if is_added_roll:
+                # Use the created Gupta order ID directly
+                if gupta_order_id:
+                    logger.info(f"🔧 ADDED ROLL: Using created Gupta order ID {gupta_order_id}")
+                    best_order = db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id == gupta_order_id
+                    ).first()
+
+                    if best_order:
+                        logger.info(f"🔧 ADDED ROLL: Using Gupta order {best_order.frontend_id} (ID: {best_order.id}) for added roll")
+                    else:
+                        logger.warning(f"🔧 ADDED ROLL: Gupta order with ID {gupta_order_id} not found")
+                else:
+                    logger.warning(f"🔧 ADDED ROLL: No gupta_order_id available")
+
+            # If not an added roll or no Gupta mapping found, use original logic
+            if not best_order:
+                # Look through all orders associated with this plan
+                for plan_order in db_plan.plan_orders:
+                    order = plan_order.order
+                    if order:
+                        # Check if this order has items matching the cut roll specs
+                        for order_item in order.order_items:
+                            if (str(order_item.paper_id) == str(cut_roll_paper_id) and
+                                abs(float(order_item.width_inches) - float(cut_roll_width)) < 0.01):
+                                best_order = order
+                                break
+                    if best_order:
+                        break
             
             # Create inventory record for selected rolls
             # Generate NEW QR code for production (don't reuse planning QR codes)
@@ -1020,210 +1062,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         
         logger.info(f"✅ WASTAGE COMPLETE: Created {len(created_wastage)} wastage inventory items")
         
-        # Process added_rolls_data for partial jumbo completion
-        added_rolls_data = request_data.get("added_rolls_data", {})
-        created_gupta_orders = []
-        
-        if added_rolls_data:
-            logger.info(f"➕ ADDED ROLLS PROCESSING: Processing added rolls for {len(added_rolls_data)} jumbos")
-            
-            # Import the necessary services
-            from ..crud.orders import CRUDOrder
-            from ..crud.clients import CRUDClient
-            from ..services.id_generator import FrontendIDGenerator
-            crud_order = CRUDOrder(models.OrderMaster)
-            crud_client = CRUDClient(models.ClientMaster)
-            
-            # Find or create Gupta Publishing House client
-            gupta_client = db.query(models.ClientMaster).filter(models.ClientMaster.company_name == "Gupta Publishing House").first()
-            
-            if not gupta_client:
-                logger.warning("⚠️ ADDED ROLLS: Gupta Publishing House client not found, creating it...")
-                
-                # Create Gupta Publishing House client
-                import uuid
-                gupta_client = models.ClientMaster(
-                    id=uuid.uuid4(),
-                    frontend_id="CL-GUPTA-001",
-                    company_name="Gupta Publishing House",
-                    email="orders@guptapublishing.com",
-                    contact_person="Gupta Orders",
-                    phone="1234567890",
-                    created_by_id=uuid.UUID(request_data.get("created_by_id")) if request_data.get("created_by_id") else uuid.uuid4(),
-                    status="active"
-                )
-                db.add(gupta_client)
-                db.flush()
-                logger.info(f"✅ ADDED ROLLS: Created Gupta Publishing House client: {gupta_client.id}")
-            else:
-                logger.info(f"✅ ADDED ROLLS: Found existing Gupta Publishing House client: {gupta_client.id}")
-            
-            if gupta_client:
-                for jumbo_id, rolls_list in added_rolls_data.items():
-                    try:
-                        logger.info(f"➕ ADDED ROLLS: Creating Gupta order for jumbo {jumbo_id} with {len(rolls_list)} rolls")
-                        
-                        # Create the order
-                        import uuid
-                        new_order_id = str(uuid.uuid4())
-                        
-                        # Use the existing FrontendIDGenerator service for OrderMaster too
-                        new_frontend_id = FrontendIDGenerator.generate_frontend_id("order_master", db)
-                        logger.info(f"📋 ADDED ROLLS: Generated order frontend_id: {new_frontend_id}")
-                        
-                        # Create order
-                        new_order = models.OrderMaster(
-                            id=uuid.UUID(new_order_id),
-                            frontend_id=new_frontend_id,
-                            client_id=gupta_client.id,
-                            status="in_process",
-                            priority="normal",
-                            payment_type="bill",
-                            created_by_id=uuid.UUID(request_data.get("created_by_id")) if request_data.get("created_by_id") else None
-                        )
-                        db.add(new_order)
-                        db.flush()
-                        
-                        logger.info(f"✅ ADDED ROLLS: Created order {new_order.frontend_id} with ID: {new_order.id}")
-                        
-                        # Create order items
-                        total_amount = 0
-                        order_items_created = []
-                        
-                        # FrontendIDGenerator is already imported above
-                        
-                        # Get paper specs from existing cut rolls in this partial jumbo
-                        all_available_cuts = request_data.get("all_available_cuts", [])
-                        logger.info(f"🔍 DEBUG: Looking for jumbo_id '{jumbo_id}' in {len(all_available_cuts)} available cuts")
-                        
-                        # Debug: Check the structure of the first cut roll
-                        if all_available_cuts:
-                            first_cut = all_available_cuts[0]
-                            logger.info(f"🔍 DEBUG: First cut structure: {type(first_cut)} = {first_cut}")
-                        
-                        # Since cut rolls come as dictionaries, not tuples, extract paper specs
-                        # Look for any cut roll that belongs to this jumbo (should have similar specs)
-                        existing_cuts = []
-                        for i, cut_roll in enumerate(all_available_cuts):
-                            # Cut rolls come as dict with jumbo_roll_id field
-                            if isinstance(cut_roll, dict):
-                                cut_jumbo_id = cut_roll.get('jumbo_roll_id')
-                                logger.info(f"🔍 DEBUG: Cut roll {i}: jumbo_roll_id='{cut_jumbo_id}'")
-                                if cut_jumbo_id == jumbo_id:
-                                    existing_cuts.append(cut_roll)
-                        
-                        logger.info(f"🔍 DEBUG: Found {len(existing_cuts)} existing cuts for jumbo '{jumbo_id}'")
-                        
-                        # If no exact jumbo match, use any cut roll to get paper specs (they should all be same paper type in production)
-                        if not existing_cuts and all_available_cuts:
-                            logger.warning(f"⚠️ No exact jumbo match, using first available cut roll for paper specs")
-                            existing_cuts = [all_available_cuts[0]]
-                        
-                        if not existing_cuts:
-                            logger.error(f"❌ ADDED ROLLS ERROR: No cut rolls available to determine paper specs")
-                            continue
-                        
-                        # Use paper specs from the first cut roll
-                        sample_cut = existing_cuts[0]
-                        if isinstance(sample_cut, dict):
-                            gsm = sample_cut.get('gsm')
-                            bf = sample_cut.get('bf') 
-                            shade = sample_cut.get('shade')
-                        else:
-                            logger.error(f"❌ ADDED ROLLS ERROR: Unexpected cut roll structure: {type(sample_cut)}")
-                            continue
-                        
-                        # Find paper record by specifications (not random selection)
-                        paper_record = db.query(models.PaperMaster).filter(
-                            models.PaperMaster.gsm == gsm,
-                            models.PaperMaster.bf == bf,
-                            models.PaperMaster.shade == shade
-                        ).first()
-                        
-                        if not paper_record:
-                            logger.error(f"❌ ADDED ROLLS ERROR: No paper found matching specs: GSM={gsm}, BF={bf}, Shade={shade}")
-                            continue
-                        
-                        logger.info(f"✅ ADDED ROLLS: Using paper {paper_record.id} (GSM={gsm}, BF={bf}, Shade={shade}) matching existing cuts")
-                        
-                        # Group cut specifications by width to create consolidated order items
-                        cut_groups = {}
-                        for roll_data in rolls_list:
-                            if 'cut_specifications' in roll_data:
-                                for cut_spec in roll_data['cut_specifications']:
-                                    width = cut_spec['width']
-                                    quantity = cut_spec['quantity']
-                                    
-                                    if width in cut_groups:
-                                        cut_groups[width] += quantity
-                                    else:
-                                        cut_groups[width] = quantity
-                        
-                        # Create order items for each unique width
-                        for width, total_quantity in cut_groups.items():
-                            # Generate frontend_id using the existing service
-                            item_frontend_id = FrontendIDGenerator.generate_frontend_id("order_item", db)
-                            logger.info(f"📋 ADDED ROLLS: Generated order item frontend_id: {item_frontend_id}")
-                            
-                            rate_per_roll = 50.0  # Rate per roll
-                            weight_per_roll = 100.0  # kg per roll
-                            total_weight = total_quantity * weight_per_roll
-                            total_amount_item = total_quantity * rate_per_roll
-                            
-                            order_item = models.OrderItem(
-                                id=uuid.uuid4(),
-                                frontend_id=item_frontend_id,
-                                order_id=new_order.id,
-                                paper_id=paper_record.id,
-                                width_inches=width,  # 29.0 (from cut specifications)
-                                quantity_rolls=total_quantity,  # 4 (total quantity)
-                                quantity_kg=total_weight,  # 4 * 100 = 400kg
-                                rate=rate_per_roll,  # 50.0 per roll
-                                amount=total_amount_item  # 4 * 50 = 200
-                            )
-                            db.add(order_item)
-                            order_items_created.append(order_item)
-                            total_amount += order_item.amount
-                        
-                        db.flush()
-                        
-                        logger.info(f"✅ ADDED ROLLS: Created {len(order_items_created)} order items for order {new_order.frontend_id}")
-                        
-                        # Update order totals  
-                        new_order.total_items = len(order_items_created)
-                        new_order.total_amount = total_amount
-                        
-                        gupta_result = {
-                            "order": {
-                                "id": str(new_order.id),
-                                "frontend_id": new_order.frontend_id,
-                                "client_name": gupta_client.company_name,
-                                "status": new_order.status,
-                                "total_items": new_order.total_items,
-                                "total_amount": new_order.total_amount
-                            },
-                            "order_items": [
-                                {
-                                    "id": str(item.id),
-                                    "paper_id": item.paper_id,
-                                    "width_inches": item.width_inches,
-                                    "quantity_rolls": item.quantity_rolls,
-                                    "rate": item.rate,
-                                    "amount": item.amount
-                                } for item in order_items_created
-                            ]
-                        }
-                        
-                        created_gupta_orders.append(gupta_result)
-                        logger.info(f"✅ ADDED ROLLS: Created Gupta order {new_order.frontend_id} for jumbo {jumbo_id}")
-                        
-                    except Exception as e:
-                        logger.error(f"❌ ADDED ROLLS ERROR: Failed to create Gupta order for jumbo {jumbo_id}: {e}")
-                        # Rollback the transaction for this jumbo and continue with others
-                        db.rollback()
-                        continue
-            
-            logger.info(f"✅ ADDED ROLLS COMPLETE: Created {len(created_gupta_orders)} Gupta orders")
+        # NOTE: Added rolls processing moved to early stage before inventory creation
+        # This ensures proper order ID tracking for inventory items
         
         db.commit()
         db.refresh(db_plan)
@@ -1551,6 +1391,118 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         db.commit()
         logger.info(f"🔄 WASTAGE CONVERSION COMPLETE: Created {len(created_cut_rolls)} cut rolls from wastage")
         return created_cut_rolls
+
+    def _process_added_rolls_early(
+        self,
+        db: Session,
+        request_data: Dict[str, Any],
+        selected_cut_rolls: List[Dict]
+    ) -> List[Dict]:
+        """
+        Process added rolls EARLY to create single Gupta order with multiple order items.
+        """
+        import uuid
+        from collections import defaultdict
+        from ..services.id_generator import FrontendIDGenerator
+
+        # Extract added rolls from selected_cut_rolls
+        added_rolls = [roll for roll in selected_cut_rolls if roll.get('source_type') == 'added_completion']
+
+        if not added_rolls:
+            return []
+
+        logger.info(f"➕ EARLY ADDED ROLLS: Processing {len(added_rolls)} added rolls")
+
+        # Find or create Gupta Publishing House client
+        gupta_client = db.query(models.ClientMaster).filter(
+            models.ClientMaster.company_name == "Gupta Publishing House"
+        ).first()
+
+        if not gupta_client:
+            gupta_client = models.ClientMaster(
+                id=uuid.uuid4(),
+                frontend_id="CL-GUPTA-001",
+                company_name="Gupta Publishing House",
+                email="orders@guptapublishing.com",
+                contact_person="Gupta Orders",
+                phone="1234567890",
+                created_by_id=uuid.UUID(request_data.get("created_by_id")) if request_data.get("created_by_id") else uuid.uuid4(),
+                status="active"
+            )
+            db.add(gupta_client)
+            db.flush()
+
+        # Create single Gupta order
+        new_order_id = str(uuid.uuid4())
+        new_frontend_id = FrontendIDGenerator.generate_frontend_id("order_master", db)
+
+        new_order = models.OrderMaster(
+            id=uuid.UUID(new_order_id),
+            frontend_id=new_frontend_id,
+            client_id=gupta_client.id,
+            status="in_process",
+            priority="normal",
+            payment_type="bill",
+            created_by_id=uuid.UUID(request_data.get("created_by_id")) if request_data.get("created_by_id") else None
+        )
+        db.add(new_order)
+        db.flush()
+
+        logger.info(f"✅ EARLY ADDED ROLLS: Created order {new_order.frontend_id}")
+
+        # Group rolls by (gsm, bf, shade, width) for order items
+        item_groups = defaultdict(int)
+        for roll in added_rolls:
+            gsm = roll.get('gsm')
+            bf = roll.get('bf')
+            shade = roll.get('shade')
+            width = roll.get('width_inches')
+            key = (gsm, bf, shade, width)
+            item_groups[key] += 1
+
+        # Create order items for each unique paper spec + width combination
+        order_items_created = []
+        for (gsm, bf, shade, width), quantity in item_groups.items():
+            # Find paper record
+            paper_record = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == gsm,
+                models.PaperMaster.bf == bf,
+                models.PaperMaster.shade == shade
+            ).first()
+
+            if not paper_record:
+                logger.error(f"❌ No paper found for GSM={gsm}, BF={bf}, Shade={shade}")
+                continue
+
+            order_item_frontend_id = FrontendIDGenerator.generate_frontend_id("order_item", db)
+
+            order_item = models.OrderItem(
+                id=uuid.uuid4(),
+                frontend_id=order_item_frontend_id,
+                order_id=new_order.id,
+                paper_id=paper_record.id,
+                width_inches=width,
+                quantity_rolls=quantity,
+                quantity_kg=quantity * 100.0,  # Estimate weight
+                quantity_fulfilled=0,
+                rate=50.0,
+                amount=quantity * 50.0,
+                item_status="pending"
+            )
+            db.add(order_item)
+            order_items_created.append(order_item)
+
+        db.flush()
+        logger.info(f"✅ EARLY ADDED ROLLS: Created {len(order_items_created)} order items")
+
+        # Return single order result
+        return [{
+            "order": {
+                "id": str(new_order.id),
+                "frontend_id": new_order.frontend_id,
+                "client_name": gupta_client.company_name
+            }
+        }]
 
 
 plan = CRUDPlan(models.PlanMaster)

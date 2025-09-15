@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
+import json
 
 from .base import get_db
 from .. import crud_operations, schemas
@@ -15,14 +17,19 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 @router.post("/plans", response_model=schemas.PlanMaster, tags=["Plan Master"])
-def create_plan(plan: schemas.PlanMasterCreate, db: Session = Depends(get_db)):
+def create_plan(request: Request, plan: schemas.PlanMasterCreate, db: Session = Depends(get_db)):
     """Create a new cutting plan"""
     try:
+        logger.info(f"📝 PLAN CREATE: Received plan data: {plan}")
+        logger.info(f"📝 PLAN CREATE: Raw request body available")
         return crud_operations.create_plan(db=db, plan_data=plan)
+    except RequestValidationError as e:
+        logger.error(f"❌ PLAN CREATE: Validation error: {e}")
+        raise HTTPException(status_code=422, detail=f"Validation error: {e}")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating plan: {e}")
+        logger.error(f"❌ PLAN CREATE: Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/plans", response_model=List[schemas.PlanMaster], tags=["Plan Master"])

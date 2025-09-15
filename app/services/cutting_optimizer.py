@@ -107,7 +107,7 @@ class CuttingOptimizer:
 
     # === ILP-BASED OPTIMIZATION METHODS ===
     
-    def _solve_cutting_with_ilp(self, demand: Dict[float, int], trim_cap: float = 6.0, max_lanes: int = MAX_ROLLS_PER_JUMBO) -> Dict:
+    def _solve_cutting_with_ilp(self, demand: Dict[float, int], trim_cap: float = 6.0, max_lanes: int = MAX_ROLLS_PER_JUMBO, exact_quantities: bool = True) -> Dict:
         """Main ILP solving method - now enhanced with OR-Tools support."""
         precision = 0.01
         scale_factor = int(1 / precision)
@@ -128,8 +128,8 @@ class CuttingOptimizer:
         
         # Use OR-Tools CP-SAT solver (3.1x faster than PuLP)
         if ORTOOLS_AVAILABLE:
-            logger.info("🚀 Using OR-Tools CP-SAT solver")
-            result = self._solve_ortools_exact(patterns, demand)
+            logger.info("🚀 Using OR-Tools CP-SAT solver" + (" (EXACT MODE)" if exact_quantities else ""))
+            result = self._solve_ortools_exact(patterns, demand, exact_quantities=exact_quantities)
             if result['status'] in ['Optimal', 'Feasible']:
                 return result
                 
@@ -158,7 +158,7 @@ class CuttingOptimizer:
         
         return list(patterns)
     
-    def _solve_ortools_exact(self, patterns: List[Pattern], demand: Dict[float, int], time_limit: int = 30) -> Dict:
+    def _solve_ortools_exact(self, patterns: List[Pattern], demand: Dict[float, int], time_limit: int = 30, exact_quantities: bool = True) -> Dict:
         """
         Solve exact fulfillment using OR-Tools CP-SAT solver.
         Generally 3-10x faster than PuLP with better constraint handling.
@@ -193,10 +193,16 @@ class CuttingOptimizer:
                     logger.debug(f"    {pattern_info}")
                 
                 if width_productions:
-                    # Meet demand but don't massively over-produce
-                    model.Add(sum(width_productions) >= demand[width])
-                    model.Add(sum(width_productions) <= demand[width] * 3)  # Max 3x over-production per width
-                    logger.debug(f"    ✅ Constraint added: {demand[width]} <= sum <= {demand[width] * 3}")
+                    # Apply constraints based on exact_quantities mode
+                    if exact_quantities:
+                        # ZERO OVER-PRODUCTION MODE: Meet demand EXACTLY (no more, no less)
+                        model.Add(sum(width_productions) == demand[width])
+                        logger.debug(f"    ✅ ZERO OVER-PRODUCTION: sum == {demand[width]} (EXACT)")
+                    else:
+                        # FLEXIBLE MODE: Allow over-production for better optimization
+                        model.Add(sum(width_productions) >= demand[width])
+                        model.Add(sum(width_productions) <= demand[width] * 3)  # Max 3x over-production per width
+                        logger.debug(f"    ✅ FLEXIBLE MODE: {demand[width]} <= sum <= {demand[width] * 3}")
                 else:
                     logger.error(f"❌ CONSTRAINT ERROR: No patterns can produce width {width}")
                     logger.debug(f"Available patterns: {[(p.lanes, p.coeff) for p in patterns[:5]]}")
@@ -211,8 +217,13 @@ class CuttingOptimizer:
             
             if total_production_terms:
                 total_production = sum(total_production_terms)
-                model.Add(total_production <= total_demand * 2)  # Max 2x total over-production
-                logger.debug(f"🔍 OR-TOOLS DEBUG: Total production constraint: <= {total_demand * 2} pieces (need {total_demand})")
+                if exact_quantities:
+                    # ZERO OVER-PRODUCTION: Total production must equal total demand exactly
+                    model.Add(total_production == total_demand)
+                    logger.debug(f"🔍 ZERO OVER-PRODUCTION: Total production == {total_demand} pieces (EXACT)")
+                else:
+                    model.Add(total_production <= total_demand * 2)  # FLEXIBLE MODE: Max 2x total over-production
+                    logger.debug(f"🔍 FLEXIBLE MODE: Total production constraint: <= {total_demand * 2} pieces (need {total_demand})")
             
             # Objective: minimize number of patterns first, then trim (scaled to integers for CP-SAT)
             trim_terms = []

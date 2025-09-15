@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 
@@ -16,6 +17,16 @@ app = FastAPI(
     title="Paper Roll Management System",
     description="Simple API for paper roll management",
 )
+
+# Global exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"❌ VALIDATION ERROR on {request.method} {request.url}: {exc}")
+    logger.error(f"❌ VALIDATION DETAILS: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": f"Validation error: {exc.errors()}"}
+    )
 
 # Set up CORS for frontend
 app.add_middleware(
