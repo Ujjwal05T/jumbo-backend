@@ -411,7 +411,6 @@ class CuttingOptimizer:
             if remaining > 0:
                 remaining_demand[width] = remaining
         
-        logger.info(f"✅ ILP CONVERSION: {len(patterns_used)} patterns, {sum(remaining_demand.values())} remaining demand")
         return patterns_used, remaining_demand
 
     # === USER'S SMART TRACKING ALGORITHM ===
@@ -425,7 +424,6 @@ class CuttingOptimizer:
         remaining_demand = order_counter.copy()
         patterns_used = []
         
-        logger.info(f"🎯 TRACKING ALGO: Starting with demand={sum(original_demand.values())}, widths={list(original_demand.keys())}")
         iterations = 0
         max_iterations = sum(original_demand.values()) + 10  # Safety limit
         
@@ -493,7 +491,6 @@ class CuttingOptimizer:
         avg_waste = total_waste / total_patterns if total_patterns > 0 else 0
         remaining_total = sum(remaining_demand.values())
         
-        logger.info(f"✅ TRACKING ALGO: Generated {total_patterns} patterns, avg trim={avg_waste:.1f}\", remaining={remaining_total}")
         
         if remaining_total == 0:
             return patterns_used, Counter()
@@ -522,14 +519,11 @@ class CuttingOptimizer:
         
         # Try direct optimal pattern search first for small-medium problems
         total_demand = sum(order_counter.values())
-        logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Starting with demand={total_demand}")
         
         if total_demand <= 200:  # Use global optimization for manageable sizes
-            logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Demand ≤200, proceeding with direct optimization")
             
             # Try direct optimal solution first
             direct_solution = self._find_direct_optimal_solution(order_counter, algorithm)
-            logger.info(f"🔍 DIRECT OPTIMIZATION DEBUG: Direct solution result = {direct_solution is not None}")
             
             if direct_solution:
                 used_patterns, remaining_demand = direct_solution
@@ -1974,61 +1968,3 @@ class CuttingOptimizer:
         )
         
         return crud_operations.create_plan(db, plan_data=plan_data)
-
-
-# Example usage and testing
-def test_optimizer():
-    optimizer = CuttingOptimizer()
-    
-    # Test with mixed specifications to demonstrate proper grouping
-    sample_orders = [
-        # White paper, GSM 90, BF 18.0 - GROUP 1
-        {"width": 29.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1500},
-        {"width": 32.5, "quantity": 3, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-        {"width": 38, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "white", "min_length": 1600},
-        
-        # Blue paper, GSM 90, BF 18.0 - GROUP 2 (different shade)
-        {"width": 32.5, "quantity": 2, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
-        {"width": 46, "quantity": 1, "gsm": 90, "bf": 18.0, "shade": "blue", "min_length": 1600},
-        
-        # White paper, GSM 120, BF 18.0 - GROUP 3 (different GSM)
-        {"width": 38, "quantity": 2, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
-        {"width": 48, "quantity": 3, "gsm": 120, "bf": 18.0, "shade": "white", "min_length": 1600},
-        
-        # White paper, GSM 90, BF 20.0 - GROUP 4 (different BF)
-        {"width": 51, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600},
-        {"width": 54, "quantity": 2, "gsm": 90, "bf": 20.0, "shade": "white", "min_length": 1600}
-    ]
-    
-    print("=== CUTTING OPTIMIZER RESULTS ===")
-    result = optimizer.generate_optimized_plan(
-        order_requirements=sample_orders,
-        interactive=False  # Set to True for interactive mode
-    )
-    
-    print("\n✅ Cut Rolls Generated:")
-    for i, roll in enumerate(result.get('cut_rolls_generated', []), 1):
-        print(f"Roll #{i}: {roll['width']}\" - GSM {roll['gsm']}, Shade: {roll['shade']}")
-    
-    if result.get('pending_orders'):
-        print("\n⏳ Pending Orders:")
-        for pending in result['pending_orders']:
-            print(f"• {pending['quantity']} roll(s) of size {pending['width']}\" - {pending.get('reason', 'high trim')}")
-    else:
-        print("\n🎯 All orders fulfilled!")
-    
-    if result.get('high_trim_approved'):
-        print("\n📋 High Trim Patterns (6–20\"): ")
-        for high_trim in result['high_trim_approved']:
-            print(f"• {high_trim['combo']} → Trim: {high_trim['trim']}\"")
-    
-    print(f"\n[SUMMARY]:")
-    print(f"Total Cut Rolls: {result.get('summary', {}).get('total_cut_rolls', 0)}")
-    print(f"Total Jumbo Rolls Needed: {result.get('jumbo_rolls_needed', 0)}")
-    print(f"Total Pending Orders: {result.get('summary', {}).get('total_pending_orders', 0)}")
-    print(f"Algorithm: {result.get('summary', {}).get('algorithm_note', 'Updated algorithm')}")
-    
-    return result
-
-if __name__ == "__main__":
-    test_optimizer()

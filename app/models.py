@@ -424,6 +424,7 @@ class PlanMaster(Base):
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # PLN-2025-001, etc.
     name = Column(String(255), nullable=True)  # Optional plan name
     cut_pattern = Column(Text, nullable=False)  # JSON array of cutting pattern
+    wastage_allocations = Column(Text, nullable=True)  # JSON array of wastage allocations
     expected_waste_percentage = Column(Numeric(5, 2), nullable=False)
     actual_waste_percentage = Column(Numeric(5, 2), nullable=True)
     status = Column(String(50), default=PlanStatus.PLANNED, nullable=False, index=True)

@@ -176,9 +176,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         plan_links = db.query(models.PlanInventoryLink).filter(
             models.PlanInventoryLink.plan_id == plan_id
         ).all()
-        logger.info(f"🔍 DEBUG: Found {len(plan_links)} PlanInventoryLink records for plan {plan_id}")
-        for link in plan_links:
-            logger.info(f"🔍 DEBUG: Link {link.id} -> inventory_id: {link.inventory_id}")
+        # for link in plan_links:
         
         # Get cut rolls linked to this plan via PlanInventoryLink with proper hierarchy loading
         from sqlalchemy.orm import joinedload
@@ -196,9 +194,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             models.InventoryMaster.roll_type == "cut"
         ).all()
         
-        logger.info(f"🔍 Found {len(cut_rolls_via_link)} cut rolls via PlanInventoryLink for plan {plan_id}")
-        for roll in cut_rolls_via_link:
-            logger.info(f"🔍 DEBUG: Cut roll {roll.id} - {roll.barcode_id} - {roll.width_inches}\")")
+        # for roll in cut_rolls_via_link:
         
         # Method 2: DISABLED time-based fallback to force proper plan-inventory linking
         cut_rolls_by_time = []
@@ -207,14 +203,11 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             logger.warning(f"🚨 This plan will show NO ITEMS until proper inventory links are created.")
             logger.warning(f"🚨 Time-based fallback is DISABLED to prevent showing wrong items.")
             # Intentionally return empty list instead of using time-based fallback
-        elif cut_rolls_via_link:
-            logger.info(f"✅ Using PlanInventoryLink: Found {len(cut_rolls_via_link)} plan-specific cut rolls")
+        # elif cut_rolls_via_link:
         
         # Use only the appropriate method - prefer PlanInventoryLink over time-based
         all_cut_rolls_raw = cut_rolls_via_link if cut_rolls_via_link else cut_rolls_by_time
         
-        logger.info(f"🔍 FINAL DECISION: Using {'PlanInventoryLink' if cut_rolls_via_link else 'time-based fallback'} method")
-        logger.info(f"🔍 FINAL RESULT: {len(all_cut_rolls_raw)} cut rolls will be returned for plan {plan_id}")
         
         seen_ids = set()
         all_cut_rolls = []
@@ -264,7 +257,6 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                     **_get_jumbo_roll_info(inventory_item)
                 })
         
-        logger.info(f"Final result: {len(all_cut_rolls)} unique cut rolls")
         
         # Group items by status
         status_breakdown = {}

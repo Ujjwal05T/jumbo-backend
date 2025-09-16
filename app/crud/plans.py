@@ -26,7 +26,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             ).first()
             
             if pending_exists:
-                logger.info(f"✅ PENDING VALIDATION: Pending order {pending_uuid} exists")
                 return pending_uuid
             else:
                 logger.warning(f"⚠️ PENDING VALIDATION: Pending order {pending_uuid} not found, setting to None")
@@ -74,7 +73,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             import json
             db_plan = models.PlanMaster(
                 name=plan.name,
-                cut_pattern=json.dumps(plan.cut_pattern) if isinstance(plan.cut_pattern, list) else plan.cut_pattern,
+                cut_pattern=json.dumps(plan.cut_pattern) if isinstance(plan.cut_pattern, (list, dict)) else plan.cut_pattern,
+                wastage_allocations=json.dumps(plan.wastage_allocations) if hasattr(plan, 'wastage_allocations') and plan.wastage_allocations else None,
                 expected_waste_percentage=plan.expected_waste_percentage,
                 created_by_id=plan.created_by_id
             )
@@ -98,7 +98,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     )
                     db.add(plan_order_link)
             
-            logger.info(f"Created plan {db_plan.id} with {len(plan.order_ids)} order links")
             
             # Create pending orders from algorithm results if provided
             if hasattr(plan, 'pending_orders') and plan.pending_orders:
@@ -125,7 +124,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     )
                     db.add(pending_order)
                 
-                logger.info(f"Created {len(plan.pending_orders)} pending orders from algorithm")
             
             db.commit()
             db.refresh(db_plan)
@@ -196,37 +194,26 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         allocated_wastage = []
         
         # NEW: STEP 1 - Convert pre-calculated wastage allocations to InventoryMaster entries
-        logger.info(f"🔄 STEP 1: Converting wastage allocations to cut rolls for plan {plan_id}")
         
-        # Check if plan has pre-calculated wastage allocations stored in cut_pattern
+        # Check if plan has pre-calculated wastage allocations stored in separate field
         try:
             import json
-            cut_pattern_data = json.loads(db_plan.cut_pattern) if isinstance(db_plan.cut_pattern, str) else db_plan.cut_pattern
+            wastage_allocations = []
 
-            # Debug the structure of cut_pattern_data
-            logger.info(f"🔍 WASTAGE DEBUG: cut_pattern_data type = {type(cut_pattern_data)}")
-            if isinstance(cut_pattern_data, dict):
-                logger.info(f"🔍 WASTAGE DEBUG: cut_pattern_data keys = {list(cut_pattern_data.keys())}")
-                wastage_allocations = cut_pattern_data.get('wastage_allocations', [])
-            elif isinstance(cut_pattern_data, list):
-                logger.warning("⚠️ WASTAGE: cut_pattern_data is a list, expected dict with wastage_allocations")
-                wastage_allocations = []
+            # Get wastage allocations from dedicated field
+            if db_plan.wastage_allocations:
+                wastage_allocations = json.loads(db_plan.wastage_allocations) if isinstance(db_plan.wastage_allocations, str) else db_plan.wastage_allocations
+                logger.info(f"✅ WASTAGE: Found {len(wastage_allocations)} pre-calculated wastage allocations in plan")
             else:
-                logger.warning(f"⚠️ WASTAGE: Unexpected cut_pattern_data type: {type(cut_pattern_data)}")
-                wastage_allocations = []
+                logger.info("ℹ️ WASTAGE: No wastage allocations found in plan")
 
-            logger.info(f"🔄 WASTAGE: Found {len(wastage_allocations)} pre-calculated wastage allocations")
-            
             if wastage_allocations:
                 allocated_wastage = self._convert_wastage_allocations_to_cut_rolls(
-                    db, 
+                    db,
                     wastage_allocations=wastage_allocations,
                     plan_id=plan_id,
                     user_id=request_data.get("created_by_id")
                 )
-                logger.info(f"✅ WASTAGE: Successfully converted {len(allocated_wastage)} wastage allocations to cut rolls")
-            else:
-                logger.info("ℹ️ WASTAGE: No pre-calculated wastage allocations found")
                 
         except Exception as e:
             logger.error(f"❌ WASTAGE: Error during wastage allocation conversion: {e}")
@@ -257,7 +244,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         created_gupta_orders = []  # Initialize as empty list
 
         if added_rolls:
-            logger.info(f"🔧 EARLY PROCESSING: Creating Gupta orders for {len(added_rolls)} added rolls before inventory creation")
             created_gupta_orders = self._process_added_rolls_early(
                 db,
                 request_data,
@@ -267,7 +253,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             gupta_order_id = None
             if created_gupta_orders:
                 gupta_order_id = created_gupta_orders[0].get("order", {}).get("id")
-                logger.info(f"🔧 EARLY PROCESSING: Created Gupta order with ID: {gupta_order_id}")
 
         # Initialize tracking lists
         created_inventory = []
@@ -279,8 +264,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # This ensures different paper types with same roll numbers are kept separate
         paper_spec_groups = {}  # {paper_spec_key: {roll_number: [cut_rolls]}}
         
-        logger.info(f"📦 GROUPING: Starting paper specification grouping for {len(selected_cut_rolls)} cut rolls")
-        
         for i, cut_roll in enumerate(selected_cut_rolls):
             individual_roll_number = cut_roll.get("individual_roll_number")
             if individual_roll_number:
@@ -290,35 +273,22 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     cut_roll.get("bf"),
                     cut_roll.get("shade")
                 )
-                
-                logger.info(f"📦 Cut Roll {i+1}: Roll #{individual_roll_number}, Spec: {paper_spec_key}")
-                
+
                 # Initialize paper spec group if not exists
                 if paper_spec_key not in paper_spec_groups:
                     paper_spec_groups[paper_spec_key] = {}
-                    logger.info(f"📦 NEW PAPER SPEC: Created group for {paper_spec_key}")
-                
+
                 # Initialize roll number group within this paper spec
                 if individual_roll_number not in paper_spec_groups[paper_spec_key]:
                     paper_spec_groups[paper_spec_key][individual_roll_number] = []
-                    logger.info(f"📦 NEW ROLL GROUP: Added roll #{individual_roll_number} to spec {paper_spec_key}")
-                
+
                 # Add cut roll to the appropriate group
                 paper_spec_groups[paper_spec_key][individual_roll_number].append(cut_roll)
-                logger.info(f"📦 ADDED: Cut roll to spec {paper_spec_key}, roll #{individual_roll_number} (now {len(paper_spec_groups[paper_spec_key][individual_roll_number])} cuts)")
             else:
                 logger.warning(f"📦 SKIPPED: Cut roll {i+1} has no individual_roll_number")
                 
-        logger.info(f"📦 PAPER SPEC GROUPING: Found {len(paper_spec_groups)} unique paper specifications")
-        for spec_key, roll_groups in paper_spec_groups.items():
-            gsm, bf, shade = spec_key
-            total_cuts_for_spec = sum(len(cuts) for cuts in roll_groups.values())
-            logger.info(f"  → {gsm}gsm, {bf}bf, {shade}: {len(roll_groups)} roll numbers, {total_cuts_for_spec} total cut rolls")
-            for roll_num, cuts in roll_groups.items():
-                logger.info(f"    → Roll #{roll_num}: {len(cuts)} cut rolls")
         
         # Validate paper specification separation
-        logger.info(f"📦 VALIDATION: Checking paper specification separation")
         roll_number_conflicts = {}
         for spec_key, roll_groups in paper_spec_groups.items():
             for roll_num in roll_groups.keys():
@@ -326,22 +296,9 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     roll_number_conflicts[roll_num] = []
                 roll_number_conflicts[roll_num].append(spec_key)
         
-        conflicts_found = False
-        for roll_num, specs in roll_number_conflicts.items():
-            if len(specs) > 1:
-                conflicts_found = True
-                logger.info(f"📦 VALIDATION: Roll #{roll_num} appears in {len(specs)} different paper specs: {specs}")
-        
-        if not conflicts_found:
-            logger.info(f"📦 VALIDATION SUCCESS: All roll numbers properly separated by paper specification")
-        else:
-            logger.info(f"📦 VALIDATION: Roll number conflicts detected but properly handled by paper spec grouping")
-        
         # Calculate total 118" rolls and jumbo rolls needed across all paper specifications
         total_118_rolls = sum(len(roll_groups) for roll_groups in paper_spec_groups.values())
         total_jumbo_count = sum((len(roll_groups) + 2) // 3 for roll_groups in paper_spec_groups.values())
-        
-        logger.info(f"📦 JUMBO CREATION: {total_118_rolls} individual 118\" rolls across {len(paper_spec_groups)} paper specs = {total_jumbo_count} total jumbo rolls needed")
         
         # Create jumbo rolls and link 118" rolls properly
         import uuid
@@ -351,12 +308,10 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         spec_to_118_rolls = {}
         for spec_key, roll_groups in paper_spec_groups.items():
             spec_to_118_rolls[spec_key] = list(roll_groups.keys())
-            logger.info(f"📦 SPEC PROCESSING: {spec_key} → {len(spec_to_118_rolls[spec_key])} roll numbers: {spec_to_118_rolls[spec_key]}")
         
         # Create jumbo rolls for each paper specification separately
         jumbo_creation_summary = {}
         for spec_idx, ((gsm, bf, shade), roll_numbers) in enumerate(spec_to_118_rolls.items(), 1):
-            logger.info(f"📦 PROCESSING PAPER SPEC {spec_idx}/{len(spec_to_118_rolls)}: {gsm}gsm, {bf}bf, {shade} - {len(roll_numbers)} roll numbers")
             jumbo_creation_summary[f"{gsm}gsm_{shade}"] = {"roll_count": len(roll_numbers), "jumbo_count": 0}
             
             # Find paper record
@@ -425,11 +380,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     db.flush()
                     created_118_rolls.append(roll_118)
                     
-                    logger.info(f"🧻 CREATED 118\" ROLL: {roll_118.frontend_id} - Roll #{roll_num}, Sequence {seq} of Jumbo {jumbo_roll.frontend_id} ({gsm}gsm {shade})")
         
         # Final validation and summary logging
-        logger.info(f"✅ HIERARCHY CREATED: {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls")
-        logger.info(f"📊 VALIDATION SUMMARY:")
         
         # Group created jumbos by paper spec for validation
         jumbo_by_spec = {}
@@ -441,37 +393,24 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     jumbo_by_spec[spec_key] = []
                 jumbo_by_spec[spec_key].append(jumbo)
         
-        for spec_key, jumbos in jumbo_by_spec.items():
-            gsm, bf, shade = spec_key
-            logger.info(f"  → {gsm}gsm, {bf}bf, {shade}: {len(jumbos)} jumbo rolls created")
             
         # Enhanced validation with detailed reporting
-        logger.info(f"📊 CREATION SUMMARY BY PAPER SPEC:")
-        for spec_name, summary in jumbo_creation_summary.items():
-            logger.info(f"  → {spec_name}: {summary['roll_count']} roll numbers → {summary['jumbo_count']} jumbo rolls")
         
         # Validate that each paper spec got separate jumbos
-        if len(jumbo_by_spec) == len(paper_spec_groups):
-            logger.info(f"✅ VALIDATION SUCCESS: Each of {len(paper_spec_groups)} paper specifications got its own jumbos")
-            logger.info(f"✅ VALIDATION SUCCESS: No paper type mixing in jumbo rolls")
-        else:
+        if len(jumbo_by_spec) != len(paper_spec_groups):
             logger.error(f"❌ VALIDATION FAILED: Expected {len(paper_spec_groups)} paper specs, but created jumbos for {len(jumbo_by_spec)} specs")
             logger.error(f"❌ This indicates paper type mixing or missing specifications")
         
         # Additional validation: Check for roll number conflicts within each paper spec
-        logger.info(f"📊 ROLL NUMBER DISTRIBUTION CHECK:")
         for spec_key, jumbos in jumbo_by_spec.items():
             gsm, bf, shade = spec_key
             # Get all 118" rolls for this paper spec
             spec_118_rolls = [r for r in created_118_rolls if r.parent_jumbo_id in [j.id for j in jumbos]]
             roll_numbers_in_spec = [r.individual_roll_number for r in spec_118_rolls]
-            logger.info(f"  → {gsm}gsm {shade}: Roll numbers {sorted(roll_numbers_in_spec)} distributed across {len(jumbos)} jumbos")
-            
+
             # Check for duplicates within this spec (should not happen)
             if len(roll_numbers_in_spec) != len(set(roll_numbers_in_spec)):
                 logger.error(f"❌ DUPLICATE ROLL NUMBERS DETECTED within {gsm}gsm {shade} specification!")
-            else:
-                logger.info(f"✅ No duplicate roll numbers within {gsm}gsm {shade} specification")
         
         # Create inventory records for SELECTED cut rolls with status "cutting"
         # Link cut rolls to their parent 118" rolls based on individual_roll_number
@@ -492,7 +431,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             ).first()
             if paper_record:
                 cut_roll_paper_id = paper_record.id
-                logger.info(f"🔍 FOUND paper_id {cut_roll_paper_id} for cut roll specs: {cut_roll.get('gsm')}gsm, {cut_roll.get('bf')}bf, {cut_roll.get('shade')}")
             else:
                 cut_roll_paper_id = None
                 logger.warning(f"❌ Could not find paper record for specs: {cut_roll.get('gsm')}gsm, {cut_roll.get('bf')}bf, {cut_roll.get('shade')}")
@@ -500,18 +438,13 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             parent_118_roll = None
             
             if individual_roll_number and cut_roll_paper_id:
-                logger.info(f"🔍 MATCHING DEBUG: Looking for 118\" rolls with individual_roll_number={individual_roll_number} and paper_id={cut_roll_paper_id}")
-                logger.info(f"🔍 MATCHING DEBUG: Available 118\" rolls: {[(roll.frontend_id, roll.individual_roll_number, roll.paper_id) for roll in created_118_rolls]}")
-                
                 # Find the 118" roll with matching individual_roll_number AND same paper type
                 # Use round-robin assignment to distribute cut rolls evenly across 118" rolls
                 matching_118_rolls = [
-                    roll for roll in created_118_rolls 
-                    if (roll.individual_roll_number == individual_roll_number and 
+                    roll for roll in created_118_rolls
+                    if (roll.individual_roll_number == individual_roll_number and
                         roll.paper_id == cut_roll_paper_id)
                 ]
-                
-                logger.info(f"🔍 MATCHING DEBUG: Found {len(matching_118_rolls)} matching 118\" rolls: {[(roll.frontend_id, roll.individual_roll_number, roll.paper_id) for roll in matching_118_rolls]}")
                 
                 if matching_118_rolls:
                     # Count existing cut rolls for each 118" roll to find the least loaded one
@@ -527,8 +460,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     # Select the 118" roll with the minimum load
                     min_load_roll_id = min(roll_loads.keys(), key=lambda k: roll_loads[k])
                     parent_118_roll = next(roll for roll in matching_118_rolls if roll.id == min_load_roll_id)
-                    
-                    logger.info(f"🔗 BALANCED LINKING: Cut roll -> 118\" Roll {parent_118_roll.frontend_id} (Roll #{individual_roll_number}, Paper ID: {cut_roll_paper_id}, Load: {roll_loads[min_load_roll_id]} cuts)")
                 else:
                     logger.warning(f"No matching 118\" rolls found for individual_roll_number={individual_roll_number} and paper_id={cut_roll_paper_id}")
             
@@ -549,14 +480,11 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             if is_added_roll:
                 # Use the created Gupta order ID directly
                 if gupta_order_id:
-                    logger.info(f"🔧 ADDED ROLL: Using created Gupta order ID {gupta_order_id}")
                     best_order = db.query(models.OrderMaster).filter(
                         models.OrderMaster.id == gupta_order_id
                     ).first()
 
-                    if best_order:
-                        logger.info(f"🔧 ADDED ROLL: Using Gupta order {best_order.frontend_id} (ID: {best_order.id}) for added roll")
-                    else:
+                    if not best_order:
                         logger.warning(f"🔧 ADDED ROLL: Gupta order with ID {gupta_order_id} not found")
                 else:
                     logger.warning(f"🔧 ADDED ROLL: No gupta_order_id available")
@@ -588,13 +516,9 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         cut_roll_paper_id = order_item.paper_id
                         break
             
-            logger.info(f"🔍 INVENTORY DEBUG: cut_roll data = {cut_roll}")
-            logger.info(f"🔍 INVENTORY DEBUG: source_type = {cut_roll.get('source_type')}")
-            logger.info(f"🔍 INVENTORY DEBUG: source_pending_id = {cut_roll.get('source_pending_id')}")
             
             # NEW: If source tracking is missing, try to reconstruct it from pending orders
             if not cut_roll.get('source_type') and cut_roll.get('gsm') and cut_roll.get('shade'):
-                logger.info(f"🔍 RECONSTRUCTING: Trying to find source tracking from pending orders for {cut_roll_width}\" GSM={cut_roll.get('gsm')} Shade={cut_roll.get('shade')}")
                 
                 # Look for pending orders with matching specs 
                 matching_pending = db.query(models.PendingOrderItem).filter(
@@ -605,13 +529,10 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 ).first()
                 
                 if matching_pending:
-                    logger.info(f"🔍 RECONSTRUCTED: Found matching pending order {matching_pending.frontend_id} for cut roll")
                     # Add source tracking to the cut_roll dict
                     cut_roll['source_type'] = 'pending_order'
                     cut_roll['source_pending_id'] = str(matching_pending.id)
-                    logger.info(f"🔍 RECONSTRUCTED: Added source_type='pending_order', source_pending_id='{matching_pending.id}'")
                 else:
-                    logger.info(f"🔍 RECONSTRUCTED: No matching pending order found, assuming regular order")
                     cut_roll['source_type'] = 'regular_order'
             
             inventory_item = models.InventoryMaster(
@@ -634,8 +555,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             db.add(inventory_item)
             db.flush()  # Get inventory_item.id
             
-            # CRITICAL DEBUG: Log what was actually saved to database
-            logger.info(f"🔍 INVENTORY CREATED: id={inventory_item.id}, width={inventory_item.width_inches}, source_type={inventory_item.source_type}, source_pending_id={inventory_item.source_pending_id}, parent_118_roll_id={inventory_item.parent_118_roll_id}")
             
             # Create plan-inventory link to associate this inventory item with the plan
             plan_inventory_link = models.PlanInventoryLink(
@@ -652,7 +571,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         try:
             resolved_pending_count = 0
             processed_pending_orders = set()  # Track which pending orders we've already processed
-            logger.info(f"🔍 PENDING RESOLUTION: Processing {len(created_inventory)} cut rolls")
             
             # Process each created inventory item to find its source pending order (if any)
             for i, inventory_item in enumerate(created_inventory):
@@ -660,7 +578,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 source_type = inventory_item.source_type
                 source_pending_id = inventory_item.source_pending_id
                 
-                logger.info(f"Cut Roll {i+1}: source={source_type}, pending_id={str(source_pending_id)[:8] if source_pending_id else None}...")
                 
                 if source_type == 'pending_order' and source_pending_id:
                     # This cut roll was generated from a pending order - resolve it
@@ -673,7 +590,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         
                         # Check if we've already processed this pending order
                         if source_pending_id in processed_pending_orders:
-                            logger.info(f"  → Already processed pending order {str(source_pending_id)[:8]}... (skipping)")
                             continue
                             
                         # Check if pending order exists at all
@@ -681,45 +597,25 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                             models.PendingOrderItem.id == pending_uuid
                         ).first()
                         
-                        if any_pending:
-                            logger.info(f"🔍 PENDING ORDER RESOLUTION: Found pending order {str(source_pending_id)[:8]} in DB")
-                            logger.info(f"  → Status: {any_pending.status}")
-                            logger.info(f"  → quantity_pending: {any_pending.quantity_pending}")
-                            logger.info(f"  → quantity_fulfilled: {any_pending.quantity_fulfilled}")
-                            logger.info(f"  → frontend_id: {any_pending.frontend_id}")
-                        else:
+                        if not any_pending:
                             logger.warning(f"❌ PENDING ORDER RESOLUTION: Pending order {str(source_pending_id)[:8]}... does not exist in database")
                             continue
                             
                         # Find the pending order - now using proper 1:1 source tracking
-                        logger.info(f"🔍 QUERY: Searching for pending order with:")
-                        logger.info(f"  → id == {str(pending_uuid)[:8]}...")
-                        logger.info(f"  → _status == 'pending'")
                         
                         pending_order = db.query(models.PendingOrderItem).filter(
                             models.PendingOrderItem.id == pending_uuid,
                             models.PendingOrderItem._status == "pending"
                         ).first()
                         
-                        if pending_order:
-                            logger.info(f"✅ QUERY SUCCESS: Found pending order {pending_order.frontend_id}")
-                        else:
+                        if not pending_order:
                             logger.warning(f"❌ QUERY FAILED: No pending order found with id {str(pending_uuid)[:8]} and status='pending'")
                             continue
                         
-                        if pending_order:
-                            logger.info(f"  → Found pending order {pending_order.frontend_id}: qty_pending={pending_order.quantity_pending}, status={pending_order.status}")
-                            
-                            if pending_order.quantity_pending > 0:
-                                # With proper source tracking, each cut roll should map to exactly 1 pending unit
-                                logger.info(f"  → Processing 1 cut roll for this pending order (quantity_pending={pending_order.quantity_pending})")
-                                
-                                processed_pending_orders.add(source_pending_id)  # Mark as processed
+                        if pending_order.quantity_pending > 0:
+                            processed_pending_orders.add(source_pending_id)  # Mark as processed
                             
                             # Use the safe method that includes validation
-                            logger.info(f"🔄 STATUS TRANSITION: Attempting to mark pending order {pending_order.frontend_id} as included_in_plan")
-                            logger.info(f"  → Current status: {pending_order.status}")
-                            logger.info(f"  → Can transition: {pending_order.can_transition_to_included_in_plan()}")
                             
                             status_update_success = pending_order.mark_as_included_in_plan(db, resolved_by_production=True)
                             
@@ -1353,6 +1249,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     location="PRODUCTION",
                     created_by_id=user_id
                 )
+                logger.info(f" WASTAGE : Creating cut roll {cut_roll}")
                 
                 db.add(cut_roll)
                 db.flush()  # Get the cut roll ID
@@ -1374,10 +1271,10 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 ).first()
                 
                 if order_item:
-                    # Reduce the remaining quantity by the wastage weight
+                    # Update quantity_fulfilled (remaining_quantity is calculated automatically)
                     wastage_weight = float(wastage_roll.weight_kg) if wastage_roll.weight_kg else 0
                     order_item.quantity_fulfilled += wastage_weight
-                    order_item.remaining_quantity = max(0, order_item.remaining_quantity - wastage_weight)
+                    # Note: remaining_quantity is a calculated property (quantity_rolls - quantity_fulfilled)
                     
                     logger.info(f"✅ WASTAGE CONVERTED: {wastage_roll.frontend_id} → {cut_roll.frontend_id} "
                                f"({wastage_weight}kg) for order {order_id}")

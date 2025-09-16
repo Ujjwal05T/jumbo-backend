@@ -492,6 +492,7 @@ class PlanMasterCreate(PlanMasterBase):
     order_ids: List[UUID] = Field(..., min_items=1)
     inventory_ids: Optional[List[UUID]] = Field(default_factory=list, description="Optional inventory IDs for plan")
     pending_orders: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Pending orders from algorithm")
+    wastage_allocations: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Wastage allocations calculated during planning")
 
 class PlanMasterUpdate(BaseModel):
     status: Optional[PlanStatus] = None
