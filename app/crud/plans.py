@@ -1245,7 +1245,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     wastage_source_order_id=order_id,  # Link to order that will use this wastage
                     wastage_source_plan_id=plan_id,  # Link to current plan
                     qr_code=f"WCR_{wastage_roll.frontend_id}_{plan_id}",
-                    barcode_id=f"WCRB_{wastage_roll.frontend_id}_{plan_id}",
+                    barcode_id=self._generate_scr_barcode(db),
                     location="PRODUCTION",
                     created_by_id=user_id
                 )
@@ -1288,6 +1288,11 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         db.commit()
         logger.info(f"🔄 WASTAGE CONVERSION COMPLETE: Created {len(created_cut_rolls)} cut rolls from wastage")
         return created_cut_rolls
+
+    def _generate_scr_barcode(self, db: Session) -> str:
+        """Generate SCR barcode for scrap cut rolls from wastage"""
+        from ..services.barcode_generator import BarcodeGenerator
+        return BarcodeGenerator.generate_scrap_cut_roll_barcode(db)
 
     def _process_added_rolls_early(
         self,

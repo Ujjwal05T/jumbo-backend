@@ -145,7 +145,53 @@ class BarcodeGenerator:
             fallback_id = f"WSB-{int(time.time())}"
             logger.warning(f"Using fallback wastage barcode: {fallback_id}")
             return fallback_id
-    
+
+    @staticmethod
+    def generate_scrap_cut_roll_barcode(db: Session) -> str:
+        """
+        Generate barcode for scrap cut rolls (from wastage) in SCR-00001 format.
+
+        Args:
+            db: Database session
+
+        Returns:
+            str: Next SCR barcode ID like SCR-00001, SCR-00002, etc.
+        """
+        try:
+            # Get the highest existing SCR barcode number from inventory
+            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
+                models.InventoryMaster.barcode_id.like('SCR-%')
+            ).scalar()
+
+            if result is None:
+                # No SCR barcodes exist yet, start with 1
+                next_number = 1
+            else:
+                # Extract number from SCR-00123 format
+                try:
+                    if result and result.startswith('SCR-'):
+                        current_number = int(result[4:])  # Remove 'SCR-' prefix
+                        next_number = current_number + 1
+                    else:
+                        next_number = 1
+                except (ValueError, AttributeError):
+                    logger.warning(f"Invalid SCR barcode format found: {result}, starting from 1")
+                    next_number = 1
+
+            # Format as SCR-00001 (5 digits with leading zeros)
+            barcode_id = f"SCR-{next_number:05d}"
+
+            logger.info(f"Generated scrap cut roll barcode: {barcode_id}")
+            return barcode_id
+
+        except Exception as e:
+            logger.error(f"Error generating scrap cut roll barcode: {e}")
+            # Fallback to timestamp-based ID
+            import time
+            fallback_id = f"SCR-{int(time.time())}"
+            logger.warning(f"Using fallback SCR barcode: {fallback_id}")
+            return fallback_id
+
     @staticmethod
     def validate_barcode_format(barcode_id: str, barcode_type: str = "cut_roll") -> bool:
         """
