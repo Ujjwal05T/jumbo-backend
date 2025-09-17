@@ -1363,6 +1363,11 @@ class CuttingOptimizer:
         logger.info(f"📦 INPUT: Order Requirements: {len(order_requirements)} items")
         logger.info(f"⏳ INPUT: Pending Orders: {len(pending_orders) if pending_orders else 0} items")
         logger.info(f"📋 INPUT: Available Inventory: {len(available_inventory) if available_inventory else 0} items")
+
+        # Reset pending attribution tracker for fresh optimization cycle
+        if hasattr(self, '_pending_attribution_tracker'):
+            self._pending_attribution_tracker.clear()
+            logger.debug("🔄 OPTIMIZER: Reset pending attribution tracker for new optimization cycle")
         
         # Initialize default values for optional inputs
         if pending_orders is None:

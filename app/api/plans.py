@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 def create_plan(request: Request, plan: schemas.PlanMasterCreate, db: Session = Depends(get_db)):
     """Create a new cutting plan"""
     try:
-        logger.info(f"📝 PLAN CREATE: Received plan data: {plan}")
+        # logger.info(f"📝 PLAN CREATE: Received plan data: {plan}")
         logger.info(f"📝 PLAN CREATE: Raw request body available")
         return crud_operations.create_plan(db=db, plan_data=plan)
     except RequestValidationError as e:

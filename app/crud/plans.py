@@ -6,6 +6,7 @@ from uuid import UUID
 from datetime import datetime
 import logging
 
+
 from .base import CRUDBase
 from .. import models, schemas
 
@@ -105,7 +106,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 
                 for pending_data in plan.pending_orders:
                     # Find original order ID from the provided order_ids
-                    original_order_id = plan.order_ids[0] if plan.order_ids else None
+                    original_order_id = pending_data.get('source_order_id') or pending_data.get('original_order_id') or pending_data.get('order_id') or (plan.order_ids[0] if plan.order_ids else None)
                     
                     # Generate frontend ID
                     frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
