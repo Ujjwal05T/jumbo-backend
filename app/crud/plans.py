@@ -102,8 +102,9 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             # Create pending orders from algorithm results if provided
             if hasattr(plan, 'pending_orders') and plan.pending_orders:
+                logger.info(f"PENDING ORDERS DEBUG: Creating {len(plan.pending_orders)} pending orders for plan {plan.name}")
                 from ..services.id_generator import FrontendIDGenerator
-                
+
                 for pending_data in plan.pending_orders:
                     # Find original order ID from the provided order_ids
                     original_order_id = pending_data.get('source_order_id') or pending_data.get('original_order_id') or pending_data.get('order_id') or (plan.order_ids[0] if plan.order_ids else None)
@@ -124,8 +125,9 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                         created_by_id=plan.created_by_id
                     )
                     db.add(pending_order)
-                
-            
+
+                logger.info(f"PENDING ORDERS DEBUG: Successfully added {len(plan.pending_orders)} pending orders to database")
+
             db.commit()
             db.refresh(db_plan)
             return db_plan

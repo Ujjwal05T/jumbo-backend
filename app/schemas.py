@@ -217,8 +217,10 @@ class InwardChallanBase(BaseModel):
     material_id: UUID
     slip_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
-    report: Optional[str] = None
+    report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
     net_weight: Optional[float] = Field(None, ge=0)
+    final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
+    rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
     bill_no: Optional[str] = Field(None, max_length=50)
     cash: Optional[float] = Field(None, ge=0)
     time_in: Optional[str] = None
@@ -233,8 +235,10 @@ class InwardChallanUpdate(BaseModel):
     material_id: Optional[UUID] = None
     slip_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
-    report: Optional[str] = None
+    report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
     net_weight: Optional[float] = Field(None, ge=0)
+    final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
+    rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
     bill_no: Optional[str] = Field(None, max_length=50)
     cash: Optional[float] = Field(None, ge=0)
     time_in: Optional[str] = None

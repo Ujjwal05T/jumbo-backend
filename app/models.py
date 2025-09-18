@@ -692,8 +692,10 @@ class InwardChallan(Base):
     material_id = Column(UNIQUEIDENTIFIER, ForeignKey("material_master.id"), nullable=False, index=True)
     slip_no = Column(String(50), nullable=True)
     gross_weight = Column(Numeric(10, 3), nullable=True)
-    report = Column(Text, nullable=True)
+    report = Column(Numeric(10, 3), nullable=True)  # Weight to be subtracted from net weight
     net_weight = Column(Numeric(10, 3), nullable=True)
+    final_weight = Column(Numeric(10, 3), nullable=True)  # net_weight - report
+    rate = Column(Numeric(10, 2), nullable=True)  # Rate per unit
     bill_no = Column(String(50), nullable=True)
     cash = Column(Numeric(12, 2), nullable=True)
     time_in = Column(String(8), nullable=True)  # Format: "HH:MM:SS"

@@ -1438,7 +1438,7 @@ class CuttingOptimizer:
             if width in spec_groups[spec_key]['orders']:
                 old_qty = spec_groups[spec_key]['orders'][width]
                 spec_groups[spec_key]['orders'][width] += req['quantity']
-                logger.debug(f"  ➕ Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
+                logger.debug(f"  Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
             else:
                 spec_groups[spec_key]['orders'][width] = req['quantity']
                 logger.debug(f"  🆕 Added new width {width}\" with quantity {req['quantity']}")
@@ -1470,9 +1470,9 @@ class CuttingOptimizer:
             
             if inv_spec_key in spec_groups:
                 spec_groups[inv_spec_key]['inventory'].append(inv_item)
-                print(f"  ✅ Added inventory item to matching spec group {inv_spec_key}")
+                print(f"   Added inventory item to matching spec group {inv_spec_key}")
             else:
-                print(f"  ❌ No matching spec group found for inventory item {inv_spec_key}")
+                print(f"   No matching spec group found for inventory item {inv_spec_key}")
         
         print(f"\n[DEBUG] Spec groups after adding inventory:")
         for spec_key, group_data in spec_groups.items():

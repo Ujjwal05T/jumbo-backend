@@ -70,19 +70,27 @@ def delete_material(db: Session, material_id: UUID) -> bool:
 
 def create_inward_challan(db: Session, challan: schemas.InwardChallanCreate) -> models.InwardChallan:
     """Create a new inward challan"""
-    db_challan = models.InwardChallan(**challan.dict())
+    challan_data = challan.dict()
+
+    # Calculate final_weight if not provided but net_weight and report are available
+    if challan_data.get('final_weight') is None and challan_data.get('net_weight') is not None:
+        net_weight = challan_data.get('net_weight', 0)
+        report = challan_data.get('report', 0)
+        challan_data['final_weight'] = net_weight - report
+
+    db_challan = models.InwardChallan(**challan_data)
     db.add(db_challan)
     db.commit()
     db.refresh(db_challan)
-    
-    # Update material quantity if net_weight is provided
-    if challan.net_weight and challan.net_weight > 0:
+
+    # Update material quantity using final_weight instead of net_weight
+    if db_challan.final_weight and db_challan.final_weight > 0:
         material = get_material(db, challan.material_id)
         if material:
-            material.current_quantity += Decimal(str(challan.net_weight))
+            material.current_quantity += Decimal(str(db_challan.final_weight))
             db.commit()
-            logger.info(f"Updated material {material.name} quantity by +{challan.net_weight}")
-    
+            logger.info(f"Updated material {material.name} quantity by +{db_challan.final_weight} (final_weight)")
+
     logger.info(f"Created inward challan for material_id: {challan.material_id}")
     return db_challan
 
