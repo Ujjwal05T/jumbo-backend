@@ -971,38 +971,55 @@ class StartProductionResponse(BaseModel):
 # WASTAGE INVENTORY SCHEMAS
 # ============================================================================
 
+class WastageInventoryCreate(BaseModel):
+    """Schema for creating manual wastage inventory item"""
+    # Required fields
+    width_inches: float = Field(...)
+    paper_id: UUID = Field(..., description="Paper master ID")
+
+    # Optional fields
+    weight_kg: Optional[float] = Field(default=0.0, ge=0, description="Weight in kg (can be set later via QR scan)")
+    status: Optional[str] = Field(default="available", description="Status: available, used, damaged")
+    location: Optional[str] = Field(default="WASTE_STORAGE", description="Storage location")
+    notes: Optional[str] = Field(None, max_length=500, description="Additional notes for manual identification")
+
+    # Optional source tracking (for manual entries that know their source)
+    source_plan_id: Optional[UUID] = Field(None, description="Source plan ID (if known)")
+    source_jumbo_roll_id: Optional[UUID] = Field(None, description="Source jumbo roll ID (if known)")
+    individual_roll_number: Optional[int] = Field(None, ge=1, description="Source 118 roll number (if known)")
+
 class WastageInventory(BaseModel):
     """Schema for wastage inventory item"""
     id: UUID
     frontend_id: Optional[str] = Field(None, description="Human-readable wastage ID (e.g., WS-00001)")
     barcode_id: Optional[str] = Field(None, description="Barcode ID (e.g., WSB-00001)")
-    
+
     # Wastage details
     width_inches: float = Field(..., description="Width of waste material in inches")
     paper_id: UUID = Field(..., description="Paper master ID")
     weight_kg: float = Field(default=0.0, description="Weight in kg")
-    
+
     # Source information
     source_plan_id: Optional[UUID] = Field(None, description="Source plan ID")
     source_jumbo_roll_id: Optional[UUID] = Field(None, description="Source jumbo roll ID")
     individual_roll_number: Optional[int] = Field(None, description="Source 118 roll number")
-    
+
     # Status and tracking
     status: str = Field(default="available", description="Status: available, used, damaged")
     location: Optional[str] = Field(None, description="Storage location")
-    
+
     # Audit fields
     created_at: datetime
     created_by_id: Optional[UUID] = Field(None, description="Creator user ID")
     updated_at: Optional[datetime] = Field(None, description="Last update time")
-    
+
     # Notes
     notes: Optional[str] = Field(None, description="Additional notes")
-    
+
     # Relationships (optional, loaded when needed)
     paper: Optional[PaperMaster] = None
     created_by: Optional[UserMaster] = None
-    
+
     class Config:
         from_attributes = True
 

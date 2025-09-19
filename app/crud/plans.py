@@ -1340,7 +1340,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 if order_item:
                     # Update quantity_fulfilled (remaining_quantity is calculated automatically)
                     wastage_weight = float(wastage_roll.weight_kg) if wastage_roll.weight_kg else 0
-                    order_item.quantity_fulfilled += wastage_weight
+                    order_item.quantity_fulfilled += 1
                     # Note: remaining_quantity is a calculated property (quantity_rolls - quantity_fulfilled)
                     
                     logger.info(f"✅ WASTAGE CONVERTED: {wastage_roll.frontend_id} → {cut_roll.frontend_id} "

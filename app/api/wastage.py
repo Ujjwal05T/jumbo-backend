@@ -182,6 +182,67 @@ def delete_wastage_item(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/wastage", response_model=schemas.WastageInventory, tags=["Wastage Inventory"])
+def create_manual_wastage(
+    wastage_data: schemas.WastageInventoryCreate,
+    db: Session = Depends(get_db)
+):
+    """Create a manual wastage inventory item (Stock)"""
+    try:
+        # Validate that the paper exists
+        paper = db.query(models.PaperMaster).filter(
+            models.PaperMaster.id == wastage_data.paper_id
+        ).first()
+
+        if not paper:
+            raise HTTPException(status_code=404, detail="Paper master record not found")
+
+        # Generate barcode ID
+        barcode_id = BarcodeGenerator.generate_wastage_barcode(db)
+
+        # Create wastage inventory record
+        wastage_item = models.WastageInventory(
+            width_inches=wastage_data.width_inches,
+            paper_id=wastage_data.paper_id,
+            weight_kg=wastage_data.weight_kg or 0.0,
+            source_plan_id=wastage_data.source_plan_id,
+            source_jumbo_roll_id=wastage_data.source_jumbo_roll_id,
+            individual_roll_number=wastage_data.individual_roll_number,
+            status=wastage_data.status or "available",
+            location=wastage_data.location or "WASTE_STORAGE",
+            notes=wastage_data.notes,
+            barcode_id=barcode_id
+        )
+
+        db.add(wastage_item)
+        db.commit()
+        db.refresh(wastage_item)
+
+        logger.info(f"✅ MANUAL WASTAGE CREATED: {wastage_item.frontend_id} - {wastage_item.width_inches}\" {paper.shade} paper")
+
+        return wastage_item
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating manual wastage: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/wastage/papers", response_model=List[schemas.PaperMaster], tags=["Wastage Inventory"])
+def get_papers_for_wastage(db: Session = Depends(get_db)):
+    """Get all active paper masters for wastage creation dropdown"""
+    try:
+        papers = db.query(models.PaperMaster).filter(
+            models.PaperMaster.status == "active"
+        ).order_by(models.PaperMaster.name).all()
+
+        return papers
+
+    except Exception as e:
+        logger.error(f"Error getting papers for wastage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/wastage/test-data", response_model=List[schemas.WastageInventory], tags=["Wastage Inventory"])
 def create_test_wastage_data(db: Session = Depends(get_db)):
     """Create some test wastage data for development purposes"""
