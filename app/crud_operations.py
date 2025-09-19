@@ -226,11 +226,11 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
     """
     NEW FLOW: Get orders with their paper specifications for optimization input.
     Used to prepare order data for 3-input optimization.
-    
+
     Args:
         db: Database session
         order_ids: List of order IDs to fetch
-        
+
     Returns:
         List of orders formatted for optimization input
     """
@@ -241,7 +241,7 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
         models.OrderMaster.id.in_(order_ids),
         models.OrderMaster.status.in_(["created", "in_process"])
     ).all()
-    
+
     order_requirements = []
     for order in orders:
         # Process each order item (different paper specs/widths)
@@ -265,7 +265,40 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
                         'source_order_id': str(order.id),        # FIX: Add source order ID
                         'source_pending_id': None                # FIX: Regular orders don't have pending ID
                     })
-    
+
     return order_requirements
+
+# ============================================================================
+# PENDING ORDER ALLOCATION MANAGEMENT FUNCTIONS
+# ============================================================================
+
+def get_pending_order_item_with_details(db, item_id):
+    """Get pending order item with all related details"""
+    return pending_order.get_pending_order_item_with_details(db=db, item_id=item_id)
+
+def get_available_orders_for_pending_allocation(db, item_id):
+    """Get list of orders that can receive pending order allocation"""
+    return pending_order.get_available_orders_for_pending_allocation(db=db, item_id=item_id)
+
+def allocate_pending_order_to_order(db, item_id, target_order_id, quantity_to_transfer, created_by_id):
+    """Allocate pending order item to a specific order (quantity-wise transfer)"""
+    return pending_order.allocate_pending_order_to_order(
+        db=db,
+        item_id=item_id,
+        target_order_id=target_order_id,
+        quantity_to_transfer=quantity_to_transfer,
+        created_by_id=created_by_id
+    )
+
+def transfer_pending_order_between_orders(db, item_id, source_order_id, target_order_id, quantity_to_transfer, created_by_id):
+    """Transfer pending order item from one order to another (quantity-wise)"""
+    return pending_order.transfer_pending_order_between_orders(
+        db=db,
+        item_id=item_id,
+        source_order_id=source_order_id,
+        target_order_id=target_order_id,
+        quantity_to_transfer=quantity_to_transfer,
+        created_by_id=created_by_id
+    )
 
 

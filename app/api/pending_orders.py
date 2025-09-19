@@ -104,12 +104,12 @@ def start_production_from_pending_orders(
         # Debug: Log the incoming request data structure
         logger.info(f"🔍 RAW REQUEST DATA KEYS: {list(request_data.keys())}")
         logger.info(f"🔍 SELECTED CUT ROLLS COUNT: {len(request_data.get('selected_cut_rolls', []))}")
-        
+
         if 'selected_cut_rolls' in request_data and len(request_data['selected_cut_rolls']) > 0:
             sample_roll = request_data['selected_cut_rolls'][0]
             logger.info(f"🔍 SAMPLE CUT ROLL KEYS: {list(sample_roll.keys())}")
             logger.info(f"🔍 SAMPLE VALUES: paper_id={sample_roll.get('paper_id')}, created_by_id={request_data.get('created_by_id')}")
-        
+
         # Try to validate against schema and catch detailed errors
         try:
             validated_data = schemas.StartProductionRequest(**request_data)
@@ -117,11 +117,105 @@ def start_production_from_pending_orders(
         except Exception as validation_error:
             logger.error(f"❌ VALIDATION ERROR: {str(validation_error)}")
             raise HTTPException(status_code=422, detail=f"Validation error: {str(validation_error)}")
-        
+
         from .. import crud_operations
         return crud_operations.start_production_from_pending_orders(db=db, request_data=validated_data)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error starting production from pending orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# PENDING ORDER ALLOCATION MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@router.get("/pending-order-items/{item_id}", response_model=schemas.PendingOrderItem, tags=["Pending Order Management"])
+def get_pending_order_item_details(item_id: UUID, db: Session = Depends(get_db)):
+    """Get detailed information about a specific pending order item"""
+    try:
+        return crud_operations.get_pending_order_item_with_details(db=db, item_id=item_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting pending order item details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/pending-order-items/{item_id}/available-orders", tags=["Pending Order Management"])
+def get_available_orders_for_allocation(item_id: UUID, db: Session = Depends(get_db)):
+    """Get list of available orders that can receive this pending order item allocation"""
+    try:
+        return crud_operations.get_available_orders_for_pending_allocation(db=db, item_id=item_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting available orders for allocation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-order-items/{item_id}/allocate", tags=["Pending Order Management"])
+def allocate_pending_order_to_order(
+    item_id: UUID,
+    allocation_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Allocate pending order item to a specific order (quantity-wise transfer)"""
+    try:
+        target_order_id = allocation_data.get("target_order_id")
+        quantity_to_transfer = allocation_data.get("quantity_to_transfer")
+        created_by_id = allocation_data.get("created_by_id")
+
+        if not target_order_id:
+            raise HTTPException(status_code=400, detail="target_order_id is required")
+        if not quantity_to_transfer or quantity_to_transfer <= 0:
+            raise HTTPException(status_code=400, detail="quantity_to_transfer must be greater than 0")
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
+
+        return crud_operations.allocate_pending_order_to_order(
+            db=db,
+            item_id=item_id,
+            target_order_id=target_order_id,
+            quantity_to_transfer=quantity_to_transfer,
+            created_by_id=created_by_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error allocating pending order: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-order-items/{item_id}/transfer", tags=["Pending Order Management"])
+def transfer_pending_order_between_orders(
+    item_id: UUID,
+    transfer_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Transfer pending order item from one order to another (quantity-wise)"""
+    try:
+        source_order_id = transfer_data.get("source_order_id")
+        target_order_id = transfer_data.get("target_order_id")
+        quantity_to_transfer = transfer_data.get("quantity_to_transfer")
+        created_by_id = transfer_data.get("created_by_id")
+
+        if not source_order_id:
+            raise HTTPException(status_code=400, detail="source_order_id is required")
+        if not target_order_id:
+            raise HTTPException(status_code=400, detail="target_order_id is required")
+        if not quantity_to_transfer or quantity_to_transfer <= 0:
+            raise HTTPException(status_code=400, detail="quantity_to_transfer must be greater than 0")
+        if not created_by_id:
+            raise HTTPException(status_code=400, detail="created_by_id is required")
+
+        return crud_operations.transfer_pending_order_between_orders(
+            db=db,
+            item_id=item_id,
+            source_order_id=source_order_id,
+            target_order_id=target_order_id,
+            quantity_to_transfer=quantity_to_transfer,
+            created_by_id=created_by_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error transferring pending order: {e}")
         raise HTTPException(status_code=500, detail=str(e))

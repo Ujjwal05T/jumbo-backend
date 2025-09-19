@@ -108,10 +108,26 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 for pending_data in plan.pending_orders:
                     # Find original order ID from the provided order_ids
                     original_order_id = pending_data.get('source_order_id') or pending_data.get('original_order_id') or pending_data.get('order_id') or (plan.order_ids[0] if plan.order_ids else None)
-                    
+
+                    # VALIDATION: Ensure original_order_id is valid and in plan
+                    if not original_order_id:
+                        error_msg = f"❌ PENDING ORDER VALIDATION: No original_order_id found for pending order {pending_data}"
+                        logger.error(error_msg)
+                        raise ValueError(f"Invalid pending order data: {error_msg}")
+
+                    # Verify the original_order_id is actually in this plan's order_ids
+                    # Convert both to strings for comparison since plan.order_ids may contain UUID objects
+                    plan_order_ids_str = [str(oid) for oid in plan.order_ids]
+                    if str(original_order_id) not in plan_order_ids_str:
+                        error_msg = f"❌ PENDING ORDER VALIDATION: original_order_id {original_order_id} not found in plan order_ids {plan_order_ids_str}"
+                        logger.error(error_msg)
+                        raise ValueError(f"Invalid pending order data: {error_msg}")
+
+                    logger.info(f"✅ PENDING ORDER VALIDATION: Creating pending order for original_order_id {original_order_id}")
+
                     # Generate frontend ID
                     frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
-                    
+
                     pending_order = models.PendingOrderItem(
                         frontend_id=frontend_id,
                         original_order_id=original_order_id,
@@ -239,6 +255,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         
         # Process selected and unselected cut rolls - get data first
         selected_cut_rolls = request_data.get("selected_cut_rolls", [])
+        logger.info(f"Selected Cut Rolls: {selected_cut_rolls}")
         all_available_cuts = request_data.get("all_available_cuts", [])  # All cuts that were available for selection
 
         # NEW: Process added rolls early to create Gupta orders first
@@ -473,6 +490,8 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             best_order = None
             cut_roll_width = cut_roll.get("width", cut_roll.get("width_inches", 0))  # Try both field names
 
+            logger.info(f"🔍 CUT ROLL ALLOCATION START: Processing cut roll - width: {cut_roll_width}, paper_id: {cut_roll_paper_id}, source_type: {cut_roll.get('source_type')}, source_pending_id: {cut_roll.get('source_pending_id')}")
+
             # NEW: Check if this is an added roll and use Gupta order mapping
             # Identify added rolls by source_type or order_id pattern
             is_added_roll = (
@@ -489,23 +508,68 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
 
                     if not best_order:
                         logger.warning(f"🔧 ADDED ROLL: Gupta order with ID {gupta_order_id} not found")
+                    else:
+                        logger.info(f"🔧 ADDED ROLL: Found Gupta order {gupta_order_id}")
                 else:
                     logger.warning(f"🔧 ADDED ROLL: No gupta_order_id available")
 
+            logger.info(f"🔍 DEBUG: After Gupta check - best_order = {best_order}, is_added_roll = {is_added_roll}")
+
             # If not an added roll or no Gupta mapping found, use original logic
             if not best_order:
-                # Look through all orders associated with this plan
-                for plan_order in db_plan.plan_orders:
-                    order = plan_order.order
-                    if order:
-                        # Check if this order has items matching the cut roll specs
-                        for order_item in order.order_items:
-                            if (str(order_item.paper_id) == str(cut_roll_paper_id) and
-                                abs(float(order_item.width_inches) - float(cut_roll_width)) < 0.01):
-                                best_order = order
-                                break
-                    if best_order:
-                        break
+                # SIMPLIFIED: Use the cut roll's order_id directly (it's correct for all source types)
+                cut_roll_order_id = cut_roll.get('order_id') or cut_roll.get('source_order_id') or cut_roll.get('original_order_id')
+                logger.info(f"🔍 DIRECT ORDER ID: Using cut roll's order_id {cut_roll_order_id} for source_type: {cut_roll.get('source_type')}")
+
+                if cut_roll_order_id:
+                    # Look for the specific order this cut roll came from
+                    for plan_order in db_plan.plan_orders:
+                        # logger.info(f"🔍 CHECKING: Comparing cut roll order_id {cut_roll_order_id} with plan order_id {plan_order.order_id}")
+                        if str(plan_order.order_id) == str(cut_roll_order_id):
+                            best_order = plan_order.order
+                            logger.info(f"🎯 EXACT MATCH: Cut roll allocated to original order {cut_roll_order_id}")
+                            break
+
+                # DYNAMIC INCLUSION: If order not in plan but valid, add it to plan
+                if not best_order and cut_roll_order_id:
+                    logger.info(f"🔍 DYNAMIC CHECK: Order {cut_roll_order_id} not in plan, checking if it's a valid order in database")
+                    # Check if this is a valid order in the database
+                    referenced_order = db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id == cut_roll_order_id
+                    ).first()
+
+                    if referenced_order:
+                        logger.info(f"✅ DYNAMIC INCLUSION: Found valid order {cut_roll_order_id}, adding to plan")
+
+                        # Get order items for this order to create proper links
+                        order_items = db.query(models.OrderItem).filter(
+                            models.OrderItem.order_id == referenced_order.id
+                        ).all()
+
+                        # Create plan-order links for each order item
+                        for order_item in order_items:
+                            plan_order_link = models.PlanOrderLink(
+                                plan_id=db_plan.id,
+                                order_id=referenced_order.id,
+                                order_item_id=order_item.id,
+                                quantity_allocated=1  # Default quantity
+                            )
+                            db.add(plan_order_link)
+
+                        # Flush to ensure the links are created before continuing
+                        db.flush()
+
+                        # Now use this order
+                        best_order = referenced_order
+                        logger.info(f"🎯 DYNAMIC MATCH: Cut roll allocated to dynamically included order {cut_roll_order_id}")
+                    else:
+                        logger.error(f"❌ INVALID ORDER: Order {cut_roll_order_id} does not exist in database")
+
+                # ERROR if still no match found
+                if not best_order:
+                    error_msg = f"❌ ALLOCATION FAILED: Cut roll cannot be allocated - order {cut_roll_order_id} not found in database (width: {cut_roll_width}, paper_id: {cut_roll_paper_id}, source_type: {cut_roll.get('source_type')}, source_pending_id: {cut_roll.get('source_pending_id')})"
+                    logger.error(error_msg)
+                    raise ValueError(f"Cut roll allocation failed: {error_msg}")
             
             # Create inventory record for selected rolls
             # Generate NEW QR code for production (don't reuse planning QR codes)

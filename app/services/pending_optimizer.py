@@ -122,17 +122,46 @@ class PendingOptimizer:
             logger.info(f"📊 BACKEND SUMMARY: {total_rolls_suggested} total cuts generated")
             logger.info(f"📊 EXPECTED RATIO: {total_expected_cut_rolls} cut_rolls from {total_rolls_suggested} cuts")
 
+            # Create simplified paper spec suggestions (no order grouping)
+            simplified_spec_suggestions = []
+            for spec_key, spec_data in spec_groups.items():
+                # Combine all jumbo rolls from all orders within this spec
+                all_jumbo_rolls = []
+                all_pending_ids = []
+
+                for order_id, order_data in spec_data['orders'].items():
+                    order_suggestion = self._generate_order_suggestions(order_data, target_width)
+                    if order_suggestion:
+                        all_jumbo_rolls.extend(order_suggestion['jumbo_rolls'])
+                        all_pending_ids.extend(order_suggestion['pending_order_ids'])
+
+                if all_jumbo_rolls:
+                    spec_suggestion = {
+                        'spec_id': f"spec_{spec_key[0]}_{spec_key[1]}_{spec_key[2]}".replace(" ", "_"),
+                        'paper_spec': spec_data['paper_spec'],
+                        'target_width': target_width,
+                        'jumbo_rolls': all_jumbo_rolls,  # Flattened jumbo rolls from all orders
+                        'pending_order_ids': all_pending_ids,
+                        'summary': {
+                            'total_orders': len(spec_data['orders']),
+                            'total_jumbo_rolls': len(all_jumbo_rolls),
+                            'total_118_sets': sum(len(jr['sets']) for jr in all_jumbo_rolls),
+                            'total_cuts': sum(len(s['cuts']) for jr in all_jumbo_rolls for s in jr['sets'])
+                        }
+                    }
+                    simplified_spec_suggestions.append(spec_suggestion)
+
             return {
                 "status": "success",
                 "target_width": target_width,
                 "wastage": wastage,
-                "spec_suggestions": spec_suggestions,  # Changed from order_suggestions
+                "spec_suggestions": simplified_spec_suggestions,  # Simplified structure
                 "summary": {
                     "total_pending_input": len(pending_items),
-                    "specs_processed": len(spec_suggestions),
-                    "orders_processed": sum(spec['summary']['total_orders'] for spec in spec_suggestions),
-                    "roll_sets_suggested": len(spec_suggestions),
-                    "total_rolls_suggested": total_rolls_suggested,
+                    "specs_processed": len(simplified_spec_suggestions),
+                    "orders_processed": sum(spec['summary']['total_orders'] for spec in simplified_spec_suggestions),
+                    "roll_sets_suggested": len(simplified_spec_suggestions),
+                    "total_rolls_suggested": sum(spec['summary']['total_cuts'] for spec in simplified_spec_suggestions),
                     "expected_cut_rolls": total_expected_cut_rolls
                 }
             }
@@ -266,7 +295,7 @@ class PendingOptimizer:
         logger.info(f"📋 PENDING IDs IN THIS ORDER: {[str(item.id)[:8] + '...' for item in validated_items]}")
         
         # Generate jumbo rolls for this order (each jumbo = 3 sets of 118" rolls)  
-        jumbo_rolls = self._create_order_jumbo_rolls(width_quantities, target_width, item_limits)
+        jumbo_rolls = self._create_order_jumbo_rolls(width_quantities, target_width, item_limits, validated_items)
         
         if not jumbo_rolls:
             return None
@@ -310,7 +339,7 @@ class PendingOptimizer:
         
         return suggestion
     
-    def _create_order_jumbo_rolls(self, width_quantities: Dict[float, int], target_width: float, item_limits: Dict[str, Dict]) -> List[Dict]:
+    def _create_order_jumbo_rolls(self, width_quantities: Dict[float, int], target_width: float, item_limits: Dict[str, Dict], validated_items: List) -> List[Dict]:
         """Create optimized jumbo rolls for an order (each jumbo = 3 sets of 118" rolls)."""
         jumbo_rolls = []
         remaining_quantities = width_quantities.copy()
@@ -318,7 +347,7 @@ class PendingOptimizer:
         jumbo_number = 1
         while sum(remaining_quantities.values()) > 0 and jumbo_number <= 3:  # Limit to 3 jumbo rolls per order
             # Create one jumbo roll (with up to 3 sets of 118" rolls)
-            jumbo_roll = self._create_single_jumbo_roll(remaining_quantities, target_width, jumbo_number, item_limits)
+            jumbo_roll = self._create_single_jumbo_roll(remaining_quantities, target_width, jumbo_number, item_limits, validated_items)
             
             if jumbo_roll and jumbo_roll['sets']:
                 jumbo_rolls.append(jumbo_roll)
@@ -343,7 +372,7 @@ class PendingOptimizer:
         
         return jumbo_rolls
     
-    def _create_single_jumbo_roll(self, available_widths: Dict[float, int], target_width: float, jumbo_number: int, item_limits: Dict[str, Dict]) -> Optional[Dict]:
+    def _create_single_jumbo_roll(self, available_widths: Dict[float, int], target_width: float, jumbo_number: int, item_limits: Dict[str, Dict], validated_items: List) -> Optional[Dict]:
         """Create a single jumbo roll with up to 3 sets of 118\" rolls."""
         if not available_widths:
             return None
@@ -353,7 +382,7 @@ class PendingOptimizer:
         
         # Create up to 3 sets (118" rolls) for this jumbo
         for set_num in range(1, 4):  # Sets 1, 2, 3
-            roll_set = self._create_single_118_roll_set(temp_remaining, target_width, set_num, item_limits)
+            roll_set = self._create_single_118_roll_set(temp_remaining, target_width, set_num, item_limits, validated_items)
             if roll_set and roll_set['cuts']:
                 sets.append(roll_set)
                 # Note: temp_remaining is updated inside _create_single_118_roll_set now
@@ -378,7 +407,7 @@ class PendingOptimizer:
             }
         }
     
-    def _create_single_118_roll_set(self, available_widths: Dict[float, int], target_width: float, set_number: int, item_limits: Dict[str, Dict]) -> Optional[Dict]:
+    def _create_single_118_roll_set(self, available_widths: Dict[float, int], target_width: float, set_number: int, item_limits: Dict[str, Dict], validated_items: List) -> Optional[Dict]:
         """Create a single 118\" roll set with optimal cut combinations."""
         if not available_widths:
             return None
@@ -404,16 +433,31 @@ class PendingOptimizer:
         cuts = []
         cut_number = 1
         for width, quantity in best_combo['used_widths'].items():
-            # Create one cut entry per width type (with correct quantity)
-            cut = {
-                'cut_id': f"cut_{cut_number}",
-                'width_inches': width,
-                'uses_existing': True,
-                'used_widths': {str(width): quantity},  # Use actual quantity needed
-                'description': f"{width}\" from pending (qty: {quantity})"
-            }
-            cuts.append(cut)
-            cut_number += 1
+            # Find pending items of this width to get order information
+            matching_items = [item for item in validated_items if float(item.width_inches) == width]
+
+            # Create individual cuts with order information for each piece
+            for i in range(quantity):
+                if i < len(matching_items):
+                    item = matching_items[i]
+                    order_frontend_id = item.original_order.frontend_id if item.original_order else 'Unknown'
+                    client_name = item.original_order.client.company_name if item.original_order and item.original_order.client else 'Unknown'
+                else:
+                    # Fallback if we don't have enough items (shouldn't happen)
+                    order_frontend_id = 'Unknown'
+                    client_name = 'Unknown'
+
+                cut = {
+                    'cut_id': f"cut_{cut_number}",
+                    'width_inches': width,
+                    'uses_existing': True,
+                    'used_widths': {str(width): 1},  # Each individual cut is quantity 1
+                    'order_frontend_id': order_frontend_id,
+                    'client_name': client_name,
+                    'description': f"{width}\" from {order_frontend_id} ({client_name})"
+                }
+                cuts.append(cut)
+                cut_number += 1
         
         # Only allow manual addition if waste is greater than 20 inches
         manual_addition_available = best_combo['waste'] > 20.0

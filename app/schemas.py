@@ -1055,3 +1055,42 @@ class PaginatedInventoryItemsResponse(BaseModel):
     per_page: int
     total_pages: int
 
+# ============================================================================
+# PENDING ORDER ALLOCATION SCHEMAS
+# ============================================================================
+
+class PendingOrderAllocationRequest(BaseModel):
+    """Schema for allocating pending order to an order"""
+    target_order_id: UUID = Field(..., description="Order ID to allocate pending order to")
+    quantity_to_transfer: int = Field(..., gt=0, description="Quantity to transfer")
+    created_by_id: UUID = Field(..., description="User performing the allocation")
+
+class PendingOrderTransferRequest(BaseModel):
+    """Schema for transferring pending order between orders"""
+    source_order_id: UUID = Field(..., description="Source order ID")
+    target_order_id: UUID = Field(..., description="Target order ID")
+    quantity_to_transfer: int = Field(..., gt=0, description="Quantity to transfer")
+    created_by_id: UUID = Field(..., description="User performing the transfer")
+
+class AvailableOrder(BaseModel):
+    """Schema for orders available for pending order allocation"""
+    id: UUID
+    frontend_id: Optional[str] = None
+    client_id: UUID
+    client_name: str
+    status: str
+    priority: str
+    payment_type: str
+    delivery_date: Optional[datetime] = None
+    created_at: datetime
+    has_matching_paper: bool = Field(..., description="Whether order has items with matching paper specs")
+    matching_items_count: int = Field(default=0, description="Number of order items with matching paper specs")
+
+class PendingOrderAllocationResponse(BaseModel):
+    """Response for pending order allocation operations"""
+    message: str
+    pending_order_item: PendingOrderItem
+    created_order_item: Optional[OrderItem] = None
+    updated_order_item: Optional[OrderItem] = None
+    allocation_details: Dict[str, Any] = Field(default_factory=dict)
+

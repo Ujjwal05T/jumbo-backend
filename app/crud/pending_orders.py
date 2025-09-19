@@ -276,6 +276,244 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
             ]
         }
 
+    def get_pending_order_item_with_details(self, db: Session, *, item_id: UUID) -> models.PendingOrderItem:
+        """Get pending order item with all related details"""
+        item = db.query(models.PendingOrderItem).options(
+            joinedload(models.PendingOrderItem.original_order).joinedload(models.OrderMaster.client),
+            joinedload(models.PendingOrderItem.created_by),
+            joinedload(models.PendingOrderItem.production_order)
+        ).filter(models.PendingOrderItem.id == item_id).first()
+
+        if not item:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Pending order item not found")
+
+        return item
+
+    def get_available_orders_for_pending_allocation(self, db: Session, *, item_id: UUID) -> Dict[str, Any]:
+        """Get list of orders that can receive pending order allocation"""
+        # Get the pending order item first
+        pending_item = self.get_pending_order_item_with_details(db=db, item_id=item_id)
+
+        # Find orders that have items with matching paper specifications
+        matching_orders = db.query(models.OrderMaster).join(models.OrderItem).join(models.PaperMaster).filter(
+            models.PaperMaster.gsm == pending_item.gsm,
+            models.PaperMaster.bf == pending_item.bf,
+            models.PaperMaster.shade == pending_item.shade,
+            models.OrderMaster.status.in_(["created", "in_process"]),  # Only active orders
+            models.OrderItem.width_inches == pending_item.width_inches  # Matching width
+        ).options(joinedload(models.OrderMaster.client)).distinct().all()
+
+        # Also get all other active orders (for user choice)
+        all_active_orders = db.query(models.OrderMaster).filter(
+            models.OrderMaster.status.in_(["created", "in_process"])
+        ).options(joinedload(models.OrderMaster.client)).all()
+
+        # Convert to response format
+        def order_to_dict(order, has_matching=False, matching_count=0):
+            return {
+                "id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "client_id": str(order.client_id),
+                "client_name": order.client.company_name if order.client else "Unknown",
+                "status": order.status,
+                "priority": order.priority,
+                "payment_type": order.payment_type,
+                "delivery_date": order.delivery_date,
+                "created_at": order.created_at,
+                "has_matching_paper": has_matching,
+                "matching_items_count": matching_count
+            }
+
+        # Calculate matching items count for matching orders
+        matching_orders_data = []
+        for order in matching_orders:
+            matching_count = db.query(models.OrderItem).join(models.PaperMaster).filter(
+                models.OrderItem.order_id == order.id,
+                models.PaperMaster.gsm == pending_item.gsm,
+                models.PaperMaster.bf == pending_item.bf,
+                models.PaperMaster.shade == pending_item.shade,
+                models.OrderItem.width_inches == pending_item.width_inches
+            ).count()
+            matching_orders_data.append(order_to_dict(order, True, matching_count))
+
+        # Get other orders (excluding already matched ones)
+        matching_order_ids = {order.id for order in matching_orders}
+        other_orders_data = [
+            order_to_dict(order, False, 0)
+            for order in all_active_orders
+            if order.id not in matching_order_ids
+        ]
+
+        return {
+            "pending_item": {
+                "id": str(pending_item.id),
+                "frontend_id": pending_item.frontend_id,
+                "width_inches": float(pending_item.width_inches),
+                "gsm": pending_item.gsm,
+                "bf": float(pending_item.bf),
+                "shade": pending_item.shade,
+                "quantity_pending": pending_item.quantity_pending,
+                "status": pending_item.status,
+                "original_order_client": pending_item.original_order.client.company_name if pending_item.original_order and pending_item.original_order.client else "Unknown"
+            },
+            "matching_orders": matching_orders_data,
+            "other_orders": other_orders_data,
+            "total_available": len(matching_orders_data) + len(other_orders_data)
+        }
+
+    def allocate_pending_order_to_order(
+        self,
+        db: Session,
+        *,
+        item_id: UUID,
+        target_order_id: UUID,
+        quantity_to_transfer: int,
+        created_by_id: UUID
+    ) -> Dict[str, Any]:
+        """Allocate pending order item to a specific order (quantity-wise transfer)"""
+        from datetime import datetime
+        from ..services.id_generator import FrontendIDGenerator
+
+        # Get pending order item
+        pending_item = self.get_pending_order_item_with_details(db=db, item_id=item_id)
+
+        # Validate quantity
+        if quantity_to_transfer > pending_item.quantity_pending:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot transfer {quantity_to_transfer} items. Only {pending_item.quantity_pending} available."
+            )
+
+        # Get target order
+        target_order = db.query(models.OrderMaster).filter(models.OrderMaster.id == target_order_id).first()
+        if not target_order:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Target order not found")
+
+        # Check if target order has matching order item
+        matching_order_item = db.query(models.OrderItem).join(models.PaperMaster).filter(
+            models.OrderItem.order_id == target_order_id,
+            models.PaperMaster.gsm == pending_item.gsm,
+            models.PaperMaster.bf == pending_item.bf,
+            models.PaperMaster.shade == pending_item.shade,
+            models.OrderItem.width_inches == pending_item.width_inches
+        ).first()
+
+        created_order_item = None
+        updated_order_item = None
+
+        if matching_order_item:
+            # Update existing order item
+            matching_order_item.quantity_rolls += quantity_to_transfer
+            matching_order_item.quantity_kg = models.OrderItem.calculate_quantity_kg(
+                float(matching_order_item.width_inches),
+                matching_order_item.quantity_rolls
+            )
+            matching_order_item.amount = float(matching_order_item.quantity_kg) * float(matching_order_item.rate)
+            matching_order_item.updated_at = datetime.utcnow()
+            updated_order_item = matching_order_item
+        else:
+            # Create new order item in target order
+            # Find paper master
+            paper_master = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == pending_item.gsm,
+                models.PaperMaster.bf == pending_item.bf,
+                models.PaperMaster.shade == pending_item.shade
+            ).first()
+
+            if not paper_master:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Paper specification not found in paper master")
+
+            # Calculate values for new order item
+            quantity_kg = models.OrderItem.calculate_quantity_kg(float(pending_item.width_inches), quantity_to_transfer)
+            default_rate = 100.0  # Default rate - should be configurable
+            amount = quantity_kg * default_rate
+
+            new_order_item = models.OrderItem(
+                frontend_id=FrontendIDGenerator.generate_frontend_id("order_item", db),
+                order_id=target_order_id,
+                paper_id=paper_master.id,
+                width_inches=pending_item.width_inches,
+                quantity_rolls=quantity_to_transfer,
+                quantity_kg=quantity_kg,
+                rate=default_rate,
+                amount=amount,
+                quantity_fulfilled=0,
+                quantity_in_pending=0,
+                item_status="created",
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+
+            db.add(new_order_item)
+            db.flush()
+            created_order_item = new_order_item
+
+        # Update pending order item
+        pending_item.quantity_pending -= quantity_to_transfer
+        pending_item.quantity_fulfilled = (pending_item.quantity_fulfilled or 0) + quantity_to_transfer
+
+        if pending_item.quantity_pending <= 0:
+            pending_item._status = "resolved"
+            pending_item.resolved_at = datetime.utcnow()
+
+        db.commit()
+
+        return {
+            "message": f"Successfully transferred {quantity_to_transfer} items from pending order to {target_order.frontend_id}",
+            "pending_order_item": pending_item,
+            "created_order_item": created_order_item,
+            "updated_order_item": updated_order_item,
+            "allocation_details": {
+                "quantity_transferred": quantity_to_transfer,
+                "remaining_pending": pending_item.quantity_pending,
+                "target_order_frontend_id": target_order.frontend_id,
+                "target_client": target_order.client.company_name if target_order.client else "Unknown"
+            }
+        }
+
+    def transfer_pending_order_between_orders(
+        self,
+        db: Session,
+        *,
+        item_id: UUID,
+        source_order_id: UUID,
+        target_order_id: UUID,
+        quantity_to_transfer: int,
+        created_by_id: UUID
+    ) -> Dict[str, Any]:
+        """Transfer pending order item from one order to another (quantity-wise)"""
+        # Note: This is more complex as it involves creating a new pending order for the target
+        # For simplicity, we'll implement this as: reduce from source, allocate to target
+
+        # Get pending order item
+        pending_item = self.get_pending_order_item_with_details(db=db, item_id=item_id)
+
+        # Verify the pending item is associated with the source order
+        if str(pending_item.original_order_id) != str(source_order_id):
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail="Pending order item is not associated with the specified source order"
+            )
+
+        # Use the allocate function to move to target order
+        result = self.allocate_pending_order_to_order(
+            db=db,
+            item_id=item_id,
+            target_order_id=target_order_id,
+            quantity_to_transfer=quantity_to_transfer,
+            created_by_id=created_by_id
+        )
+
+        # Update message for transfer context
+        result["message"] = f"Successfully transferred {quantity_to_transfer} items from {pending_item.original_order.frontend_id if pending_item.original_order else 'unknown'} to {result['allocation_details']['target_order_frontend_id']}"
+
+        return result
+
 
 # UNUSED FUNCTION - Replaced by inline manual cut processing in start_production_from_pending_orders_impl
 # This function was replaced to avoid database transaction conflicts and improve error handling
