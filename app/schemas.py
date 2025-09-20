@@ -899,8 +899,8 @@ class SelectedCutRoll(BaseModel):
     description: Optional[str] = Field(None, description="Description for manual cuts")
 
 class WastageData(BaseModel):
-    """Wastage data for tracking waste material (9-21 inches)"""
-    width_inches: float = Field(..., ge=9, le=21, description="Width of waste material in inches")
+    """Wastage data for tracking waste material"""
+    width_inches: float = Field(..., description="Width of waste material in inches")
     paper_id: str = Field(..., description="Paper master ID")
     gsm: int = Field(..., ge=50, le=500, description="Paper GSM")
     bf: float = Field(..., ge=10, le=50, description="Paper BF")

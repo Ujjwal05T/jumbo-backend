@@ -429,19 +429,14 @@ def get_warehouse_items(
             models.InventoryMaster.weight_kg > 0.1  # Real weight has been added
         )
         
-        # Filter by client_id or order_id if provided
-        if (client_id and client_id.strip() and client_id != "none") or (order_id and order_id.strip() and order_id != "none"):
-            # Join through plan relationships to get items for specific client/order
-            query = query.join(models.PlanInventoryLink, models.InventoryMaster.id == models.PlanInventoryLink.inventory_id)
-            query = query.join(models.PlanMaster, models.PlanInventoryLink.plan_id == models.PlanMaster.id)
-            query = query.join(models.PlanOrderLink, models.PlanMaster.id == models.PlanOrderLink.plan_id)
-            query = query.join(models.OrderMaster, models.PlanOrderLink.order_id == models.OrderMaster.id)
-            
-            if client_id and client_id.strip() and client_id != "none":
-                query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
-            
-            if order_id and order_id.strip() and order_id != "none":
-                query = query.filter(models.OrderMaster.id == uuid.UUID(order_id))
+        # Filter by client_id or order_id if provided using direct allocated_to_order_id
+        if client_id and client_id.strip() and client_id != "none":
+            # Join to OrderMaster through allocated_to_order_id to filter by client
+            query = query.join(models.OrderMaster, models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id)
+            query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
+        elif order_id and order_id.strip() and order_id != "none":
+            # Filter directly by allocated_to_order_id
+            query = query.filter(models.InventoryMaster.allocated_to_order_id == uuid.UUID(order_id))
         
         warehouse_items = query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
         

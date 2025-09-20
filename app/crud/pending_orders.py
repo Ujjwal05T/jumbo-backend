@@ -890,7 +890,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                     order_master = models.OrderMaster(
                         frontend_id=frontend_id,
                         client_id=UUID(client_id),
-                        status="created",
+                        status="in_process",
                         created_by_id=UUID(created_by_id),
                         created_at=datetime.utcnow(),
                         delivery_date=datetime.utcnow() + timedelta(days=7)  # Default 7 days
@@ -979,7 +979,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                     amount=total_amount,
                     quantity_fulfilled=0,
                     quantity_in_pending=0,  # Manual cuts don't go to pending
-                    item_status="created",
+                    item_status="in_process",
                     created_at=datetime.utcnow()
                 )
                 
@@ -1286,10 +1286,147 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     
     # WASTAGE PROCESSING: Handle any wastage (pending flow typically has minimal waste)
     logger.info("🗑️ WASTAGE PROCESSING: Processing potential wastage from pending production")
-    # Note: Pending suggestions typically don't have wastage data, but we maintain the structure
-    # for consistency with main production flow
-    # If wastage data was provided in the request, it would be processed here
-    logger.info("✅ WASTAGE COMPLETE: No wastage items to process for pending suggestions")
+    
+    # WASTAGE PROCESSING FOR PENDING ORDERS
+    # Create wastage from pending order source types
+    pending_order_wastage_data = []
+    logger.info(f"🗑️ PENDING ORDER WASTAGE: Processing wastage from pending orders")
+    
+    # Extract wastage information from selected_cut_rolls with pending_order source
+    for cut_roll in selected_cut_rolls_dict:
+        if cut_roll.get('source_type') == 'pending_order' and cut_roll.get('source_pending_id'):
+            # Extract wastage width from the cut roll data
+            # This could come from different fields depending on how data is structured
+            wastage_width = cut_roll.get('wastage_width') or cut_roll.get('leftover_width')
+            
+            # Create wastage for any valid width
+            if wastage_width:
+                pending_wastage_item = {
+                    "width_inches": float(wastage_width),
+                    "paper_id": cut_roll.get('paper_id'),
+                    "gsm": cut_roll.get('gsm'),
+                    "bf": cut_roll.get('bf'),
+                    "shade": cut_roll.get('shade'),
+                    "source_plan_id": str(db_plan.id),
+                    "source_jumbo_roll_id": cut_roll.get('jumbo_roll_id'),
+                    "individual_roll_number": cut_roll.get('individual_roll_number'),
+                    "notes": f"Wastage from pending order {cut_roll.get('source_pending_id')[:8]}",
+                    "source_pending_id": cut_roll.get('source_pending_id')
+                }
+                pending_order_wastage_data.append(pending_wastage_item)
+                logger.info(f"🗑️ PENDING ORDER WASTAGE: Found {wastage_width}\" potential wastage from pending order {cut_roll.get('source_pending_id')[:8]}")
+    
+    # Process pending order wastage
+    raw_wastage_data = request_data.wastage_data if hasattr(request_data, 'wastage_data') else []
+    
+    # Convert Pydantic objects to dicts for easier access (same as we do with cut_rolls)
+    wastage_data = [item.model_dump() if hasattr(item, 'model_dump') else dict(item) for item in raw_wastage_data]
+    logger.info(f"🗑️ WASTAGE: Converted {len(wastage_data)} wastage items to dictionaries")
+    
+    # Process pending order wastage and add to the regular wastage data
+    if pending_order_wastage_data:
+        # Extend the main wastage data with pending order wastage
+        wastage_data.extend(pending_order_wastage_data)
+        logger.info(f"🗑️ PENDING ORDER WASTAGE: Added {len(pending_order_wastage_data)} wastage items from pending orders to processing queue")
+    
+    # If there's wastage data without a source_plan_id, set it to the current plan
+    for item in wastage_data:
+        if not item.get('source_plan_id'):
+            item['source_plan_id'] = str(db_plan.id)
+            
+    logger.info(f"🗑️ WASTAGE PROCESSING: Total of {len(wastage_data)} wastage items (including {len(pending_order_wastage_data)} from pending orders)")
+    
+    # Process wastage data to create wastage inventory items
+    if wastage_data:
+        logger.info(f"🗑️ Creating {len(wastage_data)} wastage inventory items...")
+        
+        for i, wastage_item in enumerate(wastage_data):
+            try:
+                # Validate wastage width is positive
+                width = float(wastage_item.get("width_inches", 0))
+                if width <= 0:
+                    logger.warning(f"⚠️ WASTAGE SKIP: Item {i+1} width {width}\" is not positive")
+                    continue
+                
+                # Generate wastage IDs
+                wastage_barcode_id = BarcodeGenerator.generate_wastage_barcode(db)
+                
+                # Find paper record for wastage
+                paper_id = None
+                received_paper_id = wastage_item.get("paper_id")
+                
+                # Try to use provided paper_id first
+                if received_paper_id and received_paper_id.strip():
+                    try:
+                        paper_id = UUID(received_paper_id)
+                        paper_record = db.query(models.PaperMaster).filter(models.PaperMaster.id == paper_id).first()
+                        if not paper_record:
+                            paper_id = None
+                    except (ValueError, TypeError):
+                        paper_id = None
+                
+                # If no valid paper_id, find it by GSM/BF/Shade specifications
+                if not paper_id:
+                    gsm = wastage_item.get('gsm')
+                    bf = wastage_item.get('bf') 
+                    shade = wastage_item.get('shade')
+                    
+                    paper_record = db.query(models.PaperMaster).filter(
+                        models.PaperMaster.gsm == gsm,
+                        models.PaperMaster.bf == bf,
+                        models.PaperMaster.shade == shade
+                    ).first()
+                    
+                    if paper_record:
+                        paper_id = paper_record.id
+                    else:
+                        logger.error(f"❌ WASTAGE ERROR: No paper found for specs: GSM={gsm}, BF={bf}, Shade='{shade}'")
+                        continue
+                
+                # Find source plan and jumbo roll if provided
+                source_plan_id = None
+                source_jumbo_roll_id = None
+                
+                try:
+                    source_plan_id = UUID(wastage_item.get("source_plan_id"))
+                except (ValueError, TypeError):
+                    source_plan_id = db_plan.id
+                
+                if wastage_item.get("source_jumbo_roll_id"):
+                    try:
+                        source_jumbo_roll_id = UUID(wastage_item.get("source_jumbo_roll_id"))
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Create wastage inventory record
+                wastage_inventory = models.WastageInventory(
+                    width_inches=width,
+                    paper_id=paper_id,
+                    weight_kg=0.0,  # Will be set via QR scan later
+                    source_plan_id=source_plan_id,
+                    source_jumbo_roll_id=source_jumbo_roll_id,
+                    individual_roll_number=wastage_item.get("individual_roll_number"),
+                    status="available",  # Using string value since we don't have enum import
+                    location="WASTE_STORAGE",
+                    notes=wastage_item.get("notes"),
+                    created_by_id=UUID(created_by_id) if created_by_id else None,
+                    barcode_id=wastage_barcode_id,
+                    frontend_id=FrontendIDGenerator.generate_frontend_id("wastage_inventory", db)
+                )
+                
+                db.add(wastage_inventory)
+                db.flush()  # Get the ID and frontend_id
+                created_wastage.append(wastage_inventory)
+                
+                logger.info(f"🗑️ WASTAGE CREATED: {wastage_inventory.frontend_id} - {width}\" paper (Barcode: {wastage_barcode_id})")
+                
+            except Exception as e:
+                logger.error(f"❌ WASTAGE ERROR: Failed to create wastage item {i+1}: {e}")
+                continue
+        
+        logger.info(f"✅ WASTAGE COMPLETE: Created {len(created_wastage)} wastage inventory items")
+    else:
+        logger.info("✅ WASTAGE COMPLETE: No wastage items to process for pending suggestions")
     
     # PHASE 2 PENDING ORDERS: Create pending orders from unused suggestions (if any)
     logger.info("📋 PHASE 2: Processing unused suggestions for new pending orders")
