@@ -607,22 +607,27 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # ✅ NEW: Create cut_pattern array with same structure as regular orders
     cut_pattern = []
     for index, cut_roll in enumerate(updated_cut_rolls_dict):
-        # Get company name from pending order's original order
+        # Get company name - handle both pending orders and manual cuts
         company_name = 'Unknown Company'
-        
-        # Find pending order to get original order details
-        if cut_roll.get("source_pending_id"):
+
+        # Check if this is a manual cut first
+        if cut_roll.get("is_manual_cut") or cut_roll.get("source_type") == "manual_cut":
+            # Manual cut - get client name directly from frontend data
+            company_name = cut_roll.get("manual_cut_client_name", "Unknown Manual Client")
+            logger.info(f"✅ Manual cut company: {company_name} for manual cut {cut_roll.get('qr_code', 'unknown')}")
+        elif cut_roll.get("source_pending_id"):
+            # Regular pending order - resolve from pending order's original order
             try:
                 pending_order = db.query(models.PendingOrderItem).filter(
                     models.PendingOrderItem.id == UUID(cut_roll["source_pending_id"])
                 ).first()
-                
+
                 if pending_order and pending_order.original_order and pending_order.original_order.client:
                     company_name = pending_order.original_order.client.company_name
                     logger.info(f"✅ Found company: {company_name} for pending order {pending_order.frontend_id}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not resolve company for pending order {cut_roll.get('source_pending_id')}: {e}")
-        
+
         # Create cut_pattern entry with same structure as regular orders
         cut_pattern_entry = {
             "width": cut_roll.get("width_inches", 0),
@@ -633,9 +638,14 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             "source": "cutting",  # Standard source for cut rolls
             "order_id": cut_roll.get("order_id", cut_roll.get("source_pending_id")),  # Use order_id or fallback to pending_id
             "selected": True,  # All pending production rolls are selected by user
-            "source_type": "pending_order",  # Mark as coming from pending orders
+            "source_type": cut_roll.get("source_type", "pending_order"),  # Use actual source_type from frontend
             "source_pending_id": cut_roll.get("source_pending_id"),
-            "company_name": company_name
+            "company_name": company_name,
+            # Add manual cut specific fields if present
+            "is_manual_cut": cut_roll.get("is_manual_cut", False),
+            "manual_cut_client_id": cut_roll.get("manual_cut_client_id"),
+            "manual_cut_client_name": cut_roll.get("manual_cut_client_name"),
+            "description": cut_roll.get("description")
         }
         
         cut_pattern.append(cut_pattern_entry)
