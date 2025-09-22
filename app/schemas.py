@@ -979,6 +979,7 @@ class WastageInventoryCreate(BaseModel):
 
     # Optional fields
     weight_kg: Optional[float] = Field(default=0.0, ge=0, description="Weight in kg (can be set later via QR scan)")
+    reel_no: Optional[str] = Field(None, max_length=50, description="Optional reel number for identification")
     status: Optional[str] = Field(default="available", description="Status: available, used, damaged")
     location: Optional[str] = Field(default="WASTE_STORAGE", description="Storage location")
     notes: Optional[str] = Field(None, max_length=500, description="Additional notes for manual identification")
@@ -998,6 +999,7 @@ class WastageInventory(BaseModel):
     width_inches: float = Field(..., description="Width of waste material in inches")
     paper_id: UUID = Field(..., description="Paper master ID")
     weight_kg: float = Field(default=0.0, description="Weight in kg")
+    reel_no: Optional[str] = Field(None, description="Optional reel number for identification")
 
     # Source information
     source_plan_id: Optional[UUID] = Field(None, description="Source plan ID")

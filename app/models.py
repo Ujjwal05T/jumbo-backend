@@ -640,6 +640,7 @@ class WastageInventory(Base):
     width_inches = Column(Numeric(6, 2), nullable=False)  # Width of the waste material
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     weight_kg = Column(Numeric(8, 2), default=0.0)  # Weight will be set via QR scan
+    reel_no = Column(String(50), nullable=True, index=True)  # Optional reel number for identification
     
     # Source information
     source_plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=True, index=True)

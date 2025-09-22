@@ -205,6 +205,7 @@ def create_manual_wastage(
             width_inches=wastage_data.width_inches,
             paper_id=wastage_data.paper_id,
             weight_kg=wastage_data.weight_kg or 0.0,
+            reel_no=wastage_data.reel_no,
             source_plan_id=wastage_data.source_plan_id,
             source_jumbo_roll_id=wastage_data.source_jumbo_roll_id,
             individual_roll_number=wastage_data.individual_roll_number,

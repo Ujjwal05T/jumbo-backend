@@ -1306,7 +1306,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     width_inches=wastage_roll.width_inches,
                     weight_kg=wastage_roll.weight_kg,
                     roll_type="cut",
-                    status="allocated",
+                    status="available",
                     allocated_to_order_id=order_id,
                     is_wastage_roll=True,  # Mark as wastage roll
                     wastage_source_order_id=order_id,  # Link to order that will use this wastage
