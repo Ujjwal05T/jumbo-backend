@@ -4,6 +4,7 @@ from sqlalchemy import func, desc, and_, or_, text, case
 from typing import Dict, List, Any, Optional
 import logging
 import uuid
+import json
 from datetime import datetime, timedelta
 
 from .base import get_db
@@ -1714,4 +1715,657 @@ def get_order_with_dispatch_info(
         raise
     except Exception as e:
         logger.error(f"Error getting order with dispatch info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ORDER ITEM TRACKING AND MISMATCH DETECTION SYSTEM
+# ============================================================================
+
+@router.get("/reports/order-tracking/{order_frontend_id}", tags=["Order Tracking"])
+def get_order_item_tracking(
+    order_frontend_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get comprehensive tracking information for all order items including:
+    - Inventory allocations and locations
+    - Production assignments
+    - Dispatch records
+    - Potential mismatches based on GSM, BF, Shade, Client patterns
+    """
+    try:
+        # Get the order
+        order = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client),
+            joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+        ).filter(models.OrderMaster.frontend_id == order_frontend_id).first()
+
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_frontend_id} not found")
+
+        # Build comprehensive tracking data
+        tracking_data = {
+            "order_info": {
+                "id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "client_name": order.client.company_name if order.client else "Unknown",
+                "status": order.status,
+                "created_at": order.created_at.isoformat(),
+                "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None
+            },
+            "order_items": [],
+            "potential_mismatches": [],
+            "summary": {}
+        }
+
+        total_mismatches = 0
+        total_allocated_inventory = 0
+
+        # Process each order item
+        for item in order.order_items:
+            item_data = {
+                "id": str(item.id),
+                "frontend_id": item.frontend_id,
+                "paper_specs": {
+                    "name": item.paper.name if item.paper else "Unknown",
+                    "gsm": item.paper.gsm if item.paper else None,
+                    "bf": float(item.paper.bf) if item.paper and item.paper.bf else None,
+                    "shade": item.paper.shade if item.paper else None,
+                    "type": item.paper.type if item.paper else None
+                },
+                "width_inches": float(item.width_inches),
+                "quantity_ordered": item.quantity_rolls,
+                "quantity_fulfilled": item.quantity_fulfilled,
+                "quantity_pending": item.quantity_in_pending,
+                "item_status": item.item_status,
+                "allocated_inventory": [],
+                "production_assignments": [],
+                "dispatch_records": [],
+                "potential_issues": []
+            }
+
+            # Get allocated inventory for this order item
+            allocated_inventory = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper)
+            ).filter(
+                models.InventoryMaster.allocated_to_order_id == order.id,
+                models.InventoryMaster.width_inches == item.width_inches
+            ).all()
+
+            for inv in allocated_inventory:
+                inv_data = {
+                    "id": str(inv.id),
+                    "frontend_id": inv.frontend_id,
+                    "paper_specs": {
+                        "name": inv.paper.name if inv.paper else "Unknown",
+                        "gsm": inv.paper.gsm if inv.paper else None,
+                        "bf": float(inv.paper.bf) if inv.paper and inv.paper.bf else None,
+                        "shade": inv.paper.shade if inv.paper else None,
+                        "type": inv.paper.type if inv.paper else None
+                    },
+                    "width_inches": float(inv.width_inches),
+                    "weight_kg": float(inv.weight_kg) if inv.weight_kg else 0,
+                    "status": inv.status,
+                    "location": inv.location,
+                    "roll_type": inv.roll_type,
+                    "production_date": inv.production_date.isoformat() if inv.production_date else None,
+                    "is_paper_match": True,
+                    "is_width_match": True,
+                    "mismatch_reasons": []
+                }
+
+                # Check for paper specification mismatches
+                if item.paper and inv.paper:
+                    if item.paper.gsm != inv.paper.gsm:
+                        inv_data["is_paper_match"] = False
+                        inv_data["mismatch_reasons"].append(f"GSM mismatch: Expected {item.paper.gsm}, Got {inv.paper.gsm}")
+
+                    if item.paper.bf != inv.paper.bf:
+                        inv_data["is_paper_match"] = False
+                        inv_data["mismatch_reasons"].append(f"BF mismatch: Expected {item.paper.bf}, Got {inv.paper.bf}")
+
+                    if item.paper.shade != inv.paper.shade:
+                        inv_data["is_paper_match"] = False
+                        inv_data["mismatch_reasons"].append(f"Shade mismatch: Expected {item.paper.shade}, Got {inv.paper.shade}")
+
+                # Check for width mismatches
+                width_tolerance = 0.1  # 0.1 inch tolerance
+                if abs(float(item.width_inches) - float(inv.width_inches)) > width_tolerance:
+                    inv_data["is_width_match"] = False
+                    inv_data["mismatch_reasons"].append(f"Width mismatch: Expected {item.width_inches}\", Got {inv.width_inches}\"")
+
+                if inv_data["mismatch_reasons"]:
+                    item_data["potential_issues"].extend(inv_data["mismatch_reasons"])
+
+                item_data["allocated_inventory"].append(inv_data)
+                total_allocated_inventory += 1
+
+            # Get production assignments through pending orders
+            production_assignments = db.query(models.PendingOrderItem).options(
+                joinedload(models.PendingOrderItem.production_order)
+            ).filter(
+                models.PendingOrderItem.original_order_id == order.id,
+                models.PendingOrderItem.width_inches == item.width_inches
+            ).all()
+
+            for pending in production_assignments:
+                prod_data = {
+                    "id": str(pending.id),
+                    "frontend_id": pending.frontend_id,
+                    "production_order_id": str(pending.production_order_id) if pending.production_order_id else None,
+                    "production_order_frontend_id": pending.production_order.frontend_id if pending.production_order else None,
+                    "status": pending.status,
+                    "quantity_pending": pending.quantity_pending,
+                    "quantity_fulfilled": pending.quantity_fulfilled,
+                    "reason": pending.reason,
+                    "created_at": pending.created_at.isoformat(),
+                    "paper_specs": {
+                        "gsm": pending.gsm,
+                        "bf": float(pending.bf),
+                        "shade": pending.shade
+                    },
+                    "width_inches": float(pending.width_inches),
+                    "mismatch_reasons": []
+                }
+
+                # Check for specification mismatches in production assignments
+                if item.paper:
+                    if item.paper.gsm != pending.gsm:
+                        prod_data["mismatch_reasons"].append(f"GSM mismatch: Expected {item.paper.gsm}, Got {pending.gsm}")
+
+                    if item.paper.bf != pending.bf:
+                        prod_data["mismatch_reasons"].append(f"BF mismatch: Expected {item.paper.bf}, Got {pending.bf}")
+
+                    if item.paper.shade != pending.shade:
+                        prod_data["mismatch_reasons"].append(f"Shade mismatch: Expected {item.paper.shade}, Got {pending.shade}")
+
+                if prod_data["mismatch_reasons"]:
+                    item_data["potential_issues"].extend(prod_data["mismatch_reasons"])
+
+                item_data["production_assignments"].append(prod_data)
+
+            # Get dispatch records for this order item's inventory
+            if item_data["allocated_inventory"]:
+                inventory_ids = [inv["id"] for inv in item_data["allocated_inventory"]]
+                dispatch_items = db.query(models.DispatchItem).options(
+                    joinedload(models.DispatchItem.dispatch_record),
+                    joinedload(models.DispatchItem.inventory)
+                ).filter(
+                    models.DispatchItem.inventory_id.in_([uuid.UUID(inv_id) for inv_id in inventory_ids])
+                ).all()
+
+                for dispatch_item in dispatch_items:
+                    dispatch_data = {
+                        "id": str(dispatch_item.id),
+                        "dispatch_record_id": str(dispatch_item.dispatch_record_id),
+                        "dispatch_frontend_id": dispatch_item.dispatch_record.frontend_id if dispatch_item.dispatch_record else None,
+                        "inventory_id": str(dispatch_item.inventory_id),
+                        "inventory_frontend_id": dispatch_item.inventory.frontend_id if dispatch_item.inventory else None,
+                        "quantity_dispatched": dispatch_item.quantity_dispatched,
+                        "weight_kg": float(dispatch_item.weight_kg) if dispatch_item.weight_kg else 0,
+                        "dispatch_date": dispatch_item.dispatch_record.dispatch_date.isoformat() if dispatch_item.dispatch_record and dispatch_item.dispatch_record.dispatch_date else None,
+                        "vehicle_number": dispatch_item.dispatch_record.vehicle_number if dispatch_item.dispatch_record else None,
+                        "status": dispatch_item.dispatch_record.status if dispatch_item.dispatch_record else None
+                    }
+                    item_data["dispatch_records"].append(dispatch_data)
+
+            # Count mismatches for this item
+            if item_data["potential_issues"]:
+                total_mismatches += len(item_data["potential_issues"])
+
+            tracking_data["order_items"].append(item_data)
+
+        # Detect broader potential mismatches across the system
+        # Look for inventory allocated to other orders with same specifications
+        if order.client and tracking_data["order_items"]:
+            similar_allocations = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper),
+                joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+            ).join(
+                models.OrderMaster, models.OrderMaster.id == models.InventoryMaster.allocated_to_order_id
+            ).join(
+                models.ClientMaster, models.ClientMaster.id == models.OrderMaster.client_id
+            ).filter(
+                models.OrderMaster.id != order.id,  # Exclude current order
+                models.ClientMaster.company_name == order.client.company_name
+            ).all()
+
+            for similar_inv in similar_allocations[:10]:  # Limit to first 10 for performance
+                current_order_papers = [item.paper for item in order.order_items if item.paper]
+                for order_paper in current_order_papers:
+                    if (similar_inv.paper and
+                        similar_inv.paper.gsm == order_paper.gsm and
+                        similar_inv.paper.bf == order_paper.bf and
+                        similar_inv.paper.shade == order_paper.shade):
+
+                        potential_mismatch = {
+                            "type": "potential_cross_order_mismatch",
+                            "description": f"Inventory {similar_inv.frontend_id} with matching specs allocated to different order",
+                            "inventory_id": str(similar_inv.id),
+                            "inventory_frontend_id": similar_inv.frontend_id,
+                            "allocated_to_order": similar_inv.allocated_order.frontend_id if similar_inv.allocated_order else None,
+                            "allocated_to_client": similar_inv.allocated_order.client.company_name if similar_inv.allocated_order and similar_inv.allocated_order.client else None,
+                            "paper_specs": {
+                                "gsm": similar_inv.paper.gsm,
+                                "bf": float(similar_inv.paper.bf) if similar_inv.paper.bf else None,
+                                "shade": similar_inv.paper.shade
+                            },
+                            "width_inches": float(similar_inv.width_inches),
+                            "weight_kg": float(similar_inv.weight_kg) if similar_inv.weight_kg else 0
+                        }
+                        tracking_data["potential_mismatches"].append(potential_mismatch)
+
+        # Summary statistics
+        tracking_data["summary"] = {
+            "total_order_items": len(tracking_data["order_items"]),
+            "total_allocated_inventory": total_allocated_inventory,
+            "total_potential_issues": total_mismatches,
+            "total_cross_order_matches": len(tracking_data["potential_mismatches"]),
+            "items_with_issues": len([item for item in tracking_data["order_items"] if item["potential_issues"]]),
+            "health_status": "CRITICAL" if total_mismatches > 5 else "WARNING" if total_mismatches > 0 else "HEALTHY"
+        }
+
+        return {
+            "status": "success",
+            "data": tracking_data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in order item tracking: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/reports/order-tracking/fix-allocation", tags=["Order Tracking"])
+def fix_inventory_allocation(
+    correction_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Fix inventory allocation mismatches.
+    Expected format:
+    {
+        "inventory_id": "uuid",
+        "new_order_id": "frontend_id",
+        "reason": "description of fix"
+    }
+    """
+    try:
+        inventory_id = correction_data.get("inventory_id")
+        new_order_frontend_id = correction_data.get("new_order_id")
+        reason = correction_data.get("reason", "Manual correction")
+
+        if not inventory_id or not new_order_frontend_id:
+            raise HTTPException(status_code=400, detail="inventory_id and new_order_id are required")
+
+        # Get the inventory item
+        inventory = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.id == uuid.UUID(inventory_id)
+        ).first()
+
+        if not inventory:
+            raise HTTPException(status_code=404, detail="Inventory item not found")
+
+        # Get the new order
+        new_order = db.query(models.OrderMaster).filter(
+            models.OrderMaster.frontend_id == new_order_frontend_id
+        ).first()
+
+        if not new_order:
+            raise HTTPException(status_code=404, detail="Target order not found")
+
+        # Store old allocation for logging
+        old_order_id = inventory.allocated_to_order_id
+        old_order = None
+        if old_order_id:
+            old_order = db.query(models.OrderMaster).filter(
+                models.OrderMaster.id == old_order_id
+            ).first()
+
+        # Update the allocation
+        inventory.allocated_to_order_id = new_order.id
+        inventory.updated_at = datetime.utcnow()
+
+        # Log the change
+        logger.info(f"Inventory allocation fixed: {inventory.frontend_id} moved from order {old_order.frontend_id if old_order else 'None'} to {new_order.frontend_id}. Reason: {reason}")
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": f"Inventory {inventory.frontend_id} successfully reallocated to order {new_order.frontend_id}",
+            "old_allocation": old_order.frontend_id if old_order else None,
+            "new_allocation": new_order.frontend_id,
+            "reason": reason
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fixing inventory allocation: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/reports/order-tracking/batch-fix", tags=["Order Tracking"])
+def batch_fix_allocations(
+    batch_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Fix multiple inventory allocations in batch.
+    Expected format:
+    {
+        "corrections": [
+            {
+                "inventory_id": "uuid",
+                "new_order_id": "frontend_id",
+                "reason": "description"
+            }
+        ]
+    }
+    """
+    try:
+        corrections = batch_data.get("corrections", [])
+        if not corrections:
+            raise HTTPException(status_code=400, detail="No corrections provided")
+
+        results = []
+        errors = []
+
+        for correction in corrections:
+            try:
+                # Use the single fix function for each correction
+                result = fix_inventory_allocation(correction, db)
+                results.append({
+                    "inventory_id": correction.get("inventory_id"),
+                    "status": "success",
+                    "result": result
+                })
+            except Exception as e:
+                errors.append({
+                    "inventory_id": correction.get("inventory_id"),
+                    "status": "error",
+                    "error": str(e)
+                })
+
+        return {
+            "status": "batch_complete",
+            "total_corrections": len(corrections),
+            "successful": len(results),
+            "failed": len(errors),
+            "results": results,
+            "errors": errors
+        }
+
+    except Exception as e:
+        logger.error(f"Error in batch fix: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/order-tracking/system-health", tags=["Order Tracking"])
+def get_system_allocation_health(
+    limit: int = Query(100, description="Limit number of issues returned"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get overall system health for inventory allocations and detect widespread mismatches.
+    """
+    try:
+        health_data = {
+            "overall_status": "HEALTHY",
+            "total_issues": 0,
+            "issue_categories": {
+                "specification_mismatches": 0,
+                "missing_allocations": 0,
+                "duplicate_allocations": 0,
+                "cross_client_issues": 0
+            },
+            "critical_issues": [],
+            "recommendations": []
+        }
+
+        # Check for specification mismatches
+        mismatched_allocations = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+        ).filter(
+            models.InventoryMaster.allocated_to_order_id.isnot(None)
+        ).limit(limit).all()
+
+        for inv in mismatched_allocations:
+            if inv.allocated_order and inv.allocated_order.order_items and inv.paper:
+                for order_item in inv.allocated_order.order_items:
+                    if (order_item.paper and
+                        abs(float(order_item.width_inches) - float(inv.width_inches)) <= 0.1):  # Same width
+
+                        mismatches = []
+                        if order_item.paper.gsm != inv.paper.gsm:
+                            mismatches.append(f"GSM: {order_item.paper.gsm} vs {inv.paper.gsm}")
+                        if order_item.paper.bf != inv.paper.bf:
+                            mismatches.append(f"BF: {order_item.paper.bf} vs {inv.paper.bf}")
+                        if order_item.paper.shade != inv.paper.shade:
+                            mismatches.append(f"Shade: {order_item.paper.shade} vs {inv.paper.shade}")
+
+                        if mismatches:
+                            health_data["issue_categories"]["specification_mismatches"] += 1
+                            health_data["critical_issues"].append({
+                                "type": "specification_mismatch",
+                                "inventory_id": str(inv.id),
+                                "inventory_frontend_id": inv.frontend_id,
+                                "order_id": inv.allocated_order.frontend_id,
+                                "mismatches": mismatches,
+                                "severity": "HIGH" if len(mismatches) > 1 else "MEDIUM"
+                            })
+
+        # Check for unallocated inventory that should be allocated
+        unallocated_inventory = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.allocated_to_order_id.is_(None),
+            models.InventoryMaster.status.in_(["available", "in_warehouse"])
+        ).count()
+
+        if unallocated_inventory > 0:
+            health_data["issue_categories"]["missing_allocations"] = unallocated_inventory
+            health_data["recommendations"].append(f"Review {unallocated_inventory} unallocated inventory items")
+
+        # Calculate overall health
+        total_issues = sum(health_data["issue_categories"].values())
+        health_data["total_issues"] = total_issues
+
+        if total_issues > 50:
+            health_data["overall_status"] = "CRITICAL"
+        elif total_issues > 10:
+            health_data["overall_status"] = "WARNING"
+        else:
+            health_data["overall_status"] = "HEALTHY"
+
+        # Add summary recommendations
+        if health_data["issue_categories"]["specification_mismatches"] > 0:
+            health_data["recommendations"].append("Run specification mismatch corrections")
+
+        if total_issues == 0:
+            health_data["recommendations"].append("System allocation health is optimal")
+
+        return {
+            "status": "success",
+            "data": health_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error checking system health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# CLIENT ORDERS WITH PLANS - New Feature
+# ============================================================================
+
+@router.get("/reports/client-orders-with-plans", tags=["Client Orders with Plans"])
+def get_client_orders_with_plans(
+    client_id: str = Query(..., description="Client ID to filter orders"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get orders for a specific client within a date range, including the plans where these orders were used.
+    Shows the relationship between orders and production plans.
+    """
+    try:
+        import uuid
+
+        # Validate client_id
+        try:
+            client_uuid = uuid.UUID(client_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid client ID format")
+
+        # Verify client exists
+        client = db.query(models.ClientMaster).filter(models.ClientMaster.id == client_uuid).first()
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        # Build base query for orders
+        query = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client),
+            joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper),
+            joinedload(models.OrderMaster.plan_orders).joinedload(models.PlanOrderLink.plan)
+        ).filter(models.OrderMaster.client_id == client_uuid)
+
+        # Apply date filters
+        if start_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date)
+                query = query.filter(models.OrderMaster.created_at >= start_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
+
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date + " 23:59:59")
+                query = query.filter(models.OrderMaster.created_at <= end_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+
+        # Get orders
+        orders = query.order_by(models.OrderMaster.created_at.desc()).all()
+
+        orders_data = []
+        for order in orders:
+            # Calculate order metrics
+            total_ordered = sum(item.quantity_rolls for item in order.order_items)
+            total_fulfilled = sum(item.quantity_fulfilled for item in order.order_items)
+            total_value = sum(item.amount for item in order.order_items)
+            fulfillment_percentage = (total_fulfilled / max(total_ordered, 1)) * 100
+
+            # Get associated plans
+            plans_data = []
+            for plan_link in order.plan_orders:
+                if plan_link.plan:
+                    plan = plan_link.plan
+                    # Handle JSON parsing safely
+                    try:
+                        cut_pattern = json.loads(plan.cut_pattern) if plan.cut_pattern else []
+                    except (json.JSONDecodeError, TypeError):
+                        cut_pattern = plan.cut_pattern if plan.cut_pattern else []
+
+                    try:
+                        wastage_allocations = json.loads(plan.wastage_allocations) if plan.wastage_allocations else []
+                    except (json.JSONDecodeError, TypeError):
+                        wastage_allocations = plan.wastage_allocations if plan.wastage_allocations else []
+
+                    plans_data.append({
+                        "plan_id": str(plan.id),
+                        "plan_frontend_id": plan.frontend_id,
+                        "name": plan.name,
+                        "plan_status": plan.status,  # Correct field name
+                        "created_at": plan.created_at.isoformat(),
+                        "executed_at": plan.executed_at.isoformat() if plan.executed_at else None,
+                        "completed_at": plan.completed_at.isoformat() if plan.completed_at else None,
+                        "expected_waste_percentage": float(plan.expected_waste_percentage) if plan.expected_waste_percentage else 0,
+                        "actual_waste_percentage": float(plan.actual_waste_percentage) if plan.actual_waste_percentage else None,
+                        "cut_pattern": cut_pattern,
+                        "wastage_allocations": wastage_allocations
+                    })
+
+            # Check if overdue
+            is_overdue = False
+            if order.delivery_date and order.status != 'completed':
+                is_overdue = order.delivery_date < datetime.utcnow()
+
+            order_data = {
+                "order_id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "status": order.status,
+                "priority": order.priority,
+                "payment_type": order.payment_type,
+                "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+                "created_at": order.created_at.isoformat(),
+                "is_overdue": is_overdue,
+                "total_items": len(order.order_items),
+                "total_quantity_ordered": total_ordered,
+                "total_quantity_fulfilled": total_fulfilled,
+                "fulfillment_percentage": round(fulfillment_percentage, 2),
+                "total_value": float(total_value),
+                "order_items": [
+                    {
+                        "id": str(item.id),
+                        "paper": {
+                            "name": item.paper.name if item.paper else "Unknown",
+                            "gsm": item.paper.gsm if item.paper else 0,
+                            "bf": float(item.paper.bf) if item.paper and item.paper.bf else 0,
+                            "shade": item.paper.shade if item.paper else "Unknown"
+                        },
+                        "width_inches": float(item.width_inches),
+                        "quantity_rolls": item.quantity_rolls,
+                        "quantity_kg": float(item.quantity_kg),
+                        "rate": float(item.rate),
+                        "amount": float(item.amount),
+                        "quantity_fulfilled": item.quantity_fulfilled,
+                        "item_status": item.item_status
+                    }
+                    for item in order.order_items
+                ],
+                "associated_plans": plans_data,
+                "total_plans": len(plans_data)
+            }
+
+            orders_data.append(order_data)
+
+        # Calculate summary
+        total_orders = len(orders_data)
+        total_value = sum(order["total_value"] for order in orders_data)
+        total_quantity = sum(order["total_quantity_ordered"] for order in orders_data)
+        completed_orders = sum(1 for order in orders_data if order["status"] == "completed")
+        orders_with_plans = sum(1 for order in orders_data if order["total_plans"] > 0)
+
+        return {
+            "status": "success",
+            "client_info": {
+                "id": str(client.id),
+                "company_name": client.company_name,
+                "contact_person": client.contact_person,
+                "phone": client.phone,
+                "gst_number": client.gst_number
+            },
+            "data": orders_data,
+            "summary": {
+                "total_orders": total_orders,
+                "total_value": total_value,
+                "total_quantity_ordered": total_quantity,
+                "completed_orders": completed_orders,
+                "pending_orders": total_orders - completed_orders,
+                "completion_rate": round((completed_orders / max(total_orders, 1)) * 100, 2),
+                "orders_with_plans": orders_with_plans,
+                "orders_without_plans": total_orders - orders_with_plans,
+                "plan_coverage_rate": round((orders_with_plans / max(total_orders, 1)) * 100, 2)
+            },
+            "filters_applied": {
+                "client_id": client_id,
+                "start_date": start_date,
+                "end_date": end_date
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in client orders with plans: {e}")
         raise HTTPException(status_code=500, detail=str(e))

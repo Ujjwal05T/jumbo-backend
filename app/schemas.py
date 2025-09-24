@@ -255,6 +255,8 @@ class InwardChallan(InwardChallanBase):
 # Outward Challan Schemas
 class OutwardChallanBase(BaseModel):
     vehicle_number: Optional[str] = Field(None, max_length=50)
+    driver_name: Optional[str] = Field(None, max_length=255)
+    rst_no: Optional[str] = Field(None, max_length=50)
     purpose: Optional[str] = Field(None, max_length=255)
     time_in: Optional[str] = None
     time_out: Optional[str] = None
@@ -268,6 +270,8 @@ class OutwardChallanCreate(OutwardChallanBase):
 
 class OutwardChallanUpdate(BaseModel):
     vehicle_number: Optional[str] = Field(None, max_length=50)
+    driver_name: Optional[str] = Field(None, max_length=255)
+    rst_no: Optional[str] = Field(None, max_length=50)
     purpose: Optional[str] = Field(None, max_length=255)
     time_in: Optional[str] = None
     time_out: Optional[str] = None

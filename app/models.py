@@ -709,10 +709,12 @@ class InwardChallan(Base):
 
 class OutwardChallan(Base):
     __tablename__ = "outward_challan"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     vehicle_number = Column(String(50), nullable=True)
+    driver_name = Column(String(255), nullable=True)
+    rst_no = Column(String(50), nullable=True)
     purpose = Column(String(255), nullable=True)
     time_in = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
     time_out = Column(String(8), nullable=True)  # Format: "HH:MM:SS"
