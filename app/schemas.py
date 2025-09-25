@@ -216,6 +216,7 @@ class InwardChallanBase(BaseModel):
     vehicle_number: Optional[str] = Field(None, max_length=50)
     material_id: UUID
     slip_no: Optional[str] = Field(None, max_length=50)
+    rst_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
     report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
     net_weight: Optional[float] = Field(None, ge=0)
@@ -234,6 +235,7 @@ class InwardChallanUpdate(BaseModel):
     vehicle_number: Optional[str] = Field(None, max_length=50)
     material_id: Optional[UUID] = None
     slip_no: Optional[str] = Field(None, max_length=50)
+    rst_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
     report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
     net_weight: Optional[float] = Field(None, ge=0)
@@ -246,6 +248,7 @@ class InwardChallanUpdate(BaseModel):
 
 class InwardChallan(InwardChallanBase):
     id: UUID
+    serial_no: Optional[str] = Field(None, description="Auto-generated serial number in format 00001")
     date: datetime
     created_at: datetime
 
@@ -282,6 +285,7 @@ class OutwardChallanUpdate(BaseModel):
 
 class OutwardChallan(OutwardChallanBase):
     id: UUID
+    serial_no: Optional[str] = Field(None, description="Auto-generated serial number in format 00001")
     date: datetime
     created_at: datetime
 

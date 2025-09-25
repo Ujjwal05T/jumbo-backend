@@ -96,6 +96,18 @@ class FrontendIDGenerator:
             "prefix": "PDR",
             "sequence_name": "past_dispatch_record_seq",
             "description": "Past Dispatch Record IDs (PDR-00001, PDR-00002, etc.)"
+        },
+        "inward_challan": {
+            "prefix": "",
+            "sequence_name": "inward_challan_serial_seq",
+            "description": "Inward Challan Serial Numbers (00001, 00002, etc.)",
+            "serial_only": True
+        },
+        "outward_challan": {
+            "prefix": "",
+            "sequence_name": "outward_challan_serial_seq",
+            "description": "Outward Challan Serial Numbers (00001, 00002, etc.)",
+            "serial_only": True
         }
     }
     
@@ -125,10 +137,15 @@ class FrontendIDGenerator:
             # Get next value from sequence - this is atomic and thread-safe
             query = text(f"SELECT NEXT VALUE FOR {sequence_name}")
             counter = db.execute(query).scalar()
-            
-            # Format the ID with exactly 5 digits
-            generated_id = f"{prefix}-{counter:05d}"
-            
+
+            # Handle serial-only format for challan tables
+            if config.get("serial_only", False):
+                # Just the 5-digit number without prefix
+                generated_id = f"{counter:05d}"
+            else:
+                # Format the ID with exactly 5 digits and prefix
+                generated_id = f"{prefix}-{counter:05d}"
+
             logger.debug(f"Generated ID for {table_name}: {generated_id} (sequence: {sequence_name}, counter: {counter})")
             return generated_id
             
@@ -152,34 +169,43 @@ class FrontendIDGenerator:
     def validate_frontend_id(cls, table_name: str, frontend_id: str) -> bool:
         """
         Validate if a frontend ID matches the expected pattern for a table.
-        
+
         Args:
             table_name: The database table name
             frontend_id: The frontend ID to validate
-            
+
         Returns:
             True if valid, False otherwise
         """
         if table_name not in cls.ID_PATTERNS:
             return False
-        
+
         config = cls.ID_PATTERNS[table_name]
         prefix = config["prefix"]
-        
-        # All IDs now use format: PREFIX-NNNNN (exactly 5 digits)
-        if not frontend_id.startswith(f"{prefix}-"):
-            return False
-        
-        parts = frontend_id.split("-")
-        if len(parts) != 2:
-            return False
-        
-        try:
-            counter = int(parts[1])
-            # Check if it's exactly 5 digits and positive
-            return len(parts[1]) == 5 and counter > 0
-        except ValueError:
-            return False
+
+        # Handle serial-only format for challan tables
+        if config.get("serial_only", False):
+            # Should be exactly 5 digits only
+            try:
+                counter = int(frontend_id)
+                return len(frontend_id) == 5 and counter > 0
+            except ValueError:
+                return False
+        else:
+            # Standard format: PREFIX-NNNNN (exactly 5 digits)
+            if not frontend_id.startswith(f"{prefix}-"):
+                return False
+
+            parts = frontend_id.split("-")
+            if len(parts) != 2:
+                return False
+
+            try:
+                counter = int(parts[1])
+                # Check if it's exactly 5 digits and positive
+                return len(parts[1]) == 5 and counter > 0
+            except ValueError:
+                return False
     
     @classmethod
     def get_sequence_status(cls, db: Session) -> Dict[str, Dict]:

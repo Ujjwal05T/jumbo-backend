@@ -420,28 +420,44 @@ def get_warehouse_items(
         import uuid
         
         # Base query for inventory items (cut rolls) with status "available" and weight > 0.1
-        query = db.query(models.InventoryMaster).options(
+        # Include order and client data in the SELECT to avoid N+1 queries
+        query = db.query(
+            models.InventoryMaster,
+            models.OrderMaster.frontend_id.label('order_frontend_id'),
+            models.ClientMaster.company_name.label('client_company_name')
+        ).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.created_by)
+        ).outerjoin(
+            models.OrderMaster,
+            models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id
+        ).outerjoin(
+            models.ClientMaster,
+            models.OrderMaster.client_id == models.ClientMaster.id
         ).filter(
             models.InventoryMaster.roll_type == "cut",
             models.InventoryMaster.status == "available",
             models.InventoryMaster.weight_kg > 0.1  # Real weight has been added
         )
         
-        # Filter by client_id or order_id if provided using direct allocated_to_order_id
+        # Filter by client_id or order_id if provided
         if client_id and client_id.strip() and client_id != "none":
-            # Join to OrderMaster through allocated_to_order_id to filter by client
-            query = query.join(models.OrderMaster, models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id)
-            query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
+            query = query.filter(models.ClientMaster.id == uuid.UUID(client_id))
         elif order_id and order_id.strip() and order_id != "none":
-            # Filter directly by allocated_to_order_id
-            query = query.filter(models.InventoryMaster.allocated_to_order_id == uuid.UUID(order_id))
-        
-        warehouse_items = query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
+            query = query.filter(models.OrderMaster.id == uuid.UUID(order_id))
+
+        # Execute query and get results (now returns tuples)
+        query_results = query.order_by(models.InventoryMaster.created_at.desc()).offset(skip).limit(limit).all()
         
         items_data = []
-        for item in warehouse_items:
+        for result in query_results:
+            # Unpack the tuple: (InventoryMaster, order_frontend_id, client_company_name)
+            item, order_frontend_id, client_company_name = result
+
+            # Use the joined data directly
+            client_name = client_company_name if client_company_name else "N/A"
+            order_id = order_frontend_id if order_frontend_id else (str(item.allocated_to_order_id)[:8] + "..." if item.allocated_to_order_id else "N/A")
+
             items_data.append({
                 "inventory_id": str(item.id),
                 "qr_code": item.qr_code,
@@ -453,7 +469,11 @@ def get_warehouse_items(
                 "status": item.status,
                 "production_date": item.production_date.isoformat(),
                 "created_by": item.created_by.name if item.created_by else "Unknown",
-                "created_at": item.created_at.isoformat()
+                "created_at": item.created_at.isoformat(),
+                "client_name": client_name,
+                "order_id": order_id,
+                "allocated_to_order_id": str(item.allocated_to_order_id) if item.allocated_to_order_id else None,
+                "is_wastage_roll": getattr(item, 'is_wastage_roll', False)
             })
         
         # Update filter criteria description

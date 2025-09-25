@@ -685,13 +685,15 @@ class MaterialMaster(Base):
 
 class InwardChallan(Base):
     __tablename__ = "inward_challan"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001
     date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     party_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
     vehicle_number = Column(String(50), nullable=True)
     material_id = Column(UNIQUEIDENTIFIER, ForeignKey("material_master.id"), nullable=False, index=True)
     slip_no = Column(String(50), nullable=True)
+    rst_no = Column(String(50), nullable=True)
     gross_weight = Column(Numeric(10, 3), nullable=True)
     report = Column(Numeric(10, 3), nullable=True)  # Weight to be subtracted from net weight
     net_weight = Column(Numeric(10, 3), nullable=True)
@@ -711,6 +713,7 @@ class OutwardChallan(Base):
     __tablename__ = "outward_challan"
 
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001
     date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     vehicle_number = Column(String(50), nullable=True)
     driver_name = Column(String(255), nullable=True)
@@ -757,17 +760,38 @@ def generate_frontend_id_on_insert(mapper, connection, target):
     This function is called automatically when new records are inserted.
     """
     from app.services.id_generator import FrontendIDGenerator
-    
+
     if target.frontend_id is None:  # Only generate if not already provided
         table_name = target.__tablename__
-        
+
         # Create a temporary session for the ID generation
         from sqlalchemy.orm import sessionmaker
         Session = sessionmaker(bind=connection)
         session = Session()
-        
+
         try:
             target.frontend_id = FrontendIDGenerator.generate_frontend_id(table_name, session)
+        finally:
+            session.close()
+
+
+def generate_serial_no_on_insert(mapper, connection, target):
+    """
+    SQLAlchemy event handler to generate serial_no for challan tables before insert.
+    This function is called automatically when new records are inserted.
+    """
+    from app.services.id_generator import FrontendIDGenerator
+
+    if hasattr(target, 'serial_no') and target.serial_no is None:  # Only generate if not already provided
+        table_name = target.__tablename__
+
+        # Create a temporary session for the ID generation
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=connection)
+        session = Session()
+
+        try:
+            target.serial_no = FrontendIDGenerator.generate_frontend_id(table_name, session)
         finally:
             session.close()
 
@@ -793,3 +817,12 @@ models_with_frontend_id = [
 
 for model in models_with_frontend_id:
     event.listen(model, 'before_insert', generate_frontend_id_on_insert)
+
+# Register event listeners for models that have serial_no
+models_with_serial_no = [
+    InwardChallan,
+    OutwardChallan
+]
+
+for model in models_with_serial_no:
+    event.listen(model, 'before_insert', generate_serial_no_on_insert)
