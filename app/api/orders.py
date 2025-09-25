@@ -47,6 +47,116 @@ def get_orders(
         logger.error(f"Error getting orders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/orders/with-summary", tags=["Order Master"])
+def get_orders_with_summary(
+    skip: int = 0,
+    limit: int = 100,
+    status: str = None,
+    client_id: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get orders with summary data (ordered, pending, cut, dispatched) for client orders page"""
+    try:
+        from sqlalchemy.orm import joinedload
+        from sqlalchemy import and_, case, func
+        from datetime import datetime
+        import uuid
+
+        # Base query with joins
+        query = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client),
+            joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+        )
+
+        # Apply filters
+        if client_id and client_id.strip() and client_id != "all":
+            query = query.filter(models.OrderMaster.client_id == uuid.UUID(client_id))
+
+        if status and status != "all":
+            query = query.filter(models.OrderMaster.status == status)
+
+        if start_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(models.OrderMaster.created_at >= start_dt)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(models.OrderMaster.created_at <= end_dt)
+            except ValueError:
+                pass
+
+        # Execute query
+        orders = query.order_by(models.OrderMaster.created_at.desc()).offset(skip).limit(limit).all()
+
+        # Transform to include summary data
+        orders_with_summary = []
+
+        for order in orders:
+            # Calculate summary statistics from order items
+            total_ordered = sum(item.quantity_rolls for item in order.order_items)
+            total_fulfilled = sum(item.quantity_fulfilled for item in order.order_items)
+
+            # Calculate pending items (exactly same as View Details - only 'pending' status)
+            all_pending_items = db.query(models.PendingOrderItem).filter(
+                models.PendingOrderItem.original_order_id == order.id,
+                models.PendingOrderItem._status == 'pending'
+            ).all()
+            total_pending = sum(item.quantity_pending for item in all_pending_items)
+
+            # Calculate cut items (from InventoryMaster allocated to this order - same logic as View Details)
+            allocated_inventory = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.allocated_to_order_id == order.id
+            ).all()
+            total_cut = len(allocated_inventory)
+
+            # Calculate dispatched items (quantity fulfilled from order items - same logic as View Details)
+            total_dispatched = total_fulfilled
+
+            # Calculate total value
+            total_value = sum(item.amount for item in order.order_items)
+
+            # Check if overdue
+            is_overdue = False
+            if order.delivery_date and order.status != 'completed':
+                # Handle both datetime and date objects
+                current_date = datetime.utcnow().date()
+                delivery_date = order.delivery_date.date() if hasattr(order.delivery_date, 'date') else order.delivery_date
+                is_overdue = delivery_date < current_date
+
+            orders_with_summary.append({
+                "order_id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "client_name": order.client.company_name if order.client else "Unknown Client",
+                "status": order.status,
+                "priority": order.priority,
+                "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+                "created_at": order.created_at.isoformat(),
+                "total_items": len(order.order_items),
+                "total_value": float(total_value),
+                "payment_type": order.payment_type,
+                "is_overdue": is_overdue,
+
+                # Summary fields requested
+                "total_quantity_ordered": total_ordered,
+                "total_quantity_pending": total_pending,
+                "total_quantity_cut": total_cut,
+                "total_quantity_dispatched": total_dispatched,
+                "total_quantity_fulfilled": total_fulfilled,
+                "fulfillment_percentage": (total_fulfilled / total_ordered * 100) if total_ordered > 0 else 0
+            })
+
+        return orders_with_summary
+
+    except Exception as e:
+        logger.error(f"Error getting orders with summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/orders/{order_id}", response_model=schemas.OrderMaster, tags=["Order Master"])
 def get_order(order_id: UUID, db: Session = Depends(get_db)):
     """Get order by ID with related data"""
