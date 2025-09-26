@@ -215,3 +215,47 @@ def delete_outward_challan(db: Session, challan_id: UUID) -> bool:
     db.commit()
     logger.info(f"Deleted outward challan: {challan_id}")
     return True
+
+# ============================================================================
+# SERIAL NUMBER GENERATION CRUD
+# ============================================================================
+
+def get_next_inward_serial(db: Session) -> str:
+    """
+    Get next available serial number for inward challans using sequence
+    """
+    # Get the next value from the sequence
+    result = db.execute(
+        "SELECT nextval('inward_challan_serial_seq')"
+    ).fetchone()
+
+    if result:
+        next_serial_int = result[0]
+    else:
+        # Fallback if sequence doesn't exist
+        next_serial_int = 1
+
+    # Format as 5-digit zero-padded string
+    next_serial = f"{next_serial_int:05d}"
+    logger.info(f"Generated next inward serial from sequence: {next_serial}")
+    return next_serial
+
+def get_next_outward_serial(db: Session) -> str:
+    """
+    Get next available serial number for outward challans using sequence
+    """
+    # Get the next value from the sequence
+    result = db.execute(
+        "SELECT nextval('outward_challan_serial_seq')"
+    ).fetchone()
+
+    if result:
+        next_serial_int = result[0]
+    else:
+        # Fallback if sequence doesn't exist
+        next_serial_int = 1
+
+    # Format as 5-digit zero-padded string
+    next_serial = f"{next_serial_int:05d}"
+    logger.info(f"Generated next outward serial from sequence: {next_serial}")
+    return next_serial

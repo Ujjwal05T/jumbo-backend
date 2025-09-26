@@ -71,10 +71,13 @@ class UserStatus(str, Enum):
     SUSPENDED = "suspended"
 
 class UserRole(str, Enum):
-    SALES = "sales"
-    PLANNER = "planner"
-    SUPERVISOR = "supervisor"
     ADMIN = "admin"
+    ORDER_PUNCHER = "order_puncher"
+    SECURITY = "security"
+    CO_ADMIN = "co_admin"
+    PLANNER = "planner"
+    PRODUCTION = "poduction"  # Note: keeping original typo from middleware for consistency
+    ACCOUNTANT = "accountant"
     SYSTEM = "system"
 
 class PaperType(str, Enum):
