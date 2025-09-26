@@ -222,8 +222,8 @@ class InwardChallanBase(BaseModel):
     net_weight: Optional[float] = Field(None, ge=0)
     final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
     rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
-    bill_no: Optional[str] = Field(None, max_length=50)
-    cash: Optional[float] = Field(None, ge=0)
+    payment_type: Optional[PaymentType] = Field(None, description="Bill or Cash payment type")
+    bill_no: Optional[str] = Field(None, max_length=50, description="Only used when payment_type is 'bill'")
     time_in: Optional[str] = None
     time_out: Optional[str] = None
 
@@ -241,8 +241,8 @@ class InwardChallanUpdate(BaseModel):
     net_weight: Optional[float] = Field(None, ge=0)
     final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
     rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
-    bill_no: Optional[str] = Field(None, max_length=50)
-    cash: Optional[float] = Field(None, ge=0)
+    payment_type: Optional[PaymentType] = Field(None, description="Bill or Cash payment type")
+    bill_no: Optional[str] = Field(None, max_length=50, description="Only used when payment_type is 'bill'")
     time_in: Optional[str] = None
     time_out: Optional[str] = None
 
