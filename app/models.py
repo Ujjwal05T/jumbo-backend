@@ -104,6 +104,11 @@ class UserMaster(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_login = Column(DateTime, nullable=True)
     status = Column(String(20), default="active", nullable=False)
+
+    # TOTP fields
+    totp_secret = Column(String(32), nullable=True)  # Base32 encoded secret
+    totp_enabled = Column(Boolean, default=False, nullable=False)
+    totp_backup_codes = Column(Text, nullable=True)  # JSON array of backup codes
     
     # Relationships
     clients_created = relationship("ClientMaster", back_populates="created_by")
@@ -631,39 +636,72 @@ class WastageInventory(Base):
     Generated during production when trim/waste is between 9-21 inches
     """
     __tablename__ = "wastage_inventory"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # WS-00001, WS-00002, etc.
     barcode_id = Column(String(50), unique=True, nullable=True, index=True)   # WSB-00001, WSB-00002, etc.
-    
+
     # Wastage details
     width_inches = Column(Numeric(6, 2), nullable=False)  # Width of the waste material
     paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
     weight_kg = Column(Numeric(8, 2), default=0.0)  # Weight will be set via QR scan
     reel_no = Column(String(50), nullable=True, index=True)  # Optional reel number for identification
-    
+
     # Source information
     source_plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=True, index=True)
     source_jumbo_roll_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=True, index=True)
     individual_roll_number = Column(Integer, nullable=True)  # Which 118" roll this waste came from
-    
+
     # Status and tracking
     status = Column(String(50), default=WastageStatus.AVAILABLE.value, nullable=False)
     location = Column(String(255), default="WASTE_STORAGE", nullable=True)
-    
+
     # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Notes for special handling
     notes = Column(Text, nullable=True)
-    
+
     # Relationships
     paper = relationship("PaperMaster")
     source_plan = relationship("PlanMaster")
     source_jumbo_roll = relationship("InventoryMaster", foreign_keys=[source_jumbo_roll_id])
     created_by = relationship("UserMaster")
+
+
+class OrderEditLog(Base):
+    """
+    Audit log for tracking order modifications
+    Records who edited which order, when, and what changes were made
+    """
+    __tablename__ = "order_edit_log"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # OEL-001, OEL-002, etc.
+
+    # Order and user tracking
+    order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=False, index=True)
+    edited_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False, index=True)
+
+    # Edit details
+    action = Column(String(100), nullable=False, index=True)  # "update_status", "update_quantity", "update_delivery_date", etc.
+    field_name = Column(String(100), nullable=True)  # Field that was changed
+    old_value = Column(Text, nullable=True)  # Previous value (JSON or string)
+    new_value = Column(Text, nullable=True)  # New value (JSON or string)
+
+    # Additional context
+    description = Column(Text, nullable=True)  # Human-readable description of the change
+    ip_address = Column(String(45), nullable=True)  # IP address of the user
+    user_agent = Column(Text, nullable=True)  # Browser/client information
+
+    # Timestamp
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    # Relationships
+    order = relationship("OrderMaster")
+    edited_by = relationship("UserMaster")
 
 
 # ============================================================================
@@ -799,7 +837,7 @@ def generate_serial_no_on_insert(mapper, connection, target):
 # Register event listeners for all models that have frontend_id
 models_with_frontend_id = [
     ClientMaster,
-    UserMaster, 
+    UserMaster,
     PaperMaster,
     OrderMaster,
     OrderItem,
@@ -812,7 +850,8 @@ models_with_frontend_id = [
     PlanInventoryLink,
     DispatchRecord,
     DispatchItem,
-    WastageInventory
+    WastageInventory,
+    OrderEditLog
 ]
 
 for model in models_with_frontend_id:

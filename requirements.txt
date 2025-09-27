@@ -37,6 +37,7 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.0
+pyotp==2.9.0
 pytz==2025.2
 qrcode==7.4.2
 reportlab==4.0.8

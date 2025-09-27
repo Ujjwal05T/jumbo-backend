@@ -156,9 +156,24 @@ class UserMaster(UserMasterBase):
     frontend_id: Optional[str] = Field(None, description="Human-readable user ID (e.g., USR-001)")
     created_at: datetime
     last_login: Optional[datetime] = None
+    totp_enabled: bool = Field(default=False)
 
     class Config:
         from_attributes = True
+
+# TOTP Schemas (Admin only)
+class TOTPSetupResponse(BaseModel):
+    secret: str
+    qr_code: str  # Base64 encoded QR code
+    backup_codes: List[str]
+
+class TOTPVerifyRequest(BaseModel):
+    user_id: UUID  # Admin user ID
+    otp_code: str = Field(..., min_length=6, max_length=6)
+
+class TOTPVerifyResponse(BaseModel):
+    valid: bool
+    message: str
 
 # Paper Master Schemas
 class PaperMasterBase(BaseModel):

@@ -108,6 +108,11 @@ class FrontendIDGenerator:
             "sequence_name": "outward_challan_serial_seq",
             "description": "Outward Challan Serial Numbers (00001, 00002, etc.)",
             "serial_only": True
+        },
+        "order_edit_log": {
+            "prefix": "OEL",
+            "sequence_name": "order_edit_log_seq",
+            "description": "Order Edit Log IDs (OEL-00001, OEL-00002, etc.)"
         }
     }
     

@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .base import get_db, validate_status_transition
 from .. import crud_operations, schemas, models
+from .order_edit_logs import create_order_edit_log
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -166,29 +167,41 @@ def get_order(order_id: UUID, db: Session = Depends(get_db)):
     return order
 
 @router.put("/orders/{order_id}", response_model=schemas.OrderMaster, tags=["Order Master"])
-def update_order(
+async def update_order(
     order_id: UUID,
     order_update: schemas.OrderMasterUpdate,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """Update order information (only if status is 'created')"""
     try:
+        # Parse request body to get user info
+        request_body = await request.json()
+        edited_by_id = request_body.get("edited_by_id")  # Get user ID from request
+
+        # Extract only the order update fields (remove edited_by_id)
+        order_data = {k: v for k, v in request_body.items() if k != "edited_by_id"}
+        order_update = schemas.OrderMasterUpdate(**order_data)
+
         # Get the order first to check status
         order = crud_operations.get_order(db=db, order_id=order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
-        
+
         # Only allow updates of orders in 'created' status
         if order.status != "created":
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Cannot update order with status '{order.status}'. Only orders with status 'created' can be updated."
             )
-        
+
         # Perform the update
         updated_order = crud_operations.update_order(db=db, order_id=order_id, order_update=order_update)
         if not updated_order:
             raise HTTPException(status_code=500, detail="Failed to update order")
+
+        # Note: Individual field change logging removed - only tracking order items changes
+
         return updated_order
     except HTTPException:
         raise
@@ -207,31 +220,119 @@ async def update_order_with_items(
         # Parse and log raw request data first
         raw_data = await request.json()
         logger.info(f"Raw request data for order {order_id}: {raw_data}")
-        
+
+        # Extract user ID for logging
+        edited_by_id = raw_data.get("edited_by_id")
+
+        # Remove edited_by_id from the data before parsing with Pydantic
+        order_data = {k: v for k, v in raw_data.items() if k != "edited_by_id"}
+
         # Try to parse with Pydantic schema
         try:
-            order_update = schemas.OrderMasterUpdateWithItems(**raw_data)
+            order_update = schemas.OrderMasterUpdateWithItems(**order_data)
             logger.info(f"Successfully parsed order update: {order_update}")
         except Exception as parse_error:
             logger.error(f"Pydantic validation error: {parse_error}")
             raise HTTPException(status_code=422, detail=f"Validation error: {str(parse_error)}")
-        
+
         # Get the order first to check status
         order = crud_operations.get_order(db=db, order_id=order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
-        
+
         # Only allow updates of orders in 'created' status
         if order.status != "created":
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Cannot update order with status '{order.status}'. Only orders with status 'created' can be updated."
             )
-        
+
+        # Track old order items for logging
+        old_items = [
+            {
+                "paper_id": str(item.paper_id),
+                "width_inches": float(item.width_inches),
+                "quantity_rolls": item.quantity_rolls,
+                "rate": float(item.rate)
+            }
+            for item in order.order_items
+        ]
+
         # Perform the update with items
         updated_order = crud_operations.update_order_with_items(db=db, order_id=order_id, order_update=order_update)
         if not updated_order:
             raise HTTPException(status_code=500, detail="Failed to update order")
+
+        # Track new order items for logging
+        new_items = [
+            {
+                "paper_id": str(item.paper_id),
+                "width_inches": float(item.width_inches),
+                "quantity_rolls": item.quantity_rolls,
+                "rate": float(item.rate)
+            }
+            for item in updated_order.order_items
+        ]
+
+        # Log the order items update using separate database session
+        try:
+            from sqlalchemy.orm import sessionmaker
+            from ..database import engine
+
+            # Create separate session for logging
+            LogSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+            log_db = LogSession()
+
+            try:
+                # Use the actual user ID if provided, otherwise fall back to system user
+                user_id_for_logging = edited_by_id
+
+                if not user_id_for_logging:
+                    # Fall back to system user if no user ID provided
+                    system_user = log_db.query(models.UserMaster).filter(
+                        models.UserMaster.username == "system"
+                    ).first()
+
+                    if not system_user:
+                        logger.warning("No system user found, creating one for logging")
+                        system_user = models.UserMaster(
+                            name="System User",
+                            username="system",
+                            password_hash="system",
+                            role="system",
+                            contact="system@localhost",
+                            department="System",
+                            status="active"
+                        )
+                        log_db.add(system_user)
+                        log_db.commit()
+                        log_db.refresh(system_user)
+
+                    user_id_for_logging = str(system_user.id)
+
+                logger.info(f"Logging order items update for order {order_id} by user {user_id_for_logging}")
+
+                # Log order items update only
+                create_order_edit_log(
+                    db=log_db,
+                    order_id=str(order_id),
+                    edited_by_id=user_id_for_logging,
+                    action="update_order_items",
+                    field_name="order_items",
+                    old_value=old_items,
+                    new_value=new_items,
+                    description=f"Updated order items: {len(old_items)} -> {len(new_items)} items",
+                    request=request
+                )
+                logger.info("Successfully logged order items update")
+
+            finally:
+                log_db.close()
+
+        except Exception as log_error:
+            # Log the error but don't fail the main operation
+            logger.error(f"Failed to log order items update: {log_error}", exc_info=True)
+
         return updated_order
     except HTTPException:
         raise
