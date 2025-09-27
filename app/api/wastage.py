@@ -84,6 +84,50 @@ def get_wastage_item(
         logger.error(f"Error getting wastage item: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.put("/wastage/{wastage_id}", response_model=schemas.WastageInventory, tags=["Wastage Inventory"])
+def update_wastage_item(
+    wastage_id: UUID,
+    wastage_update: schemas.WastageInventoryUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update a wastage inventory item"""
+    try:
+        wastage_item = db.query(models.WastageInventory).options(
+            joinedload(models.WastageInventory.paper)
+        ).filter(models.WastageInventory.id == wastage_id).first()
+
+        if not wastage_item:
+            raise HTTPException(status_code=404, detail="Wastage item not found")
+
+        # Validate paper_id if provided
+        if wastage_update.paper_id:
+            paper = db.query(models.PaperMaster).filter(
+                models.PaperMaster.id == wastage_update.paper_id
+            ).first()
+            if not paper:
+                raise HTTPException(status_code=404, detail="Paper master record not found")
+
+        # Update only provided fields
+        update_data = wastage_update.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(wastage_item, field, value)
+
+        wastage_item.updated_at = func.now()
+
+        db.commit()
+        db.refresh(wastage_item)
+
+        logger.info(f"✅ WASTAGE UPDATED: {wastage_item.frontend_id} - {wastage_item.width_inches}\"")
+
+        return wastage_item
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating wastage item: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.put("/wastage/{wastage_id}/status", response_model=schemas.WastageInventory, tags=["Wastage Inventory"])
 def update_wastage_status(
     wastage_id: UUID,
@@ -95,21 +139,21 @@ def update_wastage_status(
         wastage_item = db.query(models.WastageInventory).filter(
             models.WastageInventory.id == wastage_id
         ).first()
-        
+
         if not wastage_item:
             raise HTTPException(status_code=404, detail="Wastage item not found")
-        
+
         # Update status
         new_status = status_update.get("status")
         if new_status:
             wastage_item.status = new_status
             wastage_item.updated_at = func.now()
-        
+
         db.commit()
         db.refresh(wastage_item)
-        
+
         return wastage_item
-        
+
     except HTTPException:
         raise
     except Exception as e:

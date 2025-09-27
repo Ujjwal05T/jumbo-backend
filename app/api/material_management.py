@@ -107,6 +107,16 @@ def get_inward_challans(
         logger.error(f"Error getting inward challans: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/inward-challans/next-serial", tags=["Inward Challan"])
+def get_next_inward_serial(db: Session = Depends(get_db)):
+    """Get next available serial number for inward challans"""
+    try:
+        next_serial = crud_operations.get_next_inward_serial(db=db)
+        return {"next_serial": next_serial}
+    except Exception as e:
+        logger.error(f"Error getting next inward serial: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/inward-challans/{challan_id}", response_model=schemas.InwardChallan, tags=["Inward Challan"])
 def get_inward_challan(challan_id: UUID, db: Session = Depends(get_db)):
     """Get inward challan by ID"""
@@ -175,6 +185,16 @@ def get_outward_challans(
         logger.error(f"Error getting outward challans: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/outward-challans/next-serial", tags=["Outward Challan"])
+def get_next_outward_serial(db: Session = Depends(get_db)):
+    """Get next available serial number for outward challans"""
+    try:
+        next_serial = crud_operations.get_next_outward_serial(db=db)
+        return {"next_serial": next_serial}
+    except Exception as e:
+        logger.error(f"Error getting next outward serial: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/outward-challans/{challan_id}", response_model=schemas.OutwardChallan, tags=["Outward Challan"])
 def get_outward_challan(challan_id: UUID, db: Session = Depends(get_db)):
     """Get outward challan by ID"""
@@ -216,25 +236,5 @@ def delete_outward_challan(challan_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# SERIAL NUMBER ENDPOINTS
+# SERIAL NUMBER ENDPOINTS (moved above parameterized routes to avoid conflicts)
 # ============================================================================
-
-@router.get("/inward-challans/next-serial", tags=["Inward Challan"])
-def get_next_inward_serial(db: Session = Depends(get_db)):
-    """Get next available serial number for inward challans"""
-    try:
-        next_serial = crud_operations.get_next_inward_serial(db=db)
-        return {"next_serial": next_serial}
-    except Exception as e:
-        logger.error(f"Error getting next inward serial: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/outward-challans/next-serial", tags=["Outward Challan"])
-def get_next_outward_serial(db: Session = Depends(get_db)):
-    """Get next available serial number for outward challans"""
-    try:
-        next_serial = crud_operations.get_next_outward_serial(db=db)
-        return {"next_serial": next_serial}
-    except Exception as e:
-        logger.error(f"Error getting next outward serial: {e}")
-        raise HTTPException(status_code=500, detail=str(e))

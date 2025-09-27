@@ -1015,6 +1015,17 @@ class WastageInventoryCreate(BaseModel):
     source_jumbo_roll_id: Optional[UUID] = Field(None, description="Source jumbo roll ID (if known)")
     individual_roll_number: Optional[int] = Field(None, ge=1, description="Source 118 roll number (if known)")
 
+class WastageInventoryUpdate(BaseModel):
+    """Schema for updating wastage inventory item"""
+    # Optional fields that can be updated
+    width_inches: Optional[float] = Field(None, description="Width of waste material in inches")
+    paper_id: Optional[UUID] = Field(None, description="Paper master ID")
+    weight_kg: Optional[float] = Field(None, ge=0, description="Weight in kg")
+    reel_no: Optional[str] = Field(None, max_length=50, description="Reel number for identification")
+    status: Optional[str] = Field(None, description="Status: available, used, damaged")
+    location: Optional[str] = Field(None, description="Storage location")
+    notes: Optional[str] = Field(None, max_length=500, description="Additional notes")
+
 class WastageInventory(BaseModel):
     """Schema for wastage inventory item"""
     id: UUID
