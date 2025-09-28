@@ -301,4 +301,12 @@ def transfer_pending_order_between_orders(db, item_id, source_order_id, target_o
         created_by_id=created_by_id
     )
 
+def cancel_pending_order_item(db, item_id, cancelled_by_id):
+    """Cancel/delete a pending order item by setting quantity_pending to 0 and status to resolved"""
+    return pending_order.cancel_pending_order_item(
+        db=db,
+        item_id=item_id,
+        cancelled_by_id=cancelled_by_id
+    )
+
 

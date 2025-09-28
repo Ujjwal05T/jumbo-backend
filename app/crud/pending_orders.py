@@ -514,6 +514,69 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
 
         return result
 
+    def cancel_pending_order_item(
+        self,
+        db: Session,
+        *,
+        item_id: UUID,
+        cancelled_by_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Cancel/delete a pending order item by setting quantity_pending to 0 and status to resolved.
+        This removes it from pending lists and algorithms without physical deletion.
+        """
+        from datetime import datetime
+        from fastapi import HTTPException
+
+        # Get pending order item
+        pending_item = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem.id == item_id
+        ).first()
+
+        if not pending_item:
+            raise HTTPException(status_code=404, detail="Pending order item not found")
+
+        # Validate current status - only allow cancellation of pending items
+        if pending_item._status != "pending":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot cancel pending order item with status '{pending_item._status}'. Only 'pending' items can be cancelled."
+            )
+
+        # Store original values for response
+        original_quantity = pending_item.quantity_pending
+        original_status = pending_item._status
+
+        # Cancel the pending order item
+        pending_item.quantity_pending = 0
+        pending_item._status = "resolved"
+        pending_item.resolved_at = datetime.utcnow()
+
+        try:
+            db.commit()
+
+            return {
+                "message": f"Successfully cancelled pending order item {pending_item.frontend_id}",
+                "cancelled_item": {
+                    "id": str(pending_item.id),
+                    "frontend_id": pending_item.frontend_id,
+                    "width_inches": float(pending_item.width_inches),
+                    "gsm": pending_item.gsm,
+                    "bf": float(pending_item.bf),
+                    "shade": pending_item.shade,
+                    "original_quantity_pending": original_quantity,
+                    "original_status": original_status,
+                    "new_quantity_pending": pending_item.quantity_pending,
+                    "new_status": pending_item._status,
+                    "resolved_at": pending_item.resolved_at.isoformat() if pending_item.resolved_at else None
+                },
+                "cancelled_by_id": str(cancelled_by_id),
+                "cancelled_at": pending_item.resolved_at.isoformat() if pending_item.resolved_at else None
+            }
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to cancel pending order item: {str(e)}")
+
 
 # UNUSED FUNCTION - Replaced by inline manual cut processing in start_production_from_pending_orders_impl
 # This function was replaced to avoid database transaction conflicts and improve error handling

@@ -219,3 +219,30 @@ def transfer_pending_order_between_orders(
     except Exception as e:
         logger.error(f"Error transferring pending order: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/pending-order-items/{item_id}/cancel", tags=["Pending Order Management"])
+def cancel_pending_order_item(
+    item_id: UUID,
+    cancel_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Cancel/delete a pending order item by setting quantity to 0 and status to resolved.
+    This removes it from pending lists and algorithms without physical deletion.
+    """
+    try:
+        cancelled_by_id = cancel_data.get("cancelled_by_id")
+
+        if not cancelled_by_id:
+            raise HTTPException(status_code=400, detail="cancelled_by_id is required")
+
+        return crud_operations.cancel_pending_order_item(
+            db=db,
+            item_id=item_id,
+            cancelled_by_id=cancelled_by_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling pending order item: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
