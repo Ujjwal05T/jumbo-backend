@@ -413,36 +413,31 @@ class PlanCalculationService:
             total_wastage_weight = 0
             used_wastage = []
             
-            # Use available wastage to reduce order quantity
+            # Use available wastage to reduce order quantity (1 wastage roll = 1 roll)
             for wastage_roll in available_wastage:
                 if current_quantity <= 0:
                     break
-                
-                # Use actual weight or default to 50kg for wastage rolls without weight
-                wastage_weight = float(wastage_roll.weight_kg) if wastage_roll.weight_kg and wastage_roll.weight_kg > 0 else 50.0
 
-                logger.info(f"🔍 WASTAGE ROLL: {wastage_roll.frontend_id} - {wastage_roll.width_inches}\" x {wastage_weight}kg {'(default)' if wastage_roll.weight_kg == 0 else ''}")
+                logger.info(f"🔍 WASTAGE ROLL: {wastage_roll.frontend_id} - {wastage_roll.width_inches}\" (1 roll)")
 
-                # Always try to allocate wastage rolls (use default weight if needed)
-                if True:  # Always allocate available wastage
-                    # Use this wastage roll
-                    allocation = {
-                        'wastage_id': wastage_roll.id,
-                        'wastage_frontend_id': wastage_roll.frontend_id,
-                        'order_id': order_id,
-                        'order_item_id': order_item_id,
-                        'paper_id': paper_id,
-                        'width_inches': float(width_inches) if width_inches else 0,
-                        'weight_kg': wastage_weight,
-                        'quantity_reduced': min(wastage_weight, current_quantity)
-                    }
-                    
-                    wastage_allocations.append(allocation)
-                    used_wastage.append(wastage_roll)
-                    total_wastage_weight += wastage_weight
-                    current_quantity -= wastage_weight
-                    
-                    logger.info(f"✅ WASTAGE ALLOCATED: {wastage_roll.frontend_id} ({wastage_weight}kg) to order {order_id}, remaining qty: {current_quantity}")
+                # Each wastage roll = 1 roll that can fulfill order
+                allocation = {
+                    'wastage_id': wastage_roll.id,
+                    'wastage_frontend_id': wastage_roll.frontend_id,
+                    'order_id': order_id,
+                    'order_item_id': order_item_id,
+                    'paper_id': paper_id,
+                    'width_inches': float(width_inches) if width_inches else 0,
+                    'weight_kg': wastage_roll.weight_kg,
+                    'quantity_reduced': 1  # Always 1 roll
+                }
+
+                wastage_allocations.append(allocation)
+                used_wastage.append(wastage_roll)
+                total_wastage_weight += 1  # Count rolls, not kg
+                current_quantity -= 1  # Reduce by 1 roll
+
+                logger.info(f"✅ WASTAGE ALLOCATED: {wastage_roll.frontend_id} (1 roll) to order {order_id}, remaining qty: {current_quantity}")
             
             # Create reduced order requirement
             if current_quantity > 0:
@@ -452,11 +447,11 @@ class PlanCalculationService:
                 reduced_req['original_quantity'] = order_req.get('quantity', 0)
                 reduced_req['wastage_allocated'] = total_wastage_weight
                 reduced_order_requirements.append(reduced_req)
-                
-                logger.info(f"📉 ORDER REDUCED: {order_id} quantity reduced from {order_req.get('quantity', 0)} to {current_quantity} (wastage: {total_wastage_weight}kg)")
+
+                logger.info(f"📉 ORDER REDUCED: {order_id} quantity reduced from {order_req.get('quantity', 0)} to {current_quantity} (wastage: {total_wastage_weight} rolls)")
             else:
                 # Order fully satisfied by wastage
-                logger.info(f"✅ ORDER FULFILLED: {order_id} completely fulfilled by wastage ({total_wastage_weight}kg)")
+                logger.info(f"✅ ORDER FULFILLED: {order_id} completely fulfilled by wastage ({total_wastage_weight} rolls)")
         
         logger.info(f"🔄 WASTAGE SUMMARY: {len(wastage_allocations)} allocations, {len(reduced_order_requirements)} orders need cutting")
         

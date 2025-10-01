@@ -178,17 +178,15 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
         ).all()
         # for link in plan_links:
         
-        # Get cut rolls linked to this plan via PlanInventoryLink with proper hierarchy loading
+        # Get cut rolls linked to this plan via PlanInventoryLink with optimized selective loading
         from sqlalchemy.orm import joinedload
         cut_rolls_via_link = db.query(models.InventoryMaster).join(
-            models.PlanInventoryLink, 
+            models.PlanInventoryLink,
             models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
         ).options(
-            joinedload(models.InventoryMaster.paper),  # Load paper specs
-            joinedload(models.InventoryMaster.parent_118_roll)  # Load 118" roll
-                .joinedload(models.InventoryMaster.parent_jumbo),  # Load jumbo roll via 118" roll
+            joinedload(models.InventoryMaster.paper),  # Load paper specs (always needed)
             joinedload(models.InventoryMaster.allocated_order)  # Load allocated order
-                .joinedload(models.OrderMaster.client)  # Load client info
+                .joinedload(models.OrderMaster.client)  # Load client info (commonly accessed)
         ).filter(
             models.PlanInventoryLink.plan_id == plan_id,
             models.InventoryMaster.roll_type == "cut"

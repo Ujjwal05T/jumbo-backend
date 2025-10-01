@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/wastage", response_model=schemas.PaginatedWastageResponse, tags=["Wastage Inventory"])
 def get_wastage_inventory(
     page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(20, ge=1, le=100, description="Items per page"),
+    per_page: int = Query(20, ge=1, le=1000, description="Items per page"),
     search: Optional[str] = Query(None, description="Search by frontend_id, barcode_id, or paper specs"),
     status: Optional[str] = Query(None, description="Filter by status"),
     db: Session = Depends(get_db)
