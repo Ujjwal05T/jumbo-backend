@@ -1,6 +1,6 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, text
 from uuid import UUID
 import logging
 from decimal import Decimal
@@ -222,40 +222,69 @@ def delete_outward_challan(db: Session, challan_id: UUID) -> bool:
 
 def get_next_inward_serial(db: Session) -> str:
     """
-    Get next available serial number for inward challans using sequence
+    Get next available serial number for inward challans using SQL Server sequence
+    Format: 00001, 00002, 00003, etc.
     """
-    # Get the next value from the sequence
-    result = db.execute(
-        "SELECT nextval('inward_challan_serial_seq')"
-    ).fetchone()
-
-    if result:
-        next_serial_int = result[0]
-    else:
-        # Fallback if sequence doesn't exist
-        next_serial_int = 1
-
-    # Format as 5-digit zero-padded string
-    next_serial = f"{next_serial_int:05d}"
-    logger.info(f"Generated next inward serial from sequence: {next_serial}")
-    return next_serial
+    
+    try:
+        # SQL Server syntax - NEXT VALUE FOR
+        result = db.execute(
+            text("SELECT NEXT VALUE FOR inward_challan_serial_seq")
+        )
+        next_serial_int = result.scalar()
+        
+        # Format as 5-digit zero-padded string
+        next_serial = f"{next_serial_int:05d}"
+        logger.info(f"Generated next inward serial from sequence: {next_serial}")
+        return next_serial
+        
+    except Exception as e:
+        logger.error(f"Error generating next inward serial: {e}")
+        # Fallback: get max serial_no and increment
+        try:
+            last_challan = db.query(models.InwardChallan).order_by(
+                desc(models.InwardChallan.serial_no)
+            ).first()
+            
+            if last_challan and last_challan.serial_no:
+                last_number = int(last_challan.serial_no)
+                return f"{last_number + 1:05d}"
+            else:
+                return "00001"
+        except:
+            return "00001"
 
 def get_next_outward_serial(db: Session) -> str:
     """
-    Get next available serial number for outward challans using sequence
+    Get next available serial number for outward challans using SQL Server sequence
+    Format: 00001, 00002, 00003, etc.
     """
-    # Get the next value from the sequence
-    result = db.execute(
-        "SELECT nextval('outward_challan_serial_seq')"
-    ).fetchone()
-
-    if result:
-        next_serial_int = result[0]
-    else:
-        # Fallback if sequence doesn't exist
-        next_serial_int = 1
-
-    # Format as 5-digit zero-padded string
-    next_serial = f"{next_serial_int:05d}"
-    logger.info(f"Generated next outward serial from sequence: {next_serial}")
-    return next_serial
+    
+    try:
+        # SQL Server syntax - NEXT VALUE FOR
+        result = db.execute(
+            text("SELECT NEXT VALUE FOR outward_challan_serial_seq")
+        )
+        next_serial_int = result.scalar()
+        
+        # Format as 5-digit zero-padded string
+        next_serial = f"{next_serial_int:05d}"
+        logger.info(f"Generated next outward serial from sequence: {next_serial}")
+        return next_serial
+        
+    except Exception as e:
+        logger.error(f"Error generating next outward serial: {e}")
+        # Fallback: get max serial_no and increment
+        try:
+            last_challan = db.query(models.OutwardChallan).order_by(
+                desc(models.OutwardChallan.serial_no)
+            ).first()
+            
+            if last_challan and last_challan.serial_no:
+                last_number = int(last_challan.serial_no)
+                return f"{last_number + 1:05d}"
+            else:
+                return "00001"
+        except:
+            return "00001"
+        

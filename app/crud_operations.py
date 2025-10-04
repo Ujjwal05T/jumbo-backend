@@ -210,6 +210,12 @@ def update_outward_challan(db, challan_id, challan_update):
 def delete_outward_challan(db, challan_id):
     return material_management.delete_outward_challan(db=db, challan_id=challan_id)
 
+def get_next_inward_serial(db):
+    return material_management.get_next_inward_serial(db=db)
+
+def get_next_outward_serial(db):
+    return material_management.get_next_outward_serial(db=db)
+
 def get_pending_items_summary(db):
     return pending_order.get_pending_items_summary(db=db)
 
