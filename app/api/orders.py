@@ -476,17 +476,21 @@ def create_dispatch_record(
     dispatch_data: schemas.DispatchFormData,
     db: Session = Depends(get_db)
 ):
-    """Create dispatch record with form data and mark items as dispatched"""
+    """Create dispatch record with form data and mark items as dispatched - supports regular inventory and wastage items"""
     try:
         # Validate client exists
         client = crud_operations.get_client(db, dispatch_data.client_id)
         if not client:
             raise HTTPException(status_code=404, detail="Client not found")
-        
-        # Get inventory items to be dispatched
+
+        # Validate at least one item type is provided
+        if not dispatch_data.inventory_ids and not dispatch_data.wastage_ids:
+            raise HTTPException(status_code=400, detail="At least one inventory_id or wastage_id must be provided")
+
+        # Get regular inventory items to be dispatched
         inventory_items = []
         total_weight = 0.0
-        
+
         for inventory_id in dispatch_data.inventory_ids:
             item = crud_operations.get_inventory_item(db, inventory_id)
             if not item:
@@ -495,12 +499,31 @@ def create_dispatch_record(
             if item.status != "available":
                 logger.warning(f"Inventory item {inventory_id} not available (status: {item.status}), skipping")
                 continue
-            
+
             inventory_items.append(item)
             total_weight += float(item.weight_kg)
-        
-        if not inventory_items:
-            raise HTTPException(status_code=400, detail="No available inventory items found")
+
+        # Get wastage items to be dispatched
+        wastage_items = []
+        for wastage_id in dispatch_data.wastage_ids:
+            wastage_item = db.query(models.WastageInventory).filter(
+                models.WastageInventory.id == wastage_id
+            ).first()
+
+            if not wastage_item:
+                logger.warning(f"Wastage item {wastage_id} not found, skipping")
+                continue
+            if wastage_item.status != "available":
+                logger.warning(f"Wastage item {wastage_id} not available (status: {wastage_item.status}), skipping")
+                continue
+
+            wastage_items.append(wastage_item)
+            total_weight += float(wastage_item.weight_kg) if wastage_item.weight_kg else 0.0
+
+        # Validate we have at least some items
+        total_items_count = len(inventory_items) + len(wastage_items)
+        if total_items_count == 0:
+            raise HTTPException(status_code=400, detail="No available items found for dispatch")
         
         # Create dispatch record
         dispatch_record = models.DispatchRecord(
@@ -514,18 +537,19 @@ def create_dispatch_record(
             client_id=dispatch_data.client_id,
             primary_order_id=dispatch_data.primary_order_id,
             order_date=dispatch_data.order_date,
-            total_items=len(inventory_items),
+            total_items=total_items_count,
             total_weight_kg=total_weight,
             created_by_id=dispatch_data.created_by_id
         )
-        
+
         db.add(dispatch_record)
         db.flush()  # Get ID
-        
+
         # Create dispatch items and update inventory status
         completed_items = []
         updated_orders = []
-        
+
+        # Process regular inventory items
         for item in inventory_items:
             # Create dispatch item record
             dispatch_item = models.DispatchItem(
@@ -538,12 +562,12 @@ def create_dispatch_record(
                 paper_spec=f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "Unknown"
             )
             db.add(dispatch_item)
-            
+
             # Mark inventory as used
             item.status = "used"
             item.location = "dispatched"
             completed_items.append(str(item.id))
-            
+
             # Update matching order items
             if item.paper:
                 matching_order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
@@ -552,13 +576,13 @@ def create_dispatch_record(
                     models.OrderMaster.status == "in_process",
                     models.OrderItem.item_status == "in_warehouse"
                 ).limit(1).all()
-                
+
                 for order_item in matching_order_items:
                     # Only mark as completed if status is "in_warehouse" (fully fulfilled)
                     if order_item.item_status == "in_warehouse":
                         order_item.item_status = "completed"
                         order_item.dispatched_at = func.now()
-                    
+
                     # Check if order is complete
                     order = crud_operations.get_order(db, order_item.order_id)
                     if order:
@@ -569,22 +593,42 @@ def create_dispatch_record(
                             order.status = "completed"
                             if str(order.id) not in updated_orders:
                                 updated_orders.append(str(order.id))
-        
+
+        # Process wastage items
+        for wastage_item in wastage_items:
+            # Create dispatch item with wastage reel_no as barcode_id
+            dispatch_item = models.DispatchItem(
+                dispatch_record_id=dispatch_record.id,
+                inventory_id=None,  # No link to regular inventory
+                qr_code=wastage_item.barcode_id or wastage_item.frontend_id or "",
+                barcode_id=wastage_item.reel_no,  # Use reel_no as barcode_id
+                width_inches=float(wastage_item.width_inches) if wastage_item.width_inches else 0.0,
+                weight_kg=float(wastage_item.weight_kg) if wastage_item.weight_kg else 0.0,
+                paper_spec=f"{wastage_item.paper.gsm}gsm, {wastage_item.paper.bf}bf, {wastage_item.paper.shade}" if wastage_item.paper else "Unknown"
+            )
+            db.add(dispatch_item)
+
+            # Mark wastage as used
+            wastage_item.status = "used"
+            completed_items.append(f"wastage_{str(wastage_item.id)}")
+
         db.commit()
         db.refresh(dispatch_record)
-        
+
         return {
-            "message": f"Dispatch record created successfully with {len(completed_items)} items",
+            "message": f"Dispatch record created successfully with {total_items_count} items ({len(inventory_items)} regular, {len(wastage_items)} wastage)",
             "dispatch_id": str(dispatch_record.id),
             "dispatch_number": dispatch_record.dispatch_number,
             "client_name": client.company_name,
             "vehicle_number": dispatch_record.vehicle_number,
             "driver_name": dispatch_record.driver_name,
-            "total_items": len(completed_items),
+            "total_items": total_items_count,
             "total_weight_kg": total_weight,
             "completed_orders": updated_orders,
             "summary": {
-                "dispatched_items": len(completed_items),
+                "dispatched_items": total_items_count,
+                "regular_items": len(inventory_items),
+                "wastage_items": len(wastage_items),
                 "orders_completed": len(updated_orders),
                 "total_weight": total_weight
             }

@@ -824,7 +824,7 @@ class InventoryStatusUpdate(BaseModel):
 # ============================================================================
 
 class DispatchFormData(BaseModel):
-    """Schema for dispatch form data"""
+    """Schema for dispatch form data - supports both regular inventory and wastage items"""
     vehicle_number: str = Field(..., max_length=50)
     driver_name: str = Field(..., max_length=255)
     driver_mobile: str = Field(..., max_length=20)
@@ -835,7 +835,8 @@ class DispatchFormData(BaseModel):
     client_id: UUID
     primary_order_id: Optional[UUID] = None
     order_date: Optional[datetime] = None
-    inventory_ids: List[UUID] = Field(..., min_items=1)
+    inventory_ids: List[UUID] = Field(default_factory=list)  # Regular inventory items
+    wastage_ids: List[UUID] = Field(default_factory=list)  # NEW: Wastage inventory items
     created_by_id: UUID
 
 class DispatchRecordCreate(BaseModel):

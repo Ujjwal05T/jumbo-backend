@@ -547,13 +547,14 @@ class DispatchRecord(Base):
 class DispatchItem(Base):
     """
     Individual cut rolls in a dispatch record
+    Supports both regular inventory items and wastage items
     """
     __tablename__ = "dispatch_item"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # DSI-001, DSI-002, etc.
     dispatch_record_id = Column(UNIQUEIDENTIFIER, ForeignKey("dispatch_record.id"), nullable=False, index=True)
-    inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=False, index=True)
+    inventory_id = Column(UNIQUEIDENTIFIER, ForeignKey("inventory_master.id"), nullable=True, index=True)  # Nullable for wastage items
     
     # Cut roll details (denormalized for tracking)
     qr_code = Column(String(255), nullable=False)

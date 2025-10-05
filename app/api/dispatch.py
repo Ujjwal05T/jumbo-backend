@@ -356,6 +356,63 @@ def update_dispatch_status(
 # PDF GENERATION ENDPOINTS
 # ============================================================================
 
+@router.get("/dispatch/wastage-inventory-items", tags=["Dispatch History"])
+def get_wastage_inventory_items(
+    status: str = "available",
+    db: Session = Depends(get_db)
+):
+    """Get wastage inventory items available for dispatch"""
+    try:
+        from sqlalchemy.orm import joinedload
+
+        # Query wastage inventory items with status "available"
+        query = db.query(models.WastageInventory).options(
+            joinedload(models.WastageInventory.paper),
+            joinedload(models.WastageInventory.created_by),
+            joinedload(models.WastageInventory.source_plan),
+            joinedload(models.WastageInventory.source_jumbo_roll)
+        ).filter(
+            models.WastageInventory.status == status
+        )
+
+        wastage_items = query.order_by(desc(models.WastageInventory.created_at)).all()
+
+        # Format response
+        wastage_list = []
+        for item in wastage_items:
+            wastage_list.append({
+                "id": str(item.id),
+                "frontend_id": item.frontend_id,
+                "barcode_id": item.barcode_id,
+                "reel_no": item.reel_no,
+                "width_inches": float(item.width_inches) if item.width_inches else 0.0,
+                "weight_kg": float(item.weight_kg) if item.weight_kg else 0.0,
+                "paper_spec": f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "Unknown",
+                "paper": {
+                    "id": str(item.paper.id),
+                    "name": item.paper.name,
+                    "gsm": item.paper.gsm,
+                    "bf": float(item.paper.bf),
+                    "shade": item.paper.shade
+                } if item.paper else None,
+                "status": item.status,
+                "location": item.location,
+                "source_plan_id": str(item.source_plan_id) if item.source_plan_id else None,
+                "source_plan": item.source_plan.frontend_id if item.source_plan else None,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+                "created_by": item.created_by.name if item.created_by else "Unknown",
+                "notes": item.notes
+            })
+
+        return {
+            "wastage_items": wastage_list,
+            "total_count": len(wastage_list)
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching wastage inventory items: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/dispatch/{dispatch_id}/pdf", tags=["Dispatch PDF"])
 def generate_dispatch_pdf(
     dispatch_id: str,
