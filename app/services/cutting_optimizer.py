@@ -1382,84 +1382,94 @@ class CuttingOptimizer:
         logger.debug(f"📋 INPUT DETAILS: Pending Orders: {pending_orders}")
         logger.debug(f"📋 INPUT DETAILS: Available Inventory: {available_inventory}")
         
-        # Combine all requirements but preserve source information
-        # Tag each requirement with its source (regular order vs pending order)
+        # NEW APPROACH: Expand requirements to individual rolls with explicit order tracking
+        # Instead of merging quantities, keep each roll separate with its order_id
         all_requirements = []
-        
-        # Add regular orders with source tag
+
+        # Add regular orders - EXPAND to individual rolls
         for req in order_requirements:
-            req_with_source = req.copy()
-            req_with_source['source_type'] = 'regular_order'
-            req_with_source['source_order_id'] = req.get('order_id')
-            all_requirements.append(req_with_source)
-        
-        # Add pending orders with source tag
+            # Create one entry per roll quantity
+            for roll_index in range(req['quantity']):
+                individual_roll = req.copy()
+                individual_roll['source_type'] = 'regular_order'
+                individual_roll['source_order_id'] = req.get('order_id')
+                individual_roll['quantity'] = 1  # Each entry represents 1 roll
+                individual_roll['original_quantity'] = req['quantity']  # Track original order size
+                individual_roll['roll_index'] = roll_index + 1  # Track which roll (1, 2, 3...)
+                all_requirements.append(individual_roll)
+                logger.debug(f"📦 Added individual roll: Order {req.get('order_id', 'Unknown')[:8]} - {req['width']}\" roll #{roll_index + 1}/{req['quantity']}")
+
+        # Add pending orders - EXPAND to individual rolls
         logger.info(f"🔍 OPTIMIZER DEBUG: Processing {len(pending_orders)} pending orders for source tracking")
         for i, req in enumerate(pending_orders):
             logger.info(f"🔍 OPTIMIZER DEBUG: Pending order {i+1}: {req}")
             logger.info(f"🔍 OPTIMIZER DEBUG: Available keys in pending order: {list(req.keys())}")
-            req_with_source = req.copy()
-            req_with_source['source_type'] = 'pending_order'
-            req_with_source['source_order_id'] = req.get('original_order_id')  # Pending orders use original_order_id
-            
+
             # TRY MULTIPLE POSSIBLE FIELD NAMES for pending ID
             source_pending_id = req.get('pending_id') or req.get('id') or req.get('frontend_id')
-            req_with_source['source_pending_id'] = source_pending_id
-            logger.info(f"🔍 OPTIMIZER DEBUG: Enhanced pending order {i+1}: source_type={req_with_source['source_type']}, source_pending_id={req_with_source['source_pending_id']}")
-            logger.info(f"🔍 OPTIMIZER DEBUG: Used field for pending_id: pending_id={req.get('pending_id')}, id={req.get('id')}, frontend_id={req.get('frontend_id')}")
-            all_requirements.append(req_with_source)
-        
-        logger.info(f"🔄 OPTIMIZER: Combined all_requirements: {len(all_requirements)} total items")
+
+            # Create one entry per roll quantity
+            for roll_index in range(req['quantity']):
+                individual_roll = req.copy()
+                individual_roll['source_type'] = 'pending_order'
+                individual_roll['source_order_id'] = req.get('original_order_id')  # Pending orders use original_order_id
+                individual_roll['source_pending_id'] = source_pending_id
+                individual_roll['quantity'] = 1  # Each entry represents 1 roll
+                individual_roll['original_quantity'] = req['quantity']  # Track original order size
+                individual_roll['roll_index'] = roll_index + 1  # Track which roll (1, 2, 3...)
+                all_requirements.append(individual_roll)
+                logger.debug(f"📦 Added individual pending roll: Pending {source_pending_id or 'Unknown'} - {req['width']}\" roll #{roll_index + 1}/{req['quantity']}")
+
+            logger.info(f"🔍 OPTIMIZER DEBUG: Enhanced pending order {i+1}: source_type=pending_order, source_pending_id={source_pending_id}")
+
+        logger.info(f"🔄 OPTIMIZER: Combined all_requirements: {len(all_requirements)} individual rolls (expanded from orders)")
         logger.debug(f"📋 COMBINED REQUIREMENTS: {all_requirements}")
         
         # Group all requirements by complete specification (GSM + Shade + BF)
-        # This ensures that different paper types are NEVER mixed in the same jumbo roll
-        # Each jumbo roll will contain only 3 sets of 118" rolls with identical paper specs
+        # NEW: Store individual rolls with their order_id, not merged quantities
         spec_groups = {}
-        logger.info(f"🔍 OPTIMIZER: Grouping requirements by specification...")
-        
+        logger.info(f"🔍 OPTIMIZER: Grouping individual rolls by specification...")
+
         for i, req in enumerate(all_requirements):
-            logger.debug(f"  📝 Processing requirement {i+1}: {req}")
+            logger.debug(f"  📝 Processing individual roll {i+1}: {req}")
             # Create unique key for paper specification - CRITICAL for avoiding paper mixing
             spec_key = (req['gsm'], req['shade'], req['bf'])
             logger.debug(f"  🔑 Spec key: {spec_key}")
-            
+
             if spec_key not in spec_groups:
                 spec_groups[spec_key] = {
-                    'orders': {},
+                    'orders': {},  # Still used for optimizer input (aggregated)
                     'inventory': [],
                     'spec': {'gsm': req['gsm'], 'shade': req['shade'], 'bf': req['bf']},
-                    'source_tracking': {}  # NEW: Track which widths came from which sources
+                    'individual_rolls': []  # NEW: List of individual rolls with order_id
                 }
                 logger.info(f"  ✨ Created new spec group for {spec_key}")
-            
-            # Add width and quantity to this specification group
+
+            # Add to individual rolls list (explicit tracking)
             width = float(req['width'])
-            if width in spec_groups[spec_key]['orders']:
-                old_qty = spec_groups[spec_key]['orders'][width]
-                spec_groups[spec_key]['orders'][width] += req['quantity']
-                logger.debug(f"  Added {req['quantity']} to existing width {width}\" (was {old_qty}, now {spec_groups[spec_key]['orders'][width]})")
-            else:
-                spec_groups[spec_key]['orders'][width] = req['quantity']
-                logger.debug(f"  🆕 Added new width {width}\" with quantity {req['quantity']}")
-            
-            # NEW: Track source information for this width
-            if width not in spec_groups[spec_key]['source_tracking']:
-                spec_groups[spec_key]['source_tracking'][width] = []
-            source_entry = {
+            spec_groups[spec_key]['individual_rolls'].append({
+                'width': width,
                 'source_type': req['source_type'],
                 'source_order_id': req.get('source_order_id'),
                 'source_pending_id': req.get('source_pending_id'),
-                'quantity': req['quantity'],
-                'client_name': req.get('client_name', 'Unknown'),  # FIX: Add client mapping to source tracking
-                'client_id': req.get('client_id')                  # FIX: Add client ID to source tracking
-            }
-            spec_groups[spec_key]['source_tracking'][width].append(source_entry)
-            logger.info(f"  📋 SOURCE TRACKING: width={width}\", type={req['source_type']}, client={req.get('client_name', 'Unknown')}, pending_id={req.get('source_pending_id')}")
-        
+                'client_name': req.get('client_name', 'Unknown'),
+                'client_id': req.get('client_id'),
+                'roll_index': req.get('roll_index'),
+                'original_quantity': req.get('original_quantity'),
+                'assigned': False  # Track if this roll has been assigned to a cut roll
+            })
+
+            # Also aggregate for optimizer input (still need this for match_combos)
+            if width in spec_groups[spec_key]['orders']:
+                spec_groups[spec_key]['orders'][width] += 1
+            else:
+                spec_groups[spec_key]['orders'][width] = 1
+
+            logger.debug(f"  ✅ Added individual roll: width={width}\", order={req.get('source_order_id', 'Unknown')[:8]}, client={req.get('client_name', 'Unknown')}")
+
         logger.info(f"📊 OPTIMIZER: Final spec_groups structure:")
         for spec_key, group_data in spec_groups.items():
-            logger.info(f"  📋 Spec {spec_key}: {group_data['orders']}")
+            logger.info(f"  📋 Spec {spec_key}: {group_data['orders']} (from {len(group_data['individual_rolls'])} individual rolls)")
         
         # Add available inventory to matching specification groups
         print(f"\n[DEBUG] Adding available inventory to spec groups...")
@@ -1483,10 +1493,7 @@ class CuttingOptimizer:
         new_pending_orders = []
         jumbo_rolls_needed = 0
         all_high_trims = []
-        
-        # NEW: Initialize assignment tracker for proper source distribution
-        assignment_tracker = {}
-        
+
         for spec_key, group_data in spec_groups.items():
             orders = group_data['orders']
             inventory = group_data['inventory']
@@ -1584,12 +1591,30 @@ class CuttingOptimizer:
                 for pattern_idx, (combo, trim) in enumerate(used):
                     individual_118_rolls_needed += 1
                     logger.info(f"     ✂️ Pattern {pattern_idx+1}: {combo} → trim={trim}\" (Roll #{individual_118_rolls_needed})")
-                    
+
                     # Add cut rolls from this pattern
                     for width in combo:
-                        # NEW: Determine source information for this width with proper distribution
-                        source_info = self._get_source_info_for_width(width, spec_groups[spec_key]['source_tracking'], assignment_tracker)
-                        
+                        # NEW APPROACH: Find first unassigned individual roll for this width
+                        source_info = None
+                        for individual_roll in spec_groups[spec_key]['individual_rolls']:
+                            if individual_roll['width'] == width and not individual_roll['assigned']:
+                                # Mark this roll as assigned
+                                individual_roll['assigned'] = True
+                                source_info = individual_roll
+                                logger.debug(f"       ✅ Assigned individual roll: width={width}\", order={individual_roll.get('source_order_id', 'Unknown')[:8]}, client={individual_roll.get('client_name', 'Unknown')}")
+                                break
+
+                        if source_info is None:
+                            # Fallback: No unassigned roll found (shouldn't happen)
+                            logger.warning(f"       ⚠️ No unassigned individual roll found for width {width}\"")
+                            source_info = {
+                                'source_type': 'regular_order',
+                                'source_order_id': None,
+                                'source_pending_id': None,
+                                'client_name': 'Unknown',
+                                'client_id': None
+                            }
+
                         cut_roll = {
                             'width': width,
                             'quantity': 1,
@@ -1599,19 +1624,20 @@ class CuttingOptimizer:
                             'source': 'cutting',
                             'individual_roll_number': individual_118_rolls_needed,
                             'trim_left': trim,
-                            # NEW: Add source tracking fields
+                            # Explicit order tracking from individual roll
                             'source_type': source_info.get('source_type', 'regular_order'),
                             'source_order_id': source_info.get('source_order_id'),
                             'source_pending_id': source_info.get('source_pending_id'),
                             'order_id': source_info.get('source_order_id'),  # Keep existing field for backward compatibility
-                            'client_name': source_info.get('client_name', 'Unknown'),  # FIX: Include client name from source
-                            'client_id': source_info.get('client_id')                  # FIX: Include client ID from source
+                            'client_name': source_info.get('client_name', 'Unknown'),
+                            'client_id': source_info.get('client_id'),
+                            'roll_index': source_info.get('roll_index')  # Track which roll from original order
                         }
                         cut_rolls_generated.append(cut_roll)
-                        
+
                         # DEBUG: Log client mapping success
                         if individual_118_rolls_needed <= 5:  # Only log first 5 rolls to avoid spam
-                            logger.info(f"  ✂️ CUT ROLL #{len(cut_rolls_generated)}: {width}\" → client: {cut_roll.get('client_name', 'Unknown')}")
+                            logger.info(f"  ✂️ CUT ROLL #{len(cut_rolls_generated)}: {width}\" → order: {cut_roll.get('source_order_id', 'Unknown')[:8]}, client: {cut_roll.get('client_name', 'Unknown')}")
             else:
                 logger.info(f"   ✅ OPTIMIZER: All orders fulfilled from inventory, no cutting needed")
             
@@ -1628,46 +1654,52 @@ class CuttingOptimizer:
             # It will be calculated based on user's actual selection in frontend
             
             # Add orders that couldn't be fulfilled to pending
-            # CRITICAL: Only create new pending orders from unfulfilled REGULAR orders
-            # Do NOT create duplicates of existing pending orders
-            if orders_copy:
-                logger.info(f"🔍 PENDING CONVERSION DEBUG: pending dict = {dict(pending)}")
+            # NEW APPROACH: Use unassigned individual rolls to create pending orders
+            if pending:
+                logger.info(f"🔍 PENDING CONVERSION: Processing {len(pending)} pending widths")
+
                 for width, qty in pending.items():
-                    # Check source tracking to see if this unfulfilled order came from regular orders
-                    source_tracking = spec_groups[spec_key]['source_tracking'].get(width, [])
-                    regular_order_qty = 0
-                    
-                    # Count how many of these unfulfilled orders came from regular orders (not existing pending orders)
-                    for source in source_tracking:
-                        if source.get('source_type') == 'regular_order':
-                            regular_order_qty += source.get('quantity', 0)
-                    
-                    # Only create pending orders for the portion that came from regular orders
-                    pending_qty_to_create = min(qty, regular_order_qty)
-                    
-                    if pending_qty_to_create > 0:
-                        logger.info(f"🔍 Creating pending order: {width}\" x{pending_qty_to_create} (from regular orders only)")
-                        
-                        # Find source order for this pending requirement
-                        source_order_info = self._find_source_order_for_pending(width, spec_key, spec_groups)
-                        
-                        new_pending_orders.append({
-                            'width': width,
-                            'quantity': pending_qty_to_create,
-                            'gsm': spec['gsm'],
-                            'bf': spec['bf'],
-                            'shade': spec['shade'],
-                            'reason': 'waste_too_high',
-                            'source_order_id': source_order_info.get('order_id'),
-                            'source_type': 'regular_order'
-                        })
-                    else:
-                        logger.info(f"🔍 SKIPPING pending order creation: {width}\" x{qty} (all from existing pending orders - no duplication)")
-                        
-                    # Log the breakdown for debugging
-                    existing_pending_qty = qty - pending_qty_to_create
-                    if existing_pending_qty > 0:
-                        logger.info(f"     📋 Breakdown: {pending_qty_to_create} from regular orders, {existing_pending_qty} from existing pending orders")
+                    logger.info(f"   Processing pending width {width}\" with quantity {qty}")
+
+                    # Find unassigned individual rolls for this width (these go to pending)
+                    unassigned_rolls = [
+                        roll for roll in spec_groups[spec_key]['individual_rolls']
+                        if roll['width'] == width and not roll['assigned']
+                    ]
+
+                    logger.info(f"   Found {len(unassigned_rolls)} unassigned rolls for width {width}\"")
+
+                    # Group by source_order_id to create consolidated pending orders
+                    pending_by_order = {}
+                    for roll in unassigned_rolls[:qty]:  # Take only qty rolls (should match)
+                        roll['assigned'] = True  # Mark as assigned to pending
+                        order_id = roll.get('source_order_id')
+
+                        if order_id not in pending_by_order:
+                            pending_by_order[order_id] = {
+                                'rolls': [],
+                                'source_type': roll['source_type'],
+                                'source_pending_id': roll.get('source_pending_id')
+                            }
+                        pending_by_order[order_id]['rolls'].append(roll)
+
+                    # Create pending orders grouped by source order
+                    for order_id, order_data in pending_by_order.items():
+                        # Only create pending for regular orders (not already-pending orders)
+                        if order_data['source_type'] == 'regular_order':
+                            new_pending_orders.append({
+                                'width': width,
+                                'quantity': len(order_data['rolls']),
+                                'gsm': spec['gsm'],
+                                'bf': spec['bf'],
+                                'shade': spec['shade'],
+                                'reason': 'waste_too_high',
+                                'source_order_id': order_id,
+                                'source_type': 'regular_order'
+                            })
+                            logger.info(f"   ✅ Created pending order: Order {order_id[:8] if order_id else 'Unknown'} - {width}\" x{len(order_data['rolls'])}")
+                        else:
+                            logger.info(f"   ⏭️ Skipped pending order creation: Already pending order {order_data['source_pending_id']} - {width}\" x{len(order_data['rolls'])}")
                 
                 # Track high trim approvals
                 for combo, trim in high_trims:
@@ -1854,10 +1886,29 @@ class CuttingOptimizer:
                             logger.debug(f"🚫 SOURCE SKIP: Pending order {str(source_id)[:8]}... already at capacity ({current_assignments}/{max_quantity})")
             
             # If no pending orders available or all at capacity, use regular order sources
+            # DISTRIBUTE regular orders properly based on their quantities
             regular_sources = [s for s in sources if s.get('source_type') == 'regular_order']
             if regular_sources:
+                # Find a regular order that hasn't exceeded its quantity limit
+                for source in regular_sources:
+                    source_id = source.get('source_order_id')
+                    if source_id:
+                        # Track assignments for this specific regular order
+                        current_assignments = assignment_tracker[width_key].get(source_id, 0)
+                        max_quantity = source.get('quantity', 1)
+
+                        # If this regular order can still accept more cut rolls, use it
+                        if current_assignments < max_quantity:
+                            assignment_tracker[width_key][source_id] = current_assignments + 1
+                            logger.debug(f"🎯 SOURCE ASSIGNMENT: Assigned cut roll {current_assignments + 1}/{max_quantity} to regular order {str(source_id)[:8]}... (client: {source.get('client_name', 'Unknown')})")
+                            return source
+                        else:
+                            logger.debug(f"🚫 SOURCE SKIP: Regular order {str(source_id)[:8]}... already at capacity ({current_assignments}/{max_quantity})")
+
+                # If all regular orders are at capacity, return first one (shouldn't happen in normal flow)
+                logger.warning(f"⚠️ All regular orders at capacity for width {width}\", returning first source")
                 return regular_sources[0]
-            
+
             # Fallback to first source if no other option
             return sources[0]
         

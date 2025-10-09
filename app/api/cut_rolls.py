@@ -164,122 +164,124 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
     """Get summary of cut roll production for a specific plan using InventoryMaster"""
     try:
         from .. import models
-        
-        # Get plan details
-        plan = crud_operations.get_plan(db=db, plan_id=plan_id)
+        from sqlalchemy.orm import joinedload, selectinload
+
+        # Get plan details with optimized loading
+        plan = db.query(models.PlanMaster).options(
+            selectinload(models.PlanMaster.plan_orders)
+                .joinedload(models.PlanOrderLink.order)
+                .joinedload(models.OrderMaster.client)
+        ).filter(models.PlanMaster.id == plan_id).first()
+
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
-        
+
         logger.info(f"🔍 Getting cut roll summary for plan {plan_id}")
-        
-        # Debug: Check if PlanInventoryLink records exist for this plan
-        plan_links = db.query(models.PlanInventoryLink).filter(
-            models.PlanInventoryLink.plan_id == plan_id
-        ).all()
-        # for link in plan_links:
-        
-        # Get cut rolls linked to this plan via PlanInventoryLink with optimized selective loading
-        from sqlalchemy.orm import joinedload
-        cut_rolls_via_link = db.query(models.InventoryMaster).join(
+
+        # Get cut rolls with all needed relationships in one query
+        all_cut_rolls_raw = db.query(models.InventoryMaster).join(
             models.PlanInventoryLink,
             models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
         ).options(
-            joinedload(models.InventoryMaster.paper),  # Load paper specs (always needed)
-            joinedload(models.InventoryMaster.allocated_order)  # Load allocated order
-                .joinedload(models.OrderMaster.client)  # Load client info (commonly accessed)
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.allocated_order)
+                .joinedload(models.OrderMaster.client),
+            joinedload(models.InventoryMaster.parent_118_roll)
+                .joinedload(models.InventoryMaster.parent_jumbo)
         ).filter(
             models.PlanInventoryLink.plan_id == plan_id,
             models.InventoryMaster.roll_type == "cut"
         ).all()
-        
-        # for roll in cut_rolls_via_link:
-        
-        # Method 2: DISABLED time-based fallback to force proper plan-inventory linking
-        cut_rolls_by_time = []
-        if not cut_rolls_via_link:
+
+        if not all_cut_rolls_raw:
             logger.warning(f"🚨 NO INVENTORY LINKS FOUND for plan {plan_id}! Plan should have PlanInventoryLink records.")
             logger.warning(f"🚨 This plan will show NO ITEMS until proper inventory links are created.")
             logger.warning(f"🚨 Time-based fallback is DISABLED to prevent showing wrong items.")
-            # Intentionally return empty list instead of using time-based fallback
-        # elif cut_rolls_via_link:
         
-        # Use only the appropriate method - prefer PlanInventoryLink over time-based
-        all_cut_rolls_raw = cut_rolls_via_link if cut_rolls_via_link else cut_rolls_by_time
-        
-        
-        seen_ids = set()
+
+        # Pre-compute client fallback from plan orders (already loaded)
+        fallback_client = "Unknown Client"
+        fallback_order_date = None
+        if plan.plan_orders:
+            for plan_order in plan.plan_orders:
+                if plan_order.order and plan_order.order.client:
+                    fallback_client = plan_order.order.client.company_name
+                    fallback_order_date = plan_order.order.created_at.isoformat()
+                    break
+
+        # Build cut rolls list with optimized data access
         all_cut_rolls = []
+        seen_ids = set()
+
+        for item in all_cut_rolls_raw:
+            if item.id in seen_ids:
+                continue
+            seen_ids.add(item.id)
+
+            # Get client info (already loaded via joinedload)
+            if item.allocated_order and item.allocated_order.client:
+                client_name = item.allocated_order.client.company_name
+                order_date = item.allocated_order.created_at.isoformat()
+            else:
+                client_name = fallback_client
+                order_date = fallback_order_date
+
+            # Get jumbo roll info (already loaded via joinedload)
+            jumbo_roll_id = None
+            jumbo_roll_frontend_id = None
+            actual_parent_jumbo_id = None
+
+            if item.parent_118_roll and item.parent_118_roll.parent_jumbo:
+                jumbo = item.parent_118_roll.parent_jumbo
+                jumbo_roll_id = str(item.parent_118_roll.parent_jumbo_id)
+                jumbo_roll_frontend_id = getattr(jumbo, 'frontend_id', None)
+                actual_parent_jumbo_id = str(item.parent_118_roll.parent_jumbo_id)
+
+            all_cut_rolls.append({
+                "inventory_id": str(item.id),
+                "qr_code": item.qr_code or f"QR{str(item.id)[:8].upper()}",
+                "barcode_id": item.barcode_id or f"CR_{str(item.id)[:5].upper()}",
+                "width_inches": float(item.width_inches),
+                "weight_kg": float(item.weight_kg),
+                "status": item.status,
+                "location": item.location or "warehouse",
+                "created_at": item.created_at,
+                "paper_specs": {
+                    "gsm": item.paper.gsm,
+                    "bf": float(item.paper.bf),
+                    "shade": item.paper.shade
+                } if item.paper else None,
+                "client_name": client_name,
+                "order_date": order_date,
+                "individual_roll_number": item.individual_roll_number,
+                "parent_118_roll_id": str(item.parent_118_roll_id) if item.parent_118_roll_id else None,
+                "roll_sequence": item.roll_sequence,
+                "is_wastage_roll": item.is_wastage_roll,
+                "jumbo_roll_id": jumbo_roll_id,
+                "jumbo_roll_frontend_id": jumbo_roll_frontend_id,
+                "actual_parent_jumbo_id": actual_parent_jumbo_id
+            })
         
-        for inventory_item in all_cut_rolls_raw:
-            if inventory_item.id not in seen_ids:
-                seen_ids.add(inventory_item.id)
-                
-                # Get client info from allocated order or plan orders
-                client_name = "Unknown Client"
-                order_date = None
-                
-                # Try to get client from allocated order
-                if inventory_item.allocated_order and inventory_item.allocated_order.client:
-                    client_name = inventory_item.allocated_order.client.company_name
-                    order_date = inventory_item.allocated_order.created_at.isoformat()
-                
-                # If no allocated order, try to get client from plan orders
-                elif hasattr(plan, 'plan_orders') and plan.plan_orders:
-                    for plan_order in plan.plan_orders:
-                        if plan_order.order and plan_order.order.client:
-                            client_name = plan_order.order.client.company_name
-                            order_date = plan_order.order.created_at.isoformat()
-                            break
-                
-                all_cut_rolls.append({
-                    "inventory_id": str(inventory_item.id),
-                    "qr_code": inventory_item.qr_code or f"QR{str(inventory_item.id)[:8].upper()}",
-                    "barcode_id": inventory_item.barcode_id or f"CR_{str(inventory_item.id)[:5].upper()}",
-                    "width_inches": float(inventory_item.width_inches),
-                    "weight_kg": float(inventory_item.weight_kg),
-                    "status": inventory_item.status,
-                    "location": inventory_item.location or "warehouse",
-                    "created_at": inventory_item.created_at,
-                    "paper_specs": {
-                        "gsm": inventory_item.paper.gsm,
-                        "bf": float(inventory_item.paper.bf),
-                        "shade": inventory_item.paper.shade
-                    } if inventory_item.paper else None,
-                    "client_name": client_name,
-                    "order_date": order_date,
-                    # Jumbo roll hierarchy fields
-                    "individual_roll_number": inventory_item.individual_roll_number,
-                    "parent_118_roll_id": str(inventory_item.parent_118_roll_id) if inventory_item.parent_118_roll_id else None,
-                    "roll_sequence": inventory_item.roll_sequence,
-                    # Enhanced jumbo roll data - traverse the relationship chain
-                    **_get_jumbo_roll_info(inventory_item)
-                })
-        
-        
-        # Group items by status
+
+        # Compute aggregations in single pass
         status_breakdown = {}
+        paper_specs = {}
+        client_info = {}
         total_weight = 0
         total_rolls = len(all_cut_rolls)
-        
+
         for item in all_cut_rolls:
+            # Status breakdown
             status = item["status"]
             if status not in status_breakdown:
-                status_breakdown[status] = {
-                    "count": 0,
-                    "total_weight": 0,
-                    "widths": []
-                }
-            
+                status_breakdown[status] = {"count": 0, "total_weight": 0, "widths": []}
             status_breakdown[status]["count"] += 1
             status_breakdown[status]["total_weight"] += item["weight_kg"]
             status_breakdown[status]["widths"].append(item["width_inches"])
-            
             total_weight += item["weight_kg"]
-        
-        # Get paper specifications
-        paper_specs = {}
-        for item in all_cut_rolls:
-            if item["paper_specs"]:
+
+            # Paper specs (non-wastage only)
+            if item["paper_specs"] and not item["is_wastage_roll"]:
                 spec_key = f"{item['paper_specs']['gsm']}_{item['paper_specs']['bf']}_{item['paper_specs']['shade']}"
                 if spec_key not in paper_specs:
                     paper_specs[spec_key] = {
@@ -289,20 +291,84 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                         "roll_count": 0
                     }
                 paper_specs[spec_key]["roll_count"] += 1
-        
-        # Get client information from orders linked to this plan
-        plan_order_links = []
-        client_info = {}
-        if hasattr(plan, 'plan_orders'):
-            plan_order_links = plan.plan_orders
-            for link in plan_order_links:
+
+        # Extract client info from already-loaded plan orders
+        if plan.plan_orders:
+            for link in plan.plan_orders:
                 if link.order and link.order.client:
                     client_info[str(link.order.id)] = {
                         "client_name": link.order.client.company_name,
                         "order_date": link.order.created_at.isoformat()
                     }
-        
-        return {
+
+        # Get wastage allocations with optimized single query
+        wastage_items = []
+        if plan.wastage_allocations:
+            import json
+            try:
+                wastage_allocations = json.loads(plan.wastage_allocations)
+                if wastage_allocations and isinstance(wastage_allocations, list):
+                    wastage_ids = [
+                        UUID(alloc["wastage_id"]) if isinstance(alloc["wastage_id"], str) else alloc["wastage_id"]
+                        for alloc in wastage_allocations if alloc.get("wastage_id")
+                    ]
+                    order_ids = [
+                        UUID(alloc["order_id"]) if isinstance(alloc["order_id"], str) else alloc["order_id"]
+                        for alloc in wastage_allocations if alloc.get("order_id")
+                    ]
+
+                    if wastage_ids:
+                        # Single query for wastage with paper
+                        wastage_records = db.query(models.WastageInventory).options(
+                            joinedload(models.WastageInventory.paper)
+                        ).filter(models.WastageInventory.id.in_(wastage_ids)).all()
+                        wastage_map = {str(w.id): w for w in wastage_records}
+
+                        # Single query for orders with clients
+                        orders = db.query(models.OrderMaster).options(
+                            joinedload(models.OrderMaster.client)
+                        ).filter(models.OrderMaster.id.in_(order_ids)).all() if order_ids else []
+                        order_client_map = {str(o.id): o.client.company_name for o in orders if o.client}
+
+                        # Build wastage items
+                        for alloc in wastage_allocations:
+                            wid = str(alloc.get("wastage_id", ""))
+                            if wid in wastage_map:
+                                w = wastage_map[wid]
+                                oid = str(alloc.get("order_id", ""))
+                                wastage_items.append({
+                                    "id": str(w.id),
+                                    "frontend_id": w.frontend_id,
+                                    "barcode_id": w.barcode_id,
+                                    "width_inches": float(w.width_inches),
+                                    "weight_kg": float(w.weight_kg),
+                                    "reel_no": w.reel_no,
+                                    "status": w.status,
+                                    "location": w.location,
+                                    "paper_specs": {
+                                        "gsm": w.paper.gsm,
+                                        "bf": float(w.paper.bf),
+                                        "shade": w.paper.shade
+                                    } if w.paper else None,
+                                    "created_at": w.created_at.isoformat() if w.created_at else None,
+                                    "client_name": order_client_map.get(oid, "Unknown Client"),
+                                    "quantity_reduced": alloc.get("quantity_reduced", 1)
+                                })
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Failed to parse wastage_allocations for plan {plan_id}: {str(e)}")
+
+        # Convert datetime objects to ISO format strings for JSON serialization
+        detailed_items = []
+        for item in all_cut_rolls:
+            detailed_item = dict(item)  # Make a copy
+            # Convert datetime to string
+            if hasattr(detailed_item.get("created_at"), 'isoformat'):
+                detailed_item["created_at"] = detailed_item["created_at"].isoformat()
+            elif detailed_item.get("created_at"):
+                detailed_item["created_at"] = str(detailed_item["created_at"])
+            detailed_items.append(detailed_item)
+
+        response_data = {
             "plan_id": str(plan.id),
             "plan_name": plan.name,
             "plan_status": plan.status,
@@ -315,30 +381,12 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 "paper_specifications": list(paper_specs.values()),
                 "client_orders": list(client_info.values())
             },
-            "detailed_items": [
-                {
-                    "inventory_id": item["inventory_id"],
-                    "width_inches": item["width_inches"],
-                    "weight_kg": item["weight_kg"],
-                    "status": item["status"],
-                    "location": item["location"],
-                    "qr_code": item["qr_code"],
-                    "barcode_id": item["barcode_id"],
-                    "created_at": item["created_at"].isoformat() if hasattr(item["created_at"], 'isoformat') else str(item["created_at"]),
-                    "paper_specs": item["paper_specs"],
-                    "client_name": item["client_name"],
-                    "order_date": item["order_date"],
-                    # Jumbo roll hierarchy fields for frontend grouping
-                    "individual_roll_number": item["individual_roll_number"],
-                    "parent_118_roll_id": item["parent_118_roll_id"],
-                    "roll_sequence": item["roll_sequence"],
-                    "jumbo_roll_frontend_id": item["jumbo_roll_frontend_id"],
-                    "jumbo_roll_id": item["jumbo_roll_id"],
-                    "actual_parent_jumbo_id": item["actual_parent_jumbo_id"]
-                }
-                for item in all_cut_rolls
-            ]
+            "wastage_allocations": wastage_items,
+            "detailed_items": detailed_items
         }
+
+        logger.info(f"✅ Returning production summary with {len(detailed_items)} items")
+        return response_data
         
     except HTTPException:
         raise
