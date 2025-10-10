@@ -51,18 +51,35 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
         return query.order_by(models.PlanMaster.created_at.desc()).offset(skip).limit(limit).all()
     
-    def get_plan(self, db: Session, plan_id: UUID) -> Optional[models.PlanMaster]:
-        """Get plan by ID with all relationships"""
-        return (
-            db.query(models.PlanMaster)
-            .options(
+    def get_plan(self, db: Session, plan_id: UUID, include_relationships: bool = True) -> Optional[models.PlanMaster]:
+        """Get plan by ID with optional relationships loading
+        
+        Args:
+            db: Database session
+            plan_id: UUID of the plan
+            include_relationships: If True, loads all relationships (orders, inventory).
+                                   If False, only loads the creator user (optimized for detail view).
+        
+        Returns:
+            Plan with requested relationships or None if not found
+        """
+        query = db.query(models.PlanMaster)
+        
+        if include_relationships:
+            # Full version: Load all relationships (used for production start, etc.)
+            query = query.options(
                 joinedload(models.PlanMaster.created_by),
                 joinedload(models.PlanMaster.plan_orders).joinedload(models.PlanOrderLink.order),
                 joinedload(models.PlanMaster.plan_inventory).joinedload(models.PlanInventoryLink.inventory)
             )
-            .filter(models.PlanMaster.id == plan_id)
-            .first()
-        )
+        else:
+            # Optimized version: Only load creator user (used for plan details view)
+            # This reduces data transfer and database load significantly
+            query = query.options(
+                joinedload(models.PlanMaster.created_by)
+            )
+        
+        return query.filter(models.PlanMaster.id == plan_id).first()
     
     def create_plan(self, db: Session, *, plan: schemas.PlanMasterCreate) -> models.PlanMaster:
         """Create new cutting plan with order links and pending orders"""

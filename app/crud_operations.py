@@ -130,8 +130,8 @@ def create_plan(db, plan_data):
 def get_plans(db, skip=0, limit=100, status=None):
     return plan.get_plans(db=db, skip=skip, limit=limit, status=status)
 
-def get_plan(db, plan_id):
-    return plan.get_plan(db=db, plan_id=plan_id)
+def get_plan(db, plan_id, include_relationships=True):
+    return plan.get_plan(db=db, plan_id=plan_id, include_relationships=include_relationships)
 
 def update_plan_status(db, plan_id, new_status):
     return plan.update_plan_status(db=db, plan_id=plan_id, new_status=new_status)

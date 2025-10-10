@@ -88,8 +88,14 @@ def get_plans(
 
 @router.get("/plans/{plan_id}", response_model=schemas.PlanMaster, tags=["Plan Master"])
 def get_plan(plan_id: UUID, db: Session = Depends(get_db)):
-    """Get cutting plan by ID"""
-    plan = crud_operations.get_plan(db=db, plan_id=plan_id)
+    """Get cutting plan by ID (optimized - only loads creator user)
+    
+    This endpoint is optimized for the plan details view by only loading
+    the plan creator relationship, significantly reducing database load and data transfer.
+    For operations that need full relationships (orders, inventory), use include_relationships=True.
+    """
+    # Use optimized version (include_relationships=False) for plan details API
+    plan = crud_operations.get_plan(db=db, plan_id=plan_id, include_relationships=False)
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
@@ -204,7 +210,11 @@ def start_production(
 
 @router.get("/plans/{plan_id}/order-items", response_model=List[schemas.PlanOrderItem], tags=["Plan Master"])
 def get_plan_order_items(plan_id: UUID, db: Session = Depends(get_db)):
-    """Get order items linked to a plan with estimated weights"""
+    """Get order items linked to a plan with estimated weights
+    
+    ⚠️ DEPRECATED: This endpoint is not used by the frontend (verified 0% usage).
+    Consider removing in future cleanup to reduce API surface area.
+    """
     try:
         from .. import models
         from sqlalchemy.orm import joinedload

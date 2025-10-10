@@ -31,7 +31,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Set up CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000","https://satguru-test.vercel.app","https://satguru-reels.vercel.app"],
+    allow_origins=["http://localhost:3000","http://192.168.1.96:3000","https://satguru-test.vercel.app","https://satguru-reels.vercel.app","https://522c58a6cd19.ngrok-free.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

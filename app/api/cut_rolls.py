@@ -308,6 +308,21 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             try:
                 wastage_allocations = json.loads(plan.wastage_allocations)
                 if wastage_allocations and isinstance(wastage_allocations, list):
+                    # Track seen wastage IDs to ensure uniqueness (keep first occurrence only)
+                    seen_wastage_ids = set()
+                    unique_wastage_allocations = []
+                    
+                    for alloc in wastage_allocations:
+                        wid = alloc.get("wastage_id")
+                        if wid:
+                            wid_str = str(wid)
+                            if wid_str not in seen_wastage_ids:
+                                seen_wastage_ids.add(wid_str)
+                                unique_wastage_allocations.append(alloc)
+                    
+                    # Use only unique wastage allocations
+                    wastage_allocations = unique_wastage_allocations
+                    
                     wastage_ids = [
                         UUID(alloc["wastage_id"]) if isinstance(alloc["wastage_id"], str) else alloc["wastage_id"]
                         for alloc in wastage_allocations if alloc.get("wastage_id")
