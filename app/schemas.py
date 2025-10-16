@@ -237,8 +237,9 @@ class InwardChallanBase(BaseModel):
     rst_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
     report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
+    moureport: Optional[float] = Field(None, ge=0, description="Additional mou report weight")
     net_weight: Optional[float] = Field(None, ge=0)
-    final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
+    final_weight: Optional[float] = Field(None, description="Calculated as net_weight - report - moureport (can be negative)")
     rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
     payment_type: Optional[PaymentType] = Field(None, description="Bill or Cash payment type")
     bill_no: Optional[str] = Field(None, max_length=50, description="Only used when payment_type is 'bill'")
@@ -256,8 +257,9 @@ class InwardChallanUpdate(BaseModel):
     rst_no: Optional[str] = Field(None, max_length=50)
     gross_weight: Optional[float] = Field(None, ge=0)
     report: Optional[float] = Field(None, ge=0, description="Weight to be subtracted from net weight")
+    moureport: Optional[float] = Field(None, ge=0, description="Additional mou report weight")
     net_weight: Optional[float] = Field(None, ge=0)
-    final_weight: Optional[float] = Field(None, ge=0, description="Calculated as net_weight - report")
+    final_weight: Optional[float] = Field(None, description="Calculated as net_weight - report - moureport (can be negative)")
     rate: Optional[float] = Field(None, ge=0, description="Rate per unit")
     payment_type: Optional[PaymentType] = Field(None, description="Bill or Cash payment type")
     bill_no: Optional[str] = Field(None, max_length=50, description="Only used when payment_type is 'bill'")
@@ -828,7 +830,8 @@ class DispatchFormData(BaseModel):
     vehicle_number: str = Field(..., max_length=50)
     driver_name: str = Field(..., max_length=255)
     driver_mobile: str = Field(..., max_length=20)
-    payment_type: str = Field(default="bill")  # bill/cash
+    locket_no: Optional[str] = Field(None, max_length=50, description="Optional locket number")
+    payment_type: Optional[str] = Field(None, description="Optional payment type (bill/cash)")
     dispatch_date: datetime = Field(default_factory=datetime.utcnow)
     dispatch_number: str = Field(..., max_length=100)
     reference_number: Optional[str] = Field(None, max_length=100)
@@ -844,6 +847,7 @@ class DispatchRecordCreate(BaseModel):
     vehicle_number: str
     driver_name: str
     driver_mobile: str
+    locket_no: Optional[str] = Field(None, max_length=50, description="Optional locket number")
     payment_type: str
     dispatch_date: datetime
     dispatch_number: str
@@ -878,6 +882,7 @@ class DispatchRecord(BaseModel):
     vehicle_number: str
     driver_name: str
     driver_mobile: str
+    locket_no: Optional[str] = Field(None, max_length=50, description="Optional locket number")
     payment_type: str
     dispatch_date: datetime
     dispatch_number: str

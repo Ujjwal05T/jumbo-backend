@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy.exc import SQLAlchemyError
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,10 +29,27 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": f"Validation error: {exc.errors()}"}
     )
 
-# Set up CORS for frontend
+# Set up CORS for frontend and wastage service
+cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:5001",  # DotNet wastage service
+    "http://192.168.1.96:3000",
+    "https://satguru-test.vercel.app",
+    "https://satguru-reels.vercel.app",
+    "https://522c58a6cd19.ngrok-free.app"
+]
+
+# Add additional origins from environment variable
+env_origins = os.getenv("CORS_ORIGINS", "")
+if env_origins:
+    cors_origins.extend([origin.strip() for origin in env_origins.split(",")])
+
+logger.info(f"CORS origins: {cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000","http://192.168.1.96:3000","https://satguru-test.vercel.app","https://satguru-reels.vercel.app","https://522c58a6cd19.ngrok-free.app"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

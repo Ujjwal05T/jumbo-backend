@@ -508,17 +508,18 @@ class DispatchRecord(Base):
     Track bulk dispatch of cut rolls with vehicle and driver details
     """
     __tablename__ = "dispatch_record"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # DSP-2025-001, etc.
-    
+
     # Dispatch details
     vehicle_number = Column(String(50), nullable=False)
     driver_name = Column(String(255), nullable=False)
     driver_mobile = Column(String(20), nullable=False)
+    locket_no = Column(String(50), nullable=True)  # Optional locket number
     
     # Payment and reference
-    payment_type = Column(String(20), nullable=False, default="bill")  # bill/cash
+    payment_type = Column(String(20), nullable=True)  # Optional payment type
     dispatch_date = Column(DateTime, nullable=False, default=datetime.utcnow)
     dispatch_number = Column(String(100), nullable=False)  # Internal dispatch number
     reference_number = Column(String(100), nullable=True)  # External reference
@@ -735,6 +736,7 @@ class InwardChallan(Base):
     rst_no = Column(String(50), nullable=True)
     gross_weight = Column(Numeric(10, 3), nullable=True)
     report = Column(Numeric(10, 3), nullable=True)  # Weight to be subtracted from net weight
+    moureport = Column(Numeric(10, 3), nullable=True)  # Additional mou report weight
     net_weight = Column(Numeric(10, 3), nullable=True)
     final_weight = Column(Numeric(10, 3), nullable=True)  # net_weight - report
     rate = Column(Numeric(10, 2), nullable=True)  # Rate per unit
@@ -849,10 +851,11 @@ models_with_frontend_id = [
     ProductionOrderMaster,
     PlanOrderLink,
     PlanInventoryLink,
-    DispatchRecord,
+    # DispatchRecord,  # Removed - dispatch_number is manually generated in create_dispatch_record
     DispatchItem,
     WastageInventory,
-    OrderEditLog
+    OrderEditLog,
+    OutwardChallan
 ]
 
 for model in models_with_frontend_id:

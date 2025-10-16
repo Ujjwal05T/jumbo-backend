@@ -471,6 +471,141 @@ def delete_order_item(item_id: UUID, db: Session = Depends(get_db)):
 # DISPATCH ENDPOINTS - STEP 5: Complete OrderItems
 # ============================================================================
 
+@router.get("/dispatch/preview-number", tags=["Dispatch"])
+def preview_dispatch_number(
+    db: Session = Depends(get_db)
+):
+    """Get next dispatch number preview WITHOUT advancing the sequence"""
+    try:
+        from sqlalchemy import text
+
+        # Try multiple approaches to get current sequence value
+
+        # Method 1: Check if sequence exists using sys.sequences
+        try:
+            check_sequence_query = text("""
+                SELECT COUNT(*) as count
+                FROM sys.sequences
+                WHERE name = 'dispatch_record_seq'
+            """)
+            sequence_exists = db.execute(check_sequence_query).scalar()
+            logger.info(f"Sequence exists check result: {sequence_exists}")
+        except Exception as e:
+            logger.info(f"sys.sequences query failed: {e}")
+            sequence_exists = 0
+
+        if sequence_exists == 0:
+            # Method 2: Try to create sequence if it doesn't exist
+            try:
+                create_sequence_query = text("""
+                    CREATE SEQUENCE dispatch_record_seq
+                        START WITH 1
+                        INCREMENT BY 1
+                        NO MINVALUE
+                        NO MAXVALUE
+                        NO CYCLE
+                        CACHE 1
+                """)
+                db.execute(create_sequence_query)
+                db.commit()
+                logger.info("Created dispatch_record_seq sequence")
+                current_value = 0
+            except Exception as e:
+                logger.info(f"Sequence creation failed: {e}")
+                # If we can't create it, fallback to simple prediction
+                current_value = 0
+        else:
+            # Method 3: Try to get current value with CAST to fix pyodbc data type issue
+            try:
+                get_current_query = text("""
+                    SELECT CAST(current_value AS BIGINT) as current_value
+                    FROM sys.sequences
+                    WHERE name = 'dispatch_record_seq'
+                """)
+                result = db.execute(get_current_query).fetchone()
+
+                if result and result.current_value is not None:
+                    current_value = int(result.current_value)
+                    logger.info(f"Current sequence value: {current_value}")
+                else:
+                    current_value = 0
+                    logger.info("Sequence exists but has no current value")
+            except Exception as e:
+                logger.info(f"Getting current value failed: {e}")
+                # If we can't get current value, try a different approach
+                try:
+                    # Method 4: Try with CONVERT instead of CAST
+                    alt_query = text("""
+                        SELECT CONVERT(BIGINT, current_value) as current_value
+                        FROM sys.sequences
+                        WHERE name = 'dispatch_record_seq'
+                    """)
+                    result = db.execute(alt_query).fetchone()
+                    if result and result.current_value is not None:
+                        current_value = int(result.current_value)
+                        logger.info(f"Current sequence value (CONVERT): {current_value}")
+                    else:
+                        current_value = 0
+                except Exception as e2:
+                    logger.info(f"Alternative query also failed: {e2}")
+                    current_value = 0
+
+        # Preview will be current_value + 1
+        next_value = current_value + 1
+        preview_number = f"DSP-{next_value:05d}"
+
+        logger.info(f"Preview result: {preview_number} (current: {current_value}, next: {next_value})")
+
+        return {
+            "preview_number": preview_number,
+            "current_sequence_value": current_value,
+            "next_sequence_value": next_value,
+            "note": "This is just a preview. Actual number will be generated when saving."
+        }
+
+    except Exception as e:
+        logger.error(f"Error previewing dispatch number: {e}")
+        # Final fallback: simple increment from last known dispatch number
+        try:
+            # Get the last used dispatch number from the database
+            last_dispatch_query = text("""
+                SELECT TOP 1 dispatch_number
+                FROM dispatch_records
+                WHERE dispatch_number LIKE 'DSP-%'
+                ORDER BY dispatch_number DESC
+            """)
+
+            result = db.execute(last_dispatch_query).fetchone()
+            if result and result.dispatch_number:
+                # Extract number from DSP-00015 format
+                last_num = int(result.dispatch_number.split('-')[1])
+                next_num = last_num + 1
+                preview_number = f"DSP-{next_num:05d}"
+                logger.info(f"Using database fallback: {preview_number}")
+
+                return {
+                    "preview_number": preview_number,
+                    "current_sequence_value": last_num,
+                    "next_sequence_value": next_num,
+                    "note": "Preview based on last dispatch number in database"
+                }
+            else:
+                # If no dispatches exist, start from 1
+                return {
+                    "preview_number": "DSP-00001",
+                    "current_sequence_value": 0,
+                    "next_sequence_value": 1,
+                    "note": "No existing dispatches found, starting from DSP-00001"
+                }
+        except Exception as fallback_error:
+            logger.error(f"Database fallback also failed: {fallback_error}")
+            return {
+                "preview_number": "DSP-00001",
+                "current_sequence_value": 0,
+                "next_sequence_value": 1,
+                "note": "Default preview - actual number will be generated when saving"
+            }
+
 @router.post("/dispatch/create-dispatch", tags=["Dispatch"])
 def create_dispatch_record(
     dispatch_data: schemas.DispatchFormData,
@@ -525,6 +660,14 @@ def create_dispatch_record(
         if total_items_count == 0:
             raise HTTPException(status_code=400, detail="No available items found for dispatch")
         
+        # Generate dispatch number ATOMICALLY when creating record
+        from ..services.id_generator import FrontendIDGenerator
+
+        # Always generate new number atomically at save time
+        logger.info(f"About to generate dispatch number for dispatch creation")
+        final_dispatch_number = FrontendIDGenerator.generate_frontend_id("dispatch_record", db)
+        logger.info(f"Generated dispatch number: {final_dispatch_number}")
+
         # Create dispatch record
         dispatch_record = models.DispatchRecord(
             vehicle_number=dispatch_data.vehicle_number,
@@ -532,7 +675,7 @@ def create_dispatch_record(
             driver_mobile=dispatch_data.driver_mobile,
             payment_type=dispatch_data.payment_type,
             dispatch_date=dispatch_data.dispatch_date,
-            dispatch_number=dispatch_data.dispatch_number,
+            dispatch_number=final_dispatch_number,  # Use atomic number
             reference_number=dispatch_data.reference_number,
             client_id=dispatch_data.client_id,
             primary_order_id=dispatch_data.primary_order_id,

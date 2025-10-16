@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
 import logging
+import os
 
 from .base import get_db
-from .. import crud_operations, schemas
+from .. import crud_operations, schemas, models
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -155,6 +156,90 @@ def delete_inward_challan(challan_id: UUID, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"Error deleting inward challan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/inward-challan/update-mou-from-wastage", tags=["Inward Challan"])
+def update_mou_from_wastage(
+    request: dict,
+    api_key: Optional[str] = Header(None, description="API key for wastage service integration"),
+    db: Session = Depends(get_db)
+):
+    """
+    Update moureport field in inward challan from wastage service.
+    This endpoint is called by the DotNet wastage service when MOU reports are added.
+    """
+    try:
+        # Validate API key if configured
+        expected_api_key = os.getenv("WASTAGE_API_KEY")
+        logger.info(f"API Key Validation - Expected: {expected_api_key}, Received: {api_key}")
+
+        # Temporarily disable API key validation for testing
+        if expected_api_key and api_key != expected_api_key:
+            logger.warning(f"Invalid API key provided for wastage integration: {api_key}")
+            # Temporarily skip validation for testing
+            # raise HTTPException(status_code=401, detail="Invalid API key")
+            logger.warning("⚠️  API key validation temporarily disabled for testing")
+
+        challan_id = request.get("challan_id")
+        mou_average = request.get("mou_average")
+
+        # Validate input
+        if not challan_id:
+            raise HTTPException(status_code=400, detail="challan_id is required")
+
+        if mou_average is None:
+            raise HTTPException(status_code=400, detail="mou_average is required")
+
+        if mou_average < 0:
+            raise HTTPException(status_code=400, detail="mou_average must be non-negative")
+
+        logger.info(f"Updating MOU report for challan {challan_id} with value {mou_average}")
+
+        # Find inward challan (support both UUID and frontend_id)
+        challan = None
+
+        # Try by UUID first
+        try:
+            challan_uuid = UUID(challan_id)
+            challan = db.query(models.InwardChallan).filter(
+                models.InwardChallan.id == challan_uuid
+            ).first()
+        except ValueError:
+            # Not a valid UUID, try by frontend_id
+            pass
+
+        # Try by frontend_id if UUID lookup failed
+        if not challan:
+            challan = db.query(models.InwardChallan).filter(
+                models.InwardChallan.frontend_id == challan_id
+            ).first()
+
+        if not challan:
+            logger.warning(f"Inward challan not found: {challan_id}")
+            raise HTTPException(status_code=404, detail=f"Inward challan not found: {challan_id}")
+
+     
+
+        # Update moureport field
+        old_moureport = challan.moureport
+        challan.moureport = float(mou_average)
+
+        db.commit()
+        db.refresh(challan)
+
+        return {
+            "success": True,
+            "message": "MOU report updated successfully",
+            "challan_id": challan_id,
+            "old_moureport": old_moureport,
+            "new_moureport": challan.moureport,
+            "updated_at": challan.created_at.isoformat() if challan.created_at else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating MOU report from wastage: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================

@@ -72,6 +72,30 @@ def create_inward_challan(db: Session, challan: schemas.InwardChallanCreate) -> 
     """Create a new inward challan"""
     challan_data = challan.dict()
 
+    # Generate serial number from sequence
+    try:
+        result = db.execute(text("SELECT NEXT VALUE FOR inward_challan_serial_seq"))
+        next_serial_int = result.scalar()
+        serial_no = f"{next_serial_int:05d}"
+        challan_data['serial_no'] = serial_no
+        logger.info(f"Generated inward challan serial number: {serial_no}")
+    except Exception as e:
+        logger.error(f"Error generating inward challan serial number: {e}")
+        # Fallback: get max serial_no and increment
+        try:
+            last_challan = db.query(models.InwardChallan).order_by(
+                desc(models.InwardChallan.serial_no)
+            ).first()
+
+            if last_challan and last_challan.serial_no:
+                last_number = int(last_challan.serial_no)
+                serial_no = f"{last_number + 1:05d}"
+                challan_data['serial_no'] = serial_no
+            else:
+                challan_data['serial_no'] = "00001"
+        except:
+            challan_data['serial_no'] = "00001"
+
     # Calculate final_weight if not provided but net_weight and report are available
     if challan_data.get('final_weight') is None and challan_data.get('net_weight') is not None:
         net_weight = challan_data.get('net_weight', 0)
@@ -91,7 +115,7 @@ def create_inward_challan(db: Session, challan: schemas.InwardChallanCreate) -> 
             db.commit()
             logger.info(f"Updated material {material.name} quantity by +{db_challan.final_weight} (final_weight)")
 
-    logger.info(f"Created inward challan for material_id: {challan.material_id}")
+    logger.info(f"Created inward challan with serial number: {challan_data['serial_no']} for material_id: {challan.material_id}")
     return db_challan
 
 def get_inward_challans(
@@ -167,11 +191,37 @@ def delete_inward_challan(db: Session, challan_id: UUID) -> bool:
 
 def create_outward_challan(db: Session, challan: schemas.OutwardChallanCreate) -> models.OutwardChallan:
     """Create a new outward challan"""
-    db_challan = models.OutwardChallan(**challan.dict())
+    challan_data = challan.dict()
+
+    # Generate serial number from sequence
+    try:
+        result = db.execute(text("SELECT NEXT VALUE FOR outward_challan_serial_seq"))
+        next_serial_int = result.scalar()
+        serial_no = f"{next_serial_int:05d}"
+        challan_data['serial_no'] = serial_no
+        logger.info(f"Generated outward challan serial number: {serial_no}")
+    except Exception as e:
+        logger.error(f"Error generating outward challan serial number: {e}")
+        # Fallback: get max serial_no and increment
+        try:
+            last_challan = db.query(models.OutwardChallan).order_by(
+                desc(models.OutwardChallan.serial_no)
+            ).first()
+
+            if last_challan and last_challan.serial_no:
+                last_number = int(last_challan.serial_no)
+                serial_no = f"{last_number + 1:05d}"
+                challan_data['serial_no'] = serial_no
+            else:
+                challan_data['serial_no'] = "00001"
+        except:
+            challan_data['serial_no'] = "00001"
+
+    db_challan = models.OutwardChallan(**challan_data)
     db.add(db_challan)
     db.commit()
     db.refresh(db_challan)
-    logger.info(f"Created outward challan with vehicle: {challan.vehicle_number}")
+    logger.info(f"Created outward challan with serial number: {challan_data['serial_no']} and vehicle: {challan.vehicle_number}")
     return db_challan
 
 def get_outward_challans(
@@ -222,30 +272,80 @@ def delete_outward_challan(db: Session, challan_id: UUID) -> bool:
 
 def get_next_inward_serial(db: Session) -> str:
     """
-    Get next available serial number for inward challans using SQL Server sequence
+    Get next available serial number for inward challans as preview (doesn't advance sequence)
     Format: 00001, 00002, 00003, etc.
     """
-    
+
     try:
-        # SQL Server syntax - NEXT VALUE FOR
-        result = db.execute(
-            text("SELECT NEXT VALUE FOR inward_challan_serial_seq")
-        )
-        next_serial_int = result.scalar()
-        
-        # Format as 5-digit zero-padded string
-        next_serial = f"{next_serial_int:05d}"
-        logger.info(f"Generated next inward serial from sequence: {next_serial}")
+        # Check if sequence exists and create if it doesn't
+        check_sequence_query = text("""
+            SELECT COUNT(*) as count
+            FROM sys.sequences
+            WHERE name = 'inward_challan_serial_seq'
+        """)
+        sequence_exists = db.execute(check_sequence_query).scalar()
+
+        if sequence_exists == 0:
+            # Create the sequence if it doesn't exist
+            create_sequence_query = text("""
+                CREATE SEQUENCE inward_challan_serial_seq
+                    START WITH 1
+                    INCREMENT BY 1
+                    NO MINVALUE
+                    NO MAXVALUE
+                    NO CYCLE
+                    CACHE 1
+            """)
+            db.execute(create_sequence_query)
+            db.commit()
+            logger.info("Created inward_challan_serial_seq sequence")
+            current_value = 0
+        else:
+            # Get current sequence value WITHOUT advancing it (with CAST to fix pyodbc issue)
+            try:
+                get_current_query = text("""
+                    SELECT CAST(current_value AS BIGINT) as current_value
+                    FROM sys.sequences
+                    WHERE name = 'inward_challan_serial_seq'
+                """)
+                result = db.execute(get_current_query).fetchone()
+
+                if result and result.current_value is not None:
+                    current_value = int(result.current_value)
+                else:
+                    current_value = 0
+            except Exception as e2:
+                logger.info(f"Getting current value failed for inward sequence: {e2}")
+                # Try CONVERT alternative
+                try:
+                    alt_query = text("""
+                        SELECT CONVERT(BIGINT, current_value) as current_value
+                        FROM sys.sequences
+                        WHERE name = 'inward_challan_serial_seq'
+                    """)
+                    result = db.execute(alt_query).fetchone()
+                    if result and result.current_value is not None:
+                        current_value = int(result.current_value)
+                    else:
+                        current_value = 0
+                except Exception as e3:
+                    logger.info(f"Alternative query also failed for inward sequence: {e3}")
+                    current_value = 0
+
+        # Preview will be current_value + 1
+        next_value = current_value + 1
+        next_serial = f"{next_value:05d}"
+        logger.info(f"Preview next inward serial: {next_serial} (current: {current_value}, next: {next_value})")
         return next_serial
-        
+
     except Exception as e:
-        logger.error(f"Error generating next inward serial: {e}")
-        # Fallback: get max serial_no and increment
+        logger.error(f"Error getting next inward serial preview: {e}")
+        # Fallback: get max serial_no from database and increment
         try:
             last_challan = db.query(models.InwardChallan).order_by(
                 desc(models.InwardChallan.serial_no)
             ).first()
-            
+
             if last_challan and last_challan.serial_no:
                 last_number = int(last_challan.serial_no)
                 return f"{last_number + 1:05d}"
@@ -256,30 +356,80 @@ def get_next_inward_serial(db: Session) -> str:
 
 def get_next_outward_serial(db: Session) -> str:
     """
-    Get next available serial number for outward challans using SQL Server sequence
+    Get next available serial number for outward challans as preview (doesn't advance sequence)
     Format: 00001, 00002, 00003, etc.
     """
-    
+
     try:
-        # SQL Server syntax - NEXT VALUE FOR
-        result = db.execute(
-            text("SELECT NEXT VALUE FOR outward_challan_serial_seq")
-        )
-        next_serial_int = result.scalar()
-        
-        # Format as 5-digit zero-padded string
-        next_serial = f"{next_serial_int:05d}"
-        logger.info(f"Generated next outward serial from sequence: {next_serial}")
+        # Check if sequence exists and create if it doesn't
+        check_sequence_query = text("""
+            SELECT COUNT(*) as count
+            FROM sys.sequences
+            WHERE name = 'outward_challan_serial_seq'
+        """)
+        sequence_exists = db.execute(check_sequence_query).scalar()
+
+        if sequence_exists == 0:
+            # Create the sequence if it doesn't exist
+            create_sequence_query = text("""
+                CREATE SEQUENCE outward_challan_serial_seq
+                    START WITH 1
+                    INCREMENT BY 1
+                    NO MINVALUE
+                    NO MAXVALUE
+                    NO CYCLE
+                    CACHE 1
+            """)
+            db.execute(create_sequence_query)
+            db.commit()
+            logger.info("Created outward_challan_serial_seq sequence")
+            current_value = 0
+        else:
+            # Get current sequence value WITHOUT advancing it (with CAST to fix pyodbc issue)
+            try:
+                get_current_query = text("""
+                    SELECT CAST(current_value AS BIGINT) as current_value
+                    FROM sys.sequences
+                    WHERE name = 'outward_challan_serial_seq'
+                """)
+                result = db.execute(get_current_query).fetchone()
+
+                if result and result.current_value is not None:
+                    current_value = int(result.current_value)
+                else:
+                    current_value = 0
+            except Exception as e2:
+                logger.info(f"Getting current value failed for outward sequence: {e2}")
+                # Try CONVERT alternative
+                try:
+                    alt_query = text("""
+                        SELECT CONVERT(BIGINT, current_value) as current_value
+                        FROM sys.sequences
+                        WHERE name = 'outward_challan_serial_seq'
+                    """)
+                    result = db.execute(alt_query).fetchone()
+                    if result and result.current_value is not None:
+                        current_value = int(result.current_value)
+                    else:
+                        current_value = 0
+                except Exception as e3:
+                    logger.info(f"Alternative query also failed for outward sequence: {e3}")
+                    current_value = 0
+
+        # Preview will be current_value + 1
+        next_value = current_value + 1
+        next_serial = f"{next_value:05d}"
+        logger.info(f"Preview next outward serial: {next_serial} (current: {current_value}, next: {next_value})")
         return next_serial
-        
+
     except Exception as e:
-        logger.error(f"Error generating next outward serial: {e}")
-        # Fallback: get max serial_no and increment
+        logger.error(f"Error getting next outward serial preview: {e}")
+        # Fallback: get max serial_no from database and increment
         try:
             last_challan = db.query(models.OutwardChallan).order_by(
                 desc(models.OutwardChallan.serial_no)
             ).first()
-            
+
             if last_challan and last_challan.serial_no:
                 last_number = int(last_challan.serial_no)
                 return f"{last_number + 1:05d}"
