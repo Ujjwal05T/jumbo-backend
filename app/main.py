@@ -34,6 +34,7 @@ cors_origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:5001",  # DotNet wastage service
+    "https://satguru.indusanalytics.co.in",
     "http://192.168.1.96:3000",
     "https://satguru-test.vercel.app",
     "https://satguru-reels.vercel.app",

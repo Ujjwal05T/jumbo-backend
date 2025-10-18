@@ -467,6 +467,85 @@ def search_rolls_by_specifications(
         # Sort by match score (best matches first)
         results.sort(key=lambda x: x["match_score"], reverse=True)
 
+        # Search for matching orders (both regular and pending)
+        matching_orders = []
+        pending_orders = []
+
+        # Search in regular orders
+        regular_order_items = db.query(models.OrderItem).options(
+            joinedload(models.OrderItem.order).joinedload(models.OrderMaster.client),
+            joinedload(models.OrderItem.paper)
+        ).join(models.PaperMaster).filter(
+            models.PaperMaster.gsm == gsm,
+            models.PaperMaster.bf == bf,
+            func.lower(models.PaperMaster.shade) == func.lower(shade.strip()),
+            models.OrderItem.width_inches >= min_width,
+            models.OrderItem.width_inches <= max_width
+        ).all()
+
+        for order_item in regular_order_items:
+            order_data = {
+                "type": "regular_order",
+                "order_id": str(order_item.order.id),
+                "order_frontend_id": order_item.order.frontend_id,
+                "client_name": order_item.order.client.company_name if order_item.order.client else "Unknown Client",
+                "order_item_id": str(order_item.id),
+                "order_item_frontend_id": order_item.frontend_id,
+                "quantity_rolls": order_item.quantity_rolls,
+                "quantity_fulfilled": order_item.quantity_fulfilled,
+                "remaining_quantity": order_item.remaining_quantity,
+                "width_inches": float(order_item.width_inches),
+                "rate": float(order_item.rate),
+                "status": order_item.order.status,
+                "item_status": order_item.item_status,
+                "delivery_date": order_item.order.delivery_date.isoformat() if order_item.order.delivery_date else None,
+                "created_at": order_item.order.created_at.isoformat()
+            }
+            matching_orders.append(order_data)
+
+        # Search in pending orders
+        pending_order_items = db.query(models.PendingOrderItem).options(
+            joinedload(models.PendingOrderItem.original_order).joinedload(models.OrderMaster.client)
+        ).filter(
+            models.PendingOrderItem.gsm == gsm,
+            models.PendingOrderItem.bf == bf,
+            func.lower(models.PendingOrderItem.shade) == func.lower(shade.strip()),
+            models.PendingOrderItem.width_inches >= min_width,
+            models.PendingOrderItem.width_inches <= max_width
+        ).all()
+
+        for pending_item in pending_order_items:
+            pending_data = {
+                "type": "pending_order",
+                "pending_order_id": str(pending_item.id),
+                "pending_order_frontend_id": pending_item.frontend_id,
+                "original_order_id": str(pending_item.original_order_id) if pending_item.original_order_id else None,
+                "original_order_frontend_id": pending_item.original_order.frontend_id if pending_item.original_order else None,
+                "client_name": pending_item.original_order.client.company_name if pending_item.original_order and pending_item.original_order.client else "Unknown Client",
+                "quantity_pending": pending_item.quantity_pending,
+                "quantity_fulfilled": pending_item.quantity_fulfilled,
+                "width_inches": float(pending_item.width_inches),
+                "status": pending_item.status,
+                "reason": pending_item.reason,
+                "resolved_at": pending_item.resolved_at.isoformat() if pending_item.resolved_at else None,
+                "created_at": pending_item.created_at.isoformat()
+            }
+            pending_orders.append(pending_data)
+
+        # Prepare response message
+        message_parts = []
+        if len(results) > 0:
+            message_parts.append(f"Found {len(results)} inventory rolls")
+        if len(matching_orders) > 0:
+            message_parts.append(f"{len(matching_orders)} matching order items")
+        if len(pending_orders) > 0:
+            message_parts.append(f"{len(pending_orders)} pending order items")
+
+        if message_parts:
+            message = " and ".join(message_parts) + " matching the specifications"
+        else:
+            message = f"No results found matching the specifications"
+
         return {
             "search_criteria": {
                 "width_inches": width_inches,
@@ -475,9 +554,13 @@ def search_rolls_by_specifications(
                 "shade": shade,
                 "tolerance": tolerance
             },
-            "results": results,
-            "total": len(results),
-            "message": f"Found {len(results)} rolls matching the specifications"
+            "inventory_results": results,
+            "inventory_total": len(results),
+            "matching_orders": matching_orders,
+            "matching_orders_total": len(matching_orders),
+            "pending_orders": pending_orders,
+            "pending_orders_total": len(pending_orders),
+            "message": message
         }
 
     except HTTPException:
