@@ -75,7 +75,7 @@ class UserRole(str, Enum):
     ORDER_PUNCHER = "order_puncher"
     SECURITY = "security"
     CO_ADMIN = "co_admin"
-    PLANNER = "planner"
+    WEIGHT_UPDATE = "weight_update"
     PRODUCTION = "poduction"  # Note: keeping original typo from middleware for consistency
     ACCOUNTANT = "accountant"
     SYSTEM = "system"
@@ -131,7 +131,7 @@ class ClientMaster(ClientMasterBase):
 class UserMasterBase(BaseModel):
     name: str = Field(..., max_length=255)
     username: str = Field(..., max_length=50)
-    role: UserRole = Field(..., description="User role: sales, planner, supervisor, admin")
+    role: UserRole = Field(..., description="User role: admin, order_puncher, security, co_admin, weight_update, poduction, accountant, system")
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
     status: UserStatus = Field(default=UserStatus.ACTIVE)

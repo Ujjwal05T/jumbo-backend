@@ -149,7 +149,7 @@ def require_role(required_role: str):
     Dependency factory to require specific user role.
     
     Args:
-        required_role: Required role (e.g., 'admin', 'planner', 'supervisor')
+        required_role: Required role (e.g., 'admin', 'order_puncher', 'security', 'co_admin', 'weight_update', 'poduction', 'accountant', 'system')
         
     Returns:
         Dependency function that checks user role

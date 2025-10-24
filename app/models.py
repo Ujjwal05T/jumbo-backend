@@ -89,7 +89,7 @@ class ClientMaster(Base):
     created_by = relationship("UserMaster", back_populates="clients_created")
     orders = relationship("OrderMaster", back_populates="client")
 
-# User Master - All system users (sales, planners, supervisors)
+# User Master - All system users (admin, order_puncher, security, co_admin, weight_update, poduction, accountant, system)
 class UserMaster(Base):
     __tablename__ = "user_master"
     
@@ -98,7 +98,7 @@ class UserMaster(Base):
     name = Column(String(255), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)  # For simple registration
-    role = Column(String(50), nullable=False)  # sales, planner, supervisor, admin
+    role = Column(String(50), nullable=False)  # admin, order_puncher, security, co_admin, weight_update, poduction, accountant, system
     contact = Column(String(255), nullable=True)
     department = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
