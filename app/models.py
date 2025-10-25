@@ -118,6 +118,7 @@ class UserMaster(Base):
     inventory_created = relationship("InventoryMaster", back_populates="created_by")
     production_orders_created = relationship("ProductionOrderMaster", back_populates="created_by")
     snapshots_created = relationship("PlanSnapshot", back_populates="created_by")
+    deletion_logs_created = relationship("PlanDeletionLog", back_populates="deleted_by")
 
 # Paper Master - Centralized paper specifications
 class PaperMaster(Base):
@@ -444,6 +445,7 @@ class PlanMaster(Base):
     plan_orders = relationship("PlanOrderLink", back_populates="plan")
     plan_inventory = relationship("PlanInventoryLink", back_populates="plan")
     snapshot = relationship("PlanSnapshot", back_populates="plan", uselist=False)
+    deletion_logs = relationship("PlanDeletionLog", back_populates="plan")
 
 # Production Order Master - Manufacturing queue for jumbo rolls
 class ProductionOrderMaster(Base):
@@ -520,6 +522,41 @@ class PlanSnapshot(Base):
     # Relationships
     plan = relationship("PlanMaster", back_populates="snapshot")
     created_by = relationship("UserMaster", back_populates="snapshots_created")
+
+# ============================================================================
+# PLAN DELETION LOGS
+# ============================================================================
+
+class PlanDeletionLog(Base):
+    """
+    Audit trail for deleted plans (rollback or manual deletion)
+    Tracks when, why, and how plans were deleted
+    """
+    __tablename__ = "plan_deletion_log"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+
+    # Plan information
+    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=True, index=True)
+    plan_frontend_id = Column(String(50), nullable=False)  # PLN-2025-001, etc.
+    plan_name = Column(String(255), nullable=True)  # Optional plan name
+
+    # Deletion details
+    deleted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    deleted_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    deletion_reason = Column(String(50), default="rollback", nullable=False)  # rollback, manual, system
+
+    # Rollback statistics (JSON for flexibility)
+    rollback_stats = Column(JSON, nullable=True)  # Store rollback statistics as JSON
+
+    # Performance metrics
+    rollback_duration_seconds = Column(Numeric(8, 2), nullable=True)  # How long rollback took
+    success_status = Column(String(20), default="success", nullable=False)  # success, failed, partial
+    error_message = Column(Text, nullable=True)  # Error details if failed
+
+    # Relationships
+    plan = relationship("PlanMaster", back_populates="deletion_logs")
+    deleted_by = relationship("UserMaster")
 
 # ============================================================================
 # DISPATCH TRACKING

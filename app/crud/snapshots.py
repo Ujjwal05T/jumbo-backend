@@ -7,6 +7,7 @@ import json
 import logging
 
 from .. import models
+from .plan_deletion_logs import plan_deletion_logs
 
 logger = logging.getLogger(__name__)
 
@@ -290,16 +291,50 @@ class CRUDPlanSnapshot:
             execution_pending_ids = [item.id for item in execution_pending_items]
             logger.info(f"   - Pending order items created by plan during execution window: {len(execution_pending_ids)}")
 
+        # Find orders created during execution window (exclude from safety check)
+        execution_order_ids = []
+        if snapshot_data and "snapshot_time" in snapshot_data:
+            snapshot_time = datetime.fromisoformat(snapshot_data["snapshot_time"])
+
+            # Find all orders created during plan execution
+            execution_orders = db.query(models.OrderMaster).filter(
+                models.OrderMaster.created_at >= snapshot_time
+            ).filter(
+                models.OrderMaster.created_at <= datetime.utcnow()
+            ).all()
+
+            execution_order_ids = [order.id for order in execution_orders]
+            logger.info(f"   - Orders created during execution window: {len(execution_order_ids)}")
+
+        # Find order items created during execution window (exclude from safety check)
+        execution_order_item_ids = []
+        if snapshot_data and "snapshot_time" in snapshot_data:
+            snapshot_time = datetime.fromisoformat(snapshot_data["snapshot_time"])
+
+            # Find all order items created during plan execution
+            execution_order_items = db.query(models.OrderItem).filter(
+                models.OrderItem.created_at >= snapshot_time
+            ).filter(
+                models.OrderItem.created_at <= datetime.utcnow()
+            ).all()
+
+            execution_order_item_ids = [item.id for item in execution_order_items]
+            logger.info(f"   - Order items created during execution window: {len(execution_order_item_ids)}")
+
         # Use execution window items as the plan inventory IDs
         all_plan_inventory_ids = execution_window_ids
 
         # Use execution window wastage as plan wastage items
         plan_wastage_ids = execution_wastage_ids
 
-        # Count only items NOT created by this plan
+        # Count only items NOT created by this plan (FIXED - exclude execution window items)
         current_counts_excluding_plan = {
-            "orders": db.query(models.OrderMaster).count(),
-            "order_items": db.query(models.OrderItem).count(),
+            "orders": db.query(models.OrderMaster).filter(
+                models.OrderMaster.id.notin_(execution_order_ids)
+            ).count(),
+            "order_items": db.query(models.OrderItem).filter(
+                models.OrderItem.id.notin_(execution_order_item_ids)
+            ).count(),
             "inventory_master": db.query(models.InventoryMaster).filter(
                 models.InventoryMaster.id.notin_(all_plan_inventory_ids)
             ).count(),
@@ -330,6 +365,8 @@ class CRUDPlanSnapshot:
                     "execution_window_count": len(execution_window_ids),
                     "execution_pending_count": len(execution_pending_ids),
                     "execution_wastage_count": len(execution_wastage_ids),
+                    "execution_orders_count": len(execution_order_ids),
+                    "execution_order_items_count": len(execution_order_item_ids),
                     "total_inventory_count": len(all_plan_inventory_ids),
                     "wastage_count": len(plan_wastage_ids)
                 }
@@ -802,6 +839,24 @@ class CRUDPlanSnapshot:
                 db.delete(link)
             rollback_stats["links_deleted"] += len(plan_inventory_links)
 
+            # Log the plan deletion for audit trail BEFORE deleting the plan
+            try:
+                deletion_log = plan_deletion_logs.create_deletion_log(
+                    db=db,
+                    plan_id=plan_id,
+                    plan_frontend_id=plan_frontend_id,
+                    plan_name=plan.name,
+                    user_id=user_id,
+                    deletion_reason="rollback",
+                    rollback_stats=rollback_stats,
+                    rollback_duration_seconds=(datetime.utcnow() - snapshot.created_at).total_seconds(),
+                    success_status="success"
+                )
+                logger.info(f"📝 Created deletion log entry {deletion_log.id} for plan {plan_frontend_id}")
+            except Exception as log_error:
+                logger.error(f"⚠️ Failed to create deletion log: {log_error}")
+                # Don't fail the rollback if logging fails
+
             # Finally delete the plan itself
             db.delete(plan)
 
@@ -827,6 +882,25 @@ class CRUDPlanSnapshot:
         except Exception as e:
             db.rollback()
             logger.error(f"Rollback failed for plan {plan_id}: {e}")
+
+            # Log failed rollback attempt for audit trail
+            try:
+                plan = db.query(models.PlanMaster).filter(models.PlanMaster.id == plan_id).first()
+                if plan:
+                    deletion_log = plan_deletion_logs.create_deletion_log(
+                        db=db,
+                        plan_id=plan_id,
+                        plan_frontend_id=plan.frontend_id,
+                        plan_name=plan.name,
+                        user_id=user_id,
+                        deletion_reason="rollback",
+                        success_status="failed",
+                        error_message=str(e)
+                    )
+                    logger.info(f"📝 Created failure deletion log entry {deletion_log.id} for plan {plan.frontend_id}")
+            except Exception as log_error:
+                logger.error(f"⚠️ Failed to create failure deletion log: {log_error}")
+
             raise
 
     def cleanup_expired_snapshots(self, db: Session) -> int:
