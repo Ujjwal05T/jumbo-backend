@@ -382,15 +382,15 @@ def search_rolls_by_specifications(
 
         logger.info(f"🔍 Searching rolls by specs: width={width_inches}\" (±{tolerance}), gsm={gsm}, bf={bf}, shade={shade}")
 
-        # Build base query with paper relationship
+        # Build base query with explicit JOIN for reliable filtering
         query = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper)
-        ).filter(
+        ).join(models.PaperMaster).filter(
             models.InventoryMaster.width_inches >= min_width,
             models.InventoryMaster.width_inches <= max_width
         )
 
-        # Add paper specifications filters
+        # Add paper specifications filters using explicit JOIN (fixed bug)
         if gsm:
             query = query.filter(models.PaperMaster.gsm == gsm)
         if bf:

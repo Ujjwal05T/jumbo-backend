@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Table, Text, Boolean, Numeric, Enum, event
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Table, Text, Boolean, Numeric, Enum, event, JSON
 from sqlalchemy.orm import relationship, Session
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
@@ -117,6 +117,7 @@ class UserMaster(Base):
     plans_created = relationship("PlanMaster", back_populates="created_by")
     inventory_created = relationship("InventoryMaster", back_populates="created_by")
     production_orders_created = relationship("ProductionOrderMaster", back_populates="created_by")
+    snapshots_created = relationship("PlanSnapshot", back_populates="created_by")
 
 # Paper Master - Centralized paper specifications
 class PaperMaster(Base):
@@ -442,6 +443,7 @@ class PlanMaster(Base):
     created_by = relationship("UserMaster", back_populates="plans_created")
     plan_orders = relationship("PlanOrderLink", back_populates="plan")
     plan_inventory = relationship("PlanInventoryLink", back_populates="plan")
+    snapshot = relationship("PlanSnapshot", back_populates="plan", uselist=False)
 
 # Production Order Master - Manufacturing queue for jumbo rolls
 class ProductionOrderMaster(Base):
@@ -498,6 +500,26 @@ class PlanInventoryLink(Base):
     plan = relationship("PlanMaster", back_populates="plan_inventory")
     inventory = relationship("InventoryMaster", back_populates="plan_inventory")
 
+
+# ============================================================================
+# PLAN SNAPSHOT FOR ROLLBACK
+# ============================================================================
+
+class PlanSnapshot(Base):
+    __tablename__ = "plan_snapshot"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    plan_id = Column(UNIQUEIDENTIFIER, ForeignKey("plan_master.id"), nullable=False, unique=True, index=True)
+    snapshot_data = Column(JSON, nullable=False)  # Store snapshot as JSON
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)  # 10 minutes from creation
+    is_used = Column(Boolean, default=False, nullable=False)  # Mark if rollback was done
+    used_at = Column(DateTime, nullable=True)  # When rollback occurred
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+
+    # Relationships
+    plan = relationship("PlanMaster", back_populates="snapshot")
+    created_by = relationship("UserMaster", back_populates="snapshots_created")
 
 # ============================================================================
 # DISPATCH TRACKING

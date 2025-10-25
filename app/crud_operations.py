@@ -7,6 +7,7 @@ Main CRUD module that imports from split CRUD files
 # Database session dependency
 from typing import List, Dict, Any, Optional
 import uuid
+from uuid import UUID
 from sqlalchemy.orm import Session, joinedload
 from . import models
 from .database import get_db
@@ -20,6 +21,7 @@ from .crud.inventory import inventory
 from .crud.plans import plan
 from .crud.pending_orders import pending_order
 from .crud import material_management
+from .crud.snapshots import snapshot
 
 # Import individual functions for backward compatibility
 def create_client(db, client_data):
@@ -314,5 +316,29 @@ def cancel_pending_order_item(db, item_id, cancelled_by_id):
         item_id=item_id,
         cancelled_by_id=cancelled_by_id
     )
+
+# ============================================================================
+# PLAN SNAPSHOT CRUD FUNCTIONS
+# ============================================================================
+
+def create_snapshot_for_plan(db: Session, plan_id: UUID, user_id: UUID):
+    """Create a snapshot before plan execution"""
+    return snapshot.create_snapshot(db=db, plan_id=plan_id, user_id=user_id)
+
+def get_plan_snapshot(db: Session, plan_id: UUID):
+    """Get snapshot for a plan"""
+    return snapshot.get_snapshot(db=db, plan_id=plan_id)
+
+def validate_rollback_safety(db: Session, plan_id: UUID):
+    """Validate if rollback is safe"""
+    return snapshot.validate_rollback_safety(db=db, plan_id=plan_id)
+
+def execute_plan_rollback(db: Session, plan_id: UUID, user_id: UUID):
+    """Execute plan rollback"""
+    return snapshot.execute_rollback(db=db, plan_id=plan_id, user_id=user_id)
+
+def cleanup_expired_snapshots(db: Session):
+    """Clean up expired snapshots"""
+    return snapshot.cleanup_expired_snapshots(db=db)
 
 
