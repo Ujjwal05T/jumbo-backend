@@ -246,3 +246,135 @@ def cancel_pending_order_item(
     except Exception as e:
         logger.error(f"Error cancelling pending order item: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/pending-order-items/client-suggestions", tags=["Pending Order Items"])
+def get_client_suggestions_for_manual_cuts(
+    request_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Get client suggestions for manual cuts based on latest 50 orders.
+    Returns clients who frequently order widths that fit the available waste space.
+    """
+    try:
+        available_waste = request_data.get('available_waste', 0)
+        paper_specs = request_data.get('paper_specs', {})
+
+        if not isinstance(available_waste, (int, float)) or available_waste <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Available waste must be a positive number"
+            )
+
+        # Validate paper specs
+        required_specs = ['gsm', 'bf', 'shade']
+        if not all(spec in paper_specs for spec in required_specs):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Paper specs must include: {', '.join(required_specs)}"
+            )
+
+        from sqlalchemy import text
+        from datetime import datetime, timedelta
+
+        # Debug logging
+        logger.info(f"🔍 Client suggestions request: available_waste={available_waste}, paper_specs={paper_specs}")
+
+        # Query latest 100 orders and find client width patterns (any status)
+        query = text("""
+            WITH latest_orders AS (
+                SELECT TOP 100 o.id
+                FROM order_master o
+                ORDER BY o.created_at DESC
+            )
+            SELECT TOP 20
+                c.id as client_id,
+                c.company_name,
+                oi.width_inches,
+                COUNT(*) as frequency,
+                MAX(o.created_at) as last_ordered
+            FROM order_master o
+            JOIN order_item oi ON o.id = oi.order_id
+            JOIN paper_master p ON oi.paper_id = p.id
+            JOIN client_master c ON o.client_id = c.id
+            JOIN latest_orders lo ON o.id = lo.id
+            WHERE
+                oi.width_inches <= :available_waste
+                AND p.gsm = :gsm
+                AND p.bf = :bf
+                AND p.shade = :shade
+            GROUP BY c.id, c.company_name, oi.width_inches
+            HAVING COUNT(*) >= 1
+            ORDER BY frequency DESC, last_ordered DESC
+        """)
+
+        result = db.execute(query, {
+            'available_waste': available_waste,
+            'gsm': paper_specs['gsm'],
+            'bf': paper_specs['bf'],
+            'shade': paper_specs['shade']
+        })
+
+        rows = result.fetchall()
+
+        logger.info(f"🔍 Query returned {len(rows)} rows")
+        if rows:
+            for row in rows[:3]:  # Log first 3 rows for debugging
+                logger.info(f"🔍 Sample row: client={row.company_name}, width={row.width_inches}, frequency={row.frequency}")
+
+        if not rows:
+            return {
+                "status": "no_suggestions",
+                "available_waste": available_waste,
+                "paper_specs": paper_specs,
+                "suggestions": [],
+                "message": f"No recent orders found for {paper_specs['gsm']}GSM {paper_specs['bf']}BF {paper_specs['shade']} with width ≤ {available_waste}\""
+            }
+
+        # Group suggestions by client
+        suggestions_by_client = {}
+        for row in rows:
+            client_id = str(row.client_id)
+            if client_id not in suggestions_by_client:
+                suggestions_by_client[client_id] = {
+                    "client_id": client_id,
+                    "client_name": row.company_name,
+                    "suggested_widths": []
+                }
+
+            suggestions_by_client[client_id]["suggested_widths"].append({
+                "width": float(row.width_inches),
+                "frequency": row.frequency,
+                "last_ordered": row.last_ordered.isoformat() if row.last_ordered else None,
+                "days_ago": (datetime.now() - row.last_ordered).days if row.last_ordered else None
+            })
+
+        # Convert to sorted list
+        suggestions = list(suggestions_by_client.values())
+
+        # Sort clients by total frequency and most recent order
+        suggestions.sort(key=lambda x: (
+            sum(w['frequency'] for w in x['suggested_widths']),
+            max(w['last_ordered'] for w in x['suggested_widths'])
+        ), reverse=True)
+
+        # Limit to top 10 clients
+        suggestions = suggestions[:10]
+
+        return {
+            "status": "success",
+            "available_waste": available_waste,
+            "paper_specs": paper_specs,
+            "suggestions": suggestions,
+            "summary": {
+                "total_clients": len(suggestions),
+                "latest_orders_analyzed": 100,
+                "total_matches": len(rows)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting client suggestions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
