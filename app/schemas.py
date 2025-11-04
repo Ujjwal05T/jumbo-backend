@@ -81,6 +81,7 @@ class UserRole(str, Enum):
     MOU = "mou"
     DISPATCH = "dispatch"
     SYSTEM = "system"
+    SALES_PERSON = "sales_person"
 
 class PaperType(str, Enum):
     STANDARD = "standard"
