@@ -176,24 +176,14 @@ class PendingOptimizer:
         """
         # Calculate dynamic capacity based on actual needs
         total_quantity = sum(item.quantity_pending for item in items)
-        # Average 9 cuts per jumbo roll, but ensure we have enough capacity
-        min_jumbo_rolls = 3
-        calculated_jumbo_rolls = max(min_jumbo_rolls, math.ceil(total_quantity / 6))  # More conservative estimate
+        # Average 6 cuts per jumbo roll, no minimum constraint
+        calculated_jumbo_rolls = max(1, math.ceil(total_quantity / 6))  # At least 1 jumbo roll
         max_jumbo_rolls = min(calculated_jumbo_rolls, 20)  # Safety cap to prevent infinite loops
 
         logger.info(f"🎯 CAPACITY CALCULATION: {total_quantity} items → {max_jumbo_rolls} jumbo rolls (capacity for up to {max_jumbo_rolls * 6} items)")
-        logger.info(f"🎯 DEBUG: min_jumbo_rolls={min_jumbo_rolls}, calculated_jumbo_rolls={calculated_jumbo_rolls}, max_jumbo_rolls={max_jumbo_rolls}")
+        logger.info(f"🎯 DEBUG: calculated_jumbo_rolls={calculated_jumbo_rolls}, max_jumbo_rolls={max_jumbo_rolls}")
 
-        # FORCE HIGHER CAPACITY FOR TESTING - Override if still getting only 3
-        if total_quantity > 9:  # If we have more than 9 items (average 3 per jumbo)
-            max_jumbo_rolls = max(max_jumbo_rolls, 10)  # Force at least 10 jumbo rolls
-            logger.info(f"🚀 CAPACITY OVERRIDE: Increased to {max_jumbo_rolls} jumbo rolls due to high item count")
-
-        # EVEN MORE AGGRESSIVE OVERRIDE
-        if total_quantity > 20:  # If we have more than 20 items
-            max_jumbo_rolls = max(max_jumbo_rolls, 15)  # Force at least 15 jumbo rolls
-            logger.info(f"🔥 AGGRESSIVE OVERRIDE: Increased to {max_jumbo_rolls} jumbo rolls for very high item count")
-
+      
         # Convert items to width-quantity pairs while preserving order info
         width_data = {}
         total_pieces_created = 0
@@ -229,34 +219,38 @@ class PendingOptimizer:
         processed_count = 0
 
         while any(len(pieces) > 0 for pieces in width_data.values()) and jumbo_number <= max_jumbo_rolls:
-            logger.info(f"🔄 Starting jumbo roll {jumbo_number}/{max_jumbo_rolls}")
             remaining_pieces = sum(len(pieces) for pieces in width_data.values())
-            logger.info(f"🔄 Remaining pieces before jumbo {jumbo_number}: {remaining_pieces}")
-
-            # Debug remaining pieces by width
             width_breakdown = {w: len(pieces) for w, pieces in width_data.items() if len(pieces) > 0}
-            logger.info(f"🔄 Width breakdown: {width_breakdown}")
+            logger.info(f"🔄 Starting JUMBO {jumbo_number}/{max_jumbo_rolls} with {remaining_pieces} pieces: {width_breakdown}")
+
             sets = []
             set_number = 1
             jumbo_processed_count = 0
 
-            # Create up to 4 sets per jumbo (increased from 3)
-            for set_num in range(1, 5):  # Increased from 4 to 5
+            # Create up to 4 sets per jumbo
+            for set_num in range(1, 5):
+                logger.info(f"🔄 Creating SET {set_num} of jumbo {jumbo_number}")
+
+                # Initialize variables for this set
                 cuts = []
                 cut_number = 1
                 total_width = 0
 
-                # Find best combination for this set using improved algorithm
-                best_combo = self._find_best_width_combination_improved(width_data, target_width, set_number, jumbo_number)
+                # Find best combination for this set
+                best_combo = self._find_best_width_combination_with_piece_priority(width_data, target_width, set_number, jumbo_number)
+
+                logger.info(f"🎯 SET {set_num}: Best combo found: {best_combo}")
 
                 if not best_combo:
-                    # IMPROVED: Try more lenient combination search if strict search fails
-                    logger.debug(f"⚠️ No combination found for set {set_number}, trying lenient search")
+                    logger.warning(f"⚠️ No combo found for SET {set_num}, trying lenient search")
                     best_combo = self._find_best_width_combination_lenient(width_data, target_width, set_number, jumbo_number)
 
                     if not best_combo:
-                        logger.debug(f"❌ No combination found even with lenient search for set {set_number}")
+                        logger.warning(f"❌ No combo found even with lenient search for SET {set_num}")
+                        logger.info(f"🛑 Stopping set creation at {len(sets)} sets")
                         break
+
+                    logger.info(f"🎯 SET {set_num}: Lenient combo found: {best_combo}")
 
                 # Create cuts from the combination
                 for width, count in best_combo.items():
@@ -521,20 +515,92 @@ class PendingOptimizer:
 
                     logger.debug(f"    ✓ New best combo ({num_pieces} pieces): {combo} → {total_width}\" used, {waste}\" waste, {efficiency:.1f}% efficiency")
 
-                    # IMPROVED: Better early termination condition
-                    # Stop if we found an excellent combination with very low waste
-                    if waste <= 1.0 and efficiency >= 95:
-                        logger.debug(f"    🎯 Excellent combination found, stopping search")
+                    # FIXED: Remove premature early termination to ensure better combinations are found
+                    # Only terminate for truly exceptional combinations
+                    if waste <= 0.5 and efficiency >= 98:
+                        logger.debug(f"    🎯 Exceptional combination found, stopping search")
                         break
-                    # Also stop if we found a good combination with many pieces
-                    elif waste <= 3.0 and num_pieces >= 4 and efficiency >= 90:
-                        logger.debug(f"    🎯 Good multi-piece combination found, stopping search")
-                        break
+                    # Don't terminate early for moderate combinations - let better ones be found
 
         if best_combo:
             total_width = sum(w * count for w, count in best_combo.items())
             logger.debug(f"    ✅ FINAL: Selected combo with {len(best_combo)} widths, {sum(best_combo.values())} pieces")
             logger.debug(f"    ✅ FINAL: Width usage: {total_width}/{target_width} inches, waste: {min_waste}, efficiency: {best_efficiency:.1f}%")
+        else:
+            logger.debug(f"    ❌ No feasible combination found")
+
+        return best_combo
+
+    def _find_best_width_combination_with_piece_priority(self, width_data: Dict[float, List], target_width: float, set_number: int, jumbo_number: int) -> Dict[float, int]:
+        """
+        MODIFIED: Find combination that maximizes piece usage while maintaining efficiency.
+        Prioritizes using more pieces over minimal waste to reduce number of sets.
+        """
+        available_widths = {w: len(pieces) for w, pieces in width_data.items() if len(pieces) > 0}
+
+        if not available_widths:
+            return {}
+
+        total_available_pieces = sum(available_widths.values())
+        logger.debug(f"🔍 PRIORITY COMBINATION SEARCH: Jumbo {jumbo_number}, Set {set_number}")
+        logger.debug(f"    Available widths: {available_widths}")
+        logger.debug(f"    Target width: {target_width}, Total pieces: {total_available_pieces}")
+
+        best_combo = {}
+        min_waste = float('inf')
+        best_efficiency = 0
+        max_pieces_used = 0
+
+        # MODIFIED: Start with maximum pieces and work backwards
+        avg_width = sum(w * count for w, count in available_widths.items()) / total_available_pieces
+        max_possible_pieces = min(int(target_width / min(available_widths.keys())), total_available_pieces)
+        max_combination_pieces = min(max_possible_pieces, min(15, total_available_pieces))
+
+        logger.debug(f"    Max possible pieces: {max_combination_pieces} (based on min width: {min(available_widths.keys()):.1f}\")")
+
+        # Try combinations starting from maximum pieces down to 1
+        logger.info(f"    🔍 Testing combos from {max_combination_pieces} pieces down to 1")
+        for num_pieces in range(max_combination_pieces, 0, -1):
+            logger.info(f"    🎲 Testing {num_pieces}-piece combinations...")
+            combo = self._try_combination_with_priority(available_widths, target_width, num_pieces)
+            if combo:
+                logger.info(f"    ✅ Found {num_pieces}-piece combo: {combo}")
+            else:
+                logger.info(f"    ❌ No {num_pieces}-piece combo found")
+
+            if combo:
+                total_width = sum(w * count for w, count in combo.items())
+                waste = target_width - total_width
+                efficiency = (total_width / target_width) * 100
+                pieces_used = sum(combo.values())
+
+                # FIXED: Priority = waste minimization, then piece usage
+                # Primary goal: minimize waste, Secondary goal: use more pieces
+                if waste >= 0 and waste < min_waste:
+                    best_combo = combo
+                    min_waste = waste
+                    best_efficiency = efficiency
+                    max_pieces_used = pieces_used
+
+                    logger.debug(f"    ✓ New best combo (waste: {waste}\"): {combo} → {total_width}\" used, {efficiency:.1f}% efficiency")
+
+                    # Early termination only for perfect fit
+                    if waste <= 0.1:
+                        logger.debug(f"    🎯 Perfect fit found, stopping search")
+                        break
+
+                # If same waste, prefer more pieces
+                elif waste >= 0 and waste == min_waste and pieces_used > max_pieces_used:
+                    best_combo = combo
+                    max_pieces_used = pieces_used
+
+                    logger.debug(f"    ✓ Better piece count (same waste {waste}\"): {combo} → {total_width}\" used, {efficiency:.1f}% efficiency")
+
+        if best_combo:
+            total_width = sum(w * count for w, count in best_combo.items())
+            pieces_used = sum(best_combo.values())
+            logger.debug(f"    ✅ PRIORITY FINAL: Selected combo with {pieces_used} pieces, {len(best_combo)} widths")
+            logger.debug(f"    ✅ PRIORITY FINAL: Width usage: {total_width}/{target_width} inches, waste: {min_waste}, efficiency: {best_efficiency:.1f}%")
         else:
             logger.debug(f"    ❌ No feasible combination found")
 
@@ -548,6 +614,8 @@ class PendingOptimizer:
         from itertools import combinations_with_replacement
 
         widths = list(available_widths.keys())
+        logger.debug(f"        📋 Available widths: {widths}")
+        logger.debug(f"        🎯 Target width: {target_width}, pieces needed: {num_pieces}")
 
         # IMPROVED: Sort widths for better pattern generation
         # Prioritize widths that are divisors or have good combinations
@@ -560,11 +628,14 @@ class PendingOptimizer:
         if num_pieces >= 3:
             mixed_combos = self._generate_mixed_combinations(sorted_widths, num_pieces)
             combinations_to_try.extend(mixed_combos)
+            logger.debug(f"        🔀 Mixed combos generated: {len(mixed_combos)}")
 
         # Priority 2: Standard combinations with replacement
         for combo in combinations_with_replacement(sorted_widths, num_pieces):
             if combo not in combinations_to_try:
                 combinations_to_try.append(combo)
+
+        logger.debug(f"        🔢 Standard combos: {len([c for c in combinations_with_replacement(sorted_widths, num_pieces)])}")
 
         # Priority 3: Single width combinations (if many pieces of same size)
         if num_pieces <= 5:
@@ -573,8 +644,16 @@ class PendingOptimizer:
                     single_combo = tuple([width] * num_pieces)
                     if single_combo not in combinations_to_try:
                         combinations_to_try.append(single_combo)
+                        logger.debug(f"        🔷 Added single-width combo: {single_combo}")
 
-        # Try each combination
+        logger.debug(f"        📊 Total combinations to test: {len(combinations_to_try)}")
+        logger.debug(f"        📝 First 5 combos: {combinations_to_try[:5]}")
+
+        # FIXED: Test all combinations and return the best one (minimal waste)
+        best_needed = {}
+        best_waste = float('inf')
+        best_total_width = 0
+
         for combo in combinations_to_try:
             # Count how many of each width we need
             needed = {}
@@ -585,16 +664,26 @@ class PendingOptimizer:
             if all(available_widths.get(w, 0) >= needed.get(w, 0) for w in needed):
                 total_width = sum(combo)
                 if total_width <= target_width:
-                    # IMPROVED: Better scoring for combination selection
+                    # FIXED: Accept any feasible combination, track best by waste
                     waste = target_width - total_width
                     efficiency = (total_width / target_width) * 100
 
-                    # Accept if it's a good combination
-                    if waste <= 10 or efficiency >= 85:  # More lenient waste limit
-                        logger.debug(f"        Found combo: {combo} → {total_width}\" ({efficiency:.1f}% eff, {waste}\" waste)")
-                        return needed
+                    logger.debug(f"        Feasible combo: {combo} → {total_width}\" ({efficiency:.1f}% eff, {waste}\" waste)")
 
-        return {}
+                    # Track best combination (prioritize minimal waste)
+                    if waste < best_waste:
+                        best_needed = needed
+                        best_waste = waste
+                        best_total_width = total_width
+                        logger.debug(f"        ★ New best (waste: {waste}\")")
+
+        if best_needed:
+            efficiency = (best_total_width / target_width) * 100
+            logger.debug(f"        ✅ BEST combo selected: waste={best_waste}\", {efficiency:.1f}% eff")
+        else:
+            logger.debug(f"        ❌ No feasible combos found for {num_pieces} pieces")
+
+        return best_needed
 
     def _generate_mixed_combinations(self, widths: List[float], num_pieces: int) -> List[Tuple[float, ...]]:
         """

@@ -80,7 +80,67 @@ class PlanCalculationService:
                 available_inventory=available_inventory,
                 interactive=False
             )
-            
+
+            # ENHANCEMENT: Add client information to pending orders using simple queries
+            pending_orders = optimization_result.get('pending_orders', [])
+            if pending_orders:
+                logger.info(f"🔍 ENHANCING PENDING ORDERS: Adding client info to {len(pending_orders)} pending orders")
+
+                # Collect all source_order_ids from pending orders
+                source_order_ids = []
+                for pending_order in pending_orders:
+                    source_order_id = pending_order.get('source_order_id')
+                    if source_order_id and pending_order.get('source_type') == 'regular_order':
+                        source_order_ids.append(source_order_id)
+
+                if source_order_ids:
+                    # SIMPLE TWO-QUERY APPROACH:
+                    # Query 1: Get orders with client_id
+                    from .. import models
+                    import uuid
+                    from sqlalchemy.orm import joinedload
+
+                    orders = self.db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id.in_([uuid.UUID(order_id) for order_id in source_order_ids])
+                    ).all()
+
+                    # Create mapping of order_id to client_id
+                    order_to_client_map = {}
+                    for order in orders:
+                        order_id_str = str(order.id)
+                        order_to_client_map[order_id_str] = order.client_id
+                        logger.info(f"🔍 Found Order {order_id_str[:8]} -> Client ID: {order.client_id}")
+
+                    # Query 2: Get client names
+                    client_ids = [client_id for client_id in order_to_client_map.values() if client_id]
+                    if client_ids:
+                        clients = self.db.query(models.ClientMaster).filter(
+                            models.ClientMaster.id.in_(client_ids)
+                        ).all()
+
+                        # Create mapping of client_id to client_name
+                        client_name_map = {}
+                        for client in clients:
+                            client_id_str = str(client.id)
+                            client_name_map[client_id_str] = client.company_name
+                            logger.info(f"✅ Found Client {client_id_str[:8]} -> Name: {client.company_name}")
+
+                        # Enhance pending orders with client information
+                        for pending_order in pending_orders:
+                            source_order_id = pending_order.get('source_order_id')
+                            if source_order_id in order_to_client_map:
+                                client_id = order_to_client_map[source_order_id]
+                                client_id_str = str(client_id)
+
+                                if client_id and client_id_str in client_name_map:
+                                    pending_order['client_name'] = client_name_map[client_id_str]
+                                    pending_order['client_id'] = client_id_str
+                                    logger.info(f"✅ ENHANCED: Order {source_order_id[:8]} -> Client: {client_name_map[client_id_str]}")
+                                else:
+                                    pending_order['client_name'] = 'Unknown (No Client)'
+                                    pending_order['client_id'] = client_id_str
+                                    logger.warning(f"⚠️ NO CLIENT NAME: Order {source_order_id[:8]} -> Client ID: {client_id_str}")
+
             # CALCULATION ONLY: Process and format results including wastage allocations
             result = self._format_calculation_result(optimization_result, order_ids)
             result['wastage_allocations'] = wastage_allocations

@@ -1658,6 +1658,23 @@ class CuttingOptimizer:
             if pending:
                 logger.info(f"🔍 PENDING CONVERSION: Processing {len(pending)} pending widths")
 
+                # NEW: Collect all source_order_ids for batch client fetching
+                all_source_order_ids = set()
+                for width, qty in pending.items():
+                    unassigned_rolls = [
+                        roll for roll in spec_groups[spec_key]['individual_rolls']
+                        if roll['width'] == width and not roll['assigned']
+                    ]
+                    for roll in unassigned_rolls[:qty]:
+                        order_id = roll.get('source_order_id')
+                        if order_id:
+                            all_source_order_ids.add(order_id)
+
+                # NEW: Batch fetch client information using proper relationships
+                # Note: This optimization is disabled here since we don't have db access
+                # The client lookup will be done at the calling level (WorkflowManager)
+                client_cache = {}
+
                 for width, qty in pending.items():
                     logger.info(f"   Processing pending width {width}\" with quantity {qty}")
 
@@ -1687,6 +1704,8 @@ class CuttingOptimizer:
                     for order_id, order_data in pending_by_order.items():
                         # Only create pending for regular orders (not already-pending orders)
                         if order_data['source_type'] == 'regular_order':
+                            # NOTE: Client information will be added at the WorkflowManager level
+                            # since CuttingOptimizer doesn't have database access
                             new_pending_orders.append({
                                 'width': width,
                                 'quantity': len(order_data['rolls']),
@@ -1696,6 +1715,7 @@ class CuttingOptimizer:
                                 'reason': 'waste_too_high',
                                 'source_order_id': order_id,
                                 'source_type': 'regular_order'
+                                # Client info will be added by WorkflowManager
                             })
                             logger.info(f"   ✅ Created pending order: Order {order_id[:8] if order_id else 'Unknown'} - {width}\" x{len(order_data['rolls'])}")
                         else:
@@ -1995,14 +2015,61 @@ class CuttingOptimizer:
         
         # Generate optimization result with wastage allocation using PlanCalculationService
         from .plan_calculation_service import PlanCalculationService
-        
+
         calculation_service = PlanCalculationService(db, jumbo_roll_width=self.jumbo_roll_width)
         calculation_result = calculation_service.calculate_plan_for_orders(
             order_ids=order_ids,
             include_pending_orders=True,
             include_available_inventory=True
         )
-        
+
+        # ENHANCEMENT: Add client information to pending orders
+        pending_orders = calculation_result.get('pending_orders', [])
+        if pending_orders:
+            logger.info(f"🔍 ENHANCING PENDING ORDERS: Adding client info to {len(pending_orders)} pending orders")
+
+            # Collect all source_order_ids from pending orders
+            source_order_ids = set()
+            for pending_order in pending_orders:
+                if pending_order.get('source_order_id') and pending_order.get('source_type') == 'regular_order':
+                    source_order_ids.add(pending_order['source_order_id'])
+
+            # Batch fetch clients for all source orders
+            if source_order_ids:
+                from sqlalchemy.orm import joinedload
+                import uuid
+
+                orders_with_clients = db.query(models.OrderMaster).options(
+                    joinedload(models.OrderMaster.client)
+                ).filter(
+                    models.OrderMaster.id.in_([uuid.UUID(order_id) for order_id in source_order_ids])
+                ).all()
+
+                # Create mapping of order_id to client info
+                client_mapping = {}
+                for order in orders_with_clients:
+                    order_id_str = str(order.id)
+                    if order.client:
+                        client_mapping[order_id_str] = {
+                            'client_name': order.client.company_name,
+                            'client_id': str(order.client.id)
+                        }
+                        logger.info(f"✅ FOUND CLIENT: Order {order_id_str[:8]} -> Client: {order.client.company_name}")
+                    else:
+                        client_mapping[order_id_str] = {
+                            'client_name': 'Unknown (No Client)',
+                            'client_id': str(order.client_id) if order.client_id else None
+                        }
+                        logger.warning(f"⚠️ NO CLIENT: Order {order_id_str[:8]} - Client ID: {order.client_id}")
+
+                # Enhance pending orders with client information
+                for pending_order in pending_orders:
+                    source_order_id = pending_order.get('source_order_id')
+                    if source_order_id in client_mapping:
+                        pending_order['client_name'] = client_mapping[source_order_id]['client_name']
+                        pending_order['client_id'] = client_mapping[source_order_id]['client_id']
+                        logger.info(f"✅ ENHANCED PENDING ORDER: Added client {client_mapping[source_order_id]['client_name']} to pending order for {source_order_id[:8]}")
+
         # Prepare cut_pattern data including wastage allocations
         import json
         cut_pattern_data = {
@@ -2010,7 +2077,7 @@ class CuttingOptimizer:
             'jumbo_roll_details': calculation_result.get('jumbo_roll_details', []),
             'wastage_allocations': calculation_result.get('wastage_allocations', []),
             'summary': calculation_result.get('summary', {}),
-            'pending_orders': calculation_result.get('pending_orders', [])
+            'pending_orders': pending_orders  # Use enhanced pending orders
         }
         
         # Create plan in database with wastage allocations included
