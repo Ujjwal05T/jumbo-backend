@@ -2369,3 +2369,471 @@ def get_client_orders_with_plans(
     except Exception as e:
         logger.error(f"Error in client orders with plans: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# ORDER PLAN EXECUTION REPORT - Merged Report (Order Status + Plan Linkage)
+# ============================================================================
+
+@router.get("/reports/order-plan-execution", tags=["Order Plan Execution"])
+def get_order_plan_execution_report(
+    client_id: Optional[str] = Query(None, description="Client ID to filter orders"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    status: Optional[str] = Query(None, description="Order status filter (created, in_process, completed, cancelled)"),
+    plan_status: Optional[str] = Query(None, description="Plan status filter (created, optimized, completed)"),
+    include_unplanned: bool = Query(True, description="Include orders without production plans"),
+    limit: int = Query(1000, description="Maximum number of orders to return"),
+    db: Session = Depends(get_db)
+):
+    """
+    Order-Plan Execution Report showing:
+    For each order: total rolls | cuts | pending (with details) | plan frontend IDs (unique)
+    """
+    try:
+        # Validate UUID if provided
+        if client_id:
+            try:
+                uuid.UUID(client_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid client_id format")
+
+        # Main query for orders
+        query = db.query(
+            models.OrderMaster.id.label('order_id'),
+            models.OrderMaster.frontend_id.label('order_frontend_id'),
+            models.OrderMaster.created_at.label('order_date'),
+            models.OrderMaster.delivery_date,
+            models.OrderMaster.status.label('order_status'),
+            models.OrderMaster.priority,
+
+            # Client information
+            models.ClientMaster.id.label('client_id'),
+            models.ClientMaster.company_name.label('client_name'),
+            models.ClientMaster.gst_number.label('gstin'),
+            models.ClientMaster.phone,
+            models.ClientMaster.email,
+
+            # Order item aggregations
+            func.count(models.OrderItem.id).label('total_items'),
+            func.sum(models.OrderItem.quantity_rolls).label('total_quantity_ordered'),
+            func.sum(models.OrderItem.quantity_kg).label('total_weight_ordered'),
+            func.sum(models.OrderItem.quantity_fulfilled).label('total_quantity_cut'),
+            func.sum(models.OrderItem.amount).label('total_order_value'),
+
+            # Calculate pending quantities (ordered - fulfilled)
+            func.sum(models.OrderItem.quantity_rolls - models.OrderItem.quantity_fulfilled).label('total_quantity_pending')
+        ).join(
+            models.ClientMaster, models.OrderMaster.client_id == models.ClientMaster.id
+        ).outerjoin(
+            models.OrderItem, models.OrderMaster.id == models.OrderItem.order_id
+        )
+
+        # Build filters
+        filters = []
+
+        if client_id:
+            filters.append(models.OrderMaster.client_id == client_id)
+
+        if start_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date)
+                filters.append(models.OrderMaster.created_at >= start_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
+
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date + " 23:59:59")
+                filters.append(models.OrderMaster.created_at <= end_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+
+        if status:
+            filters.append(models.OrderMaster.status == status)
+
+        if filters:
+            query = query.filter(and_(*filters))
+
+        # Group by order and client
+        orders_data = query.group_by(
+            models.OrderMaster.id,
+            models.OrderMaster.frontend_id,
+            models.OrderMaster.created_at,
+            models.OrderMaster.delivery_date,
+            models.OrderMaster.status,
+            models.OrderMaster.priority,
+            models.ClientMaster.id,
+            models.ClientMaster.company_name,
+            models.ClientMaster.gst_number,
+            models.ClientMaster.phone,
+            models.ClientMaster.email
+        ).order_by(desc(models.OrderMaster.created_at)).limit(limit).all()
+
+        # Get order items for pending details
+        order_ids = [order.order_id for order in orders_data]
+
+        order_items_query = db.query(models.OrderItem).options(
+            joinedload(models.OrderItem.paper)
+        ).filter(models.OrderItem.order_id.in_(order_ids))
+
+        order_items = order_items_query.all()
+
+        # Group items by order
+        items_by_order = {}
+        for item in order_items:
+            if item.order_id not in items_by_order:
+                items_by_order[item.order_id] = []
+            items_by_order[item.order_id].append(item)
+
+        # Get pending items using PendingOrderItem (same as Client Order Analysis)
+        pending_items_query = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem.original_order_id.in_(order_ids),
+            models.PendingOrderItem._status == 'pending'
+        )
+
+        pending_items = pending_items_query.all()
+
+        # Group pending items by order
+        pending_by_order = {}
+        for item in pending_items:
+            if item.original_order_id not in pending_by_order:
+                pending_by_order[item.original_order_id] = []
+            pending_by_order[item.original_order_id].append(item)
+
+        # Get cut items using InventoryMaster (same as Client Order Analysis)
+        inventory_items_query = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper)
+        ).filter(
+            models.InventoryMaster.allocated_to_order_id.in_(order_ids)
+        )
+
+        inventory_items = inventory_items_query.all()
+
+        # Group inventory items by order
+        cuts_by_order = {}
+        for item in inventory_items:
+            if item.allocated_to_order_id not in cuts_by_order:
+                cuts_by_order[item.allocated_to_order_id] = []
+            cuts_by_order[item.allocated_to_order_id].append(item)
+
+        # Get production plans data
+        plans_query = db.query(
+            models.PlanMaster.id.label('plan_id'),
+            models.PlanMaster.frontend_id.label('plan_frontend_id'),
+            models.OrderMaster.id.label('order_id')
+        ).join(
+            models.PlanOrderLink, models.PlanMaster.id == models.PlanOrderLink.plan_id
+        ).join(
+            models.OrderMaster, models.PlanOrderLink.order_id == models.OrderMaster.id
+        ).filter(
+            models.OrderMaster.id.in_(order_ids)
+        )
+
+        if plan_status:
+            plans_query = plans_query.filter(models.PlanMaster.status == plan_status)
+
+        plans_data = plans_query.all()
+
+        # Organize unique plan frontend IDs by order
+        order_plans = {}
+        for plan in plans_data:
+            if plan.order_id not in order_plans:
+                order_plans[plan.order_id] = set()
+            order_plans[plan.order_id].add(plan.plan_frontend_id)
+
+        # Build final results
+        final_results = []
+        for order in orders_data:
+            # Skip unplanned orders if requested
+            if not order_plans.get(order.order_id, set()) and not include_unplanned:
+                continue
+
+            # Get pending items using PendingOrderItem (same as Client Order Analysis)
+            pending_items_for_order = pending_by_order.get(order.order_id, [])
+            total_pending_rolls = sum(item.quantity_pending for item in pending_items_for_order)
+
+            # Build pending details from PendingOrderItem
+            pending_details = []
+            for item in pending_items_for_order:
+                pending_details.append({
+                    'id': str(item.id),
+                    'paper_name': f"{item.gsm}GSM",
+                    'gsm': item.gsm,
+                    'bf': float(item.bf),
+                    'shade': item.shade,
+                    'width_inches': float(item.width_inches),
+                    'pending_quantity': item.quantity_pending,
+                    'pending_weight': 0,  # Not available in PendingOrderItem
+                    'rate': 0,  # Not available in PendingOrderItem
+                    'pending_value': 0  # Not available in PendingOrderItem
+                })
+
+            # Get cuts using InventoryMaster (same as Client Order Analysis)
+            cuts_for_order = cuts_by_order.get(order.order_id, [])
+            total_cuts = len(cuts_for_order)  # Count of inventory items allocated to this order
+
+            # Get unique plan frontend IDs
+            unique_plan_ids = sorted(list(order_plans.get(order.order_id, set())))
+
+            order_data = {
+                'order_id': str(order.order_id),
+                'order_frontend_id': order.order_frontend_id,
+                'order_date': order.order_date.isoformat() if order.order_date else None,
+                'delivery_date': order.delivery_date.isoformat() if order.delivery_date else None,
+                'order_status': order.order_status,
+                'priority': order.priority,
+                'client_name': order.client_name,
+                'client_phone': order.phone,
+                'client_gstin': order.gstin,
+
+                # Main metrics requested - using correct calculations
+                'total_rolls': int(order.total_quantity_ordered or 0),
+                'cuts': total_cuts,  # From InventoryMaster
+                'pending': {
+                    'total_rolls': total_pending_rolls,  # From PendingOrderItem
+                    'details': pending_details
+                },
+                'plan_frontend_ids': unique_plan_ids,
+
+                # Additional useful data
+                'total_items': int(order.total_items or 0),
+                'total_weight_ordered': float(order.total_weight_ordered or 0),
+                'total_order_value': float(order.total_order_value or 0),
+                'has_plan': len(unique_plan_ids) > 0,
+                'is_overdue': order.delivery_date and order.delivery_date < datetime.utcnow() and order.order_status not in ['completed', 'cancelled']
+            }
+
+            final_results.append(order_data)
+
+        # Calculate summary statistics
+        total_orders = len(final_results)
+        orders_with_plans = sum(1 for order in final_results if order['has_plan'])
+        total_rolls = sum(order['total_rolls'] for order in final_results)
+        total_cuts = sum(order['cuts'] for order in final_results)
+        total_pending_rolls = sum(order['pending']['total_rolls'] for order in final_results)
+
+        summary = {
+            'total_orders': total_orders,
+            'orders_with_plans': orders_with_plans,
+            'orders_without_plans': total_orders - orders_with_plans,
+            'plan_coverage_rate': round((orders_with_plans / max(total_orders, 1)) * 100, 2),
+            'total_rolls': total_rolls,
+            'total_cuts': total_cuts,
+            'total_pending_rolls': total_pending_rolls,
+            'fulfillment_rate': round((total_cuts / max(total_rolls, 1)) * 100, 2)
+        }
+
+        return {
+            'success': True,
+            'data': {
+                'orders': final_results,
+                'summary': summary,
+                'filters_applied': {
+                    'client_id': client_id,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'status': status,
+                    'plan_status': plan_status,
+                    'include_unplanned': include_unplanned,
+                    'limit': limit
+                }
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in order plan execution report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/order-plan-execution/export", tags=["Order Plan Execution"])
+def export_order_plan_execution_report(
+    client_id: Optional[str] = Query(None, description="Client ID to filter orders"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    status: Optional[str] = Query(None, description="Order status filter (created, in_process, completed, cancelled)"),
+    plan_status: Optional[str] = Query(None, description="Plan status filter (created, optimized, completed)"),
+    include_unplanned: bool = Query(True, description="Include orders without production plans"),
+    limit: int = Query(1000, description="Maximum number of orders to return"),
+    db: Session = Depends(get_db)
+):
+    """
+    Export Order-Plan Execution Report as PDF
+    """
+    try:
+        # Get the data using the main report function
+        result = get_order_plan_execution_report(
+            client_id=client_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=status,
+            plan_status=plan_status,
+            include_unplanned=include_unplanned,
+            limit=limit,
+            db=db
+        )
+
+        if not result or not result.get('success') or not result.get('data'):
+            raise HTTPException(status_code=404, detail="No data found for report")
+
+        data = result['data']
+        orders = data.get('orders', [])
+        summary = data.get('summary', {})
+
+        # Generate PDF
+        from fastapi.responses import Response
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.units import inch
+        from io import BytesIO
+
+        # Create PDF in memory
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(letter))
+        elements = []
+        styles = getSampleStyleSheet()
+
+        # Title
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            alignment=1,  # Center alignment
+            spaceAfter=20
+        )
+        elements.append(Paragraph("Order-Plan Execution Report", title_style))
+
+        # Report parameters
+        params_text = f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        if client_id:
+            params_text += f"\nClient ID: {client_id}"
+        if start_date and end_date:
+            params_text += f"\nDate Range: {start_date} to {end_date}"
+        if status:
+            params_text += f"\nOrder Status: {status}"
+        if plan_status:
+            params_text += f"\nPlan Status: {plan_status}"
+
+        elements.append(Paragraph(params_text, styles['Normal']))
+        elements.append(Spacer(1, 12))
+
+        # Summary Section
+        elements.append(Paragraph("Executive Summary", styles['Heading2']))
+
+        summary_data = [
+            ['Metric', 'Value'],
+            ['Total Orders', str(summary.get('total_orders', 0))],
+            ['Orders with Plans', f"{summary.get('orders_with_plans', 0)} ({summary.get('plan_coverage_rate', 0):.1f}%)"],
+            ['Overall Fulfillment Rate', f"{summary.get('overall_fulfillment_rate', 0):.1f}%"],
+            ['Overall Dispatch Rate', f"{summary.get('overall_dispatch_rate', 0):.1f}%"],
+            ['Total Quantity Ordered', str(summary.get('total_quantity_ordered', 0))],
+            ['Total Quantity Cut', str(summary.get('total_quantity_cut', 0))],
+            ['Total Quantity Dispatched', str(summary.get('total_quantity_dispatched', 0))],
+            ['Total Quantity Pending', str(summary.get('total_quantity_pending', 0))],
+        ]
+
+        summary_table = Table(summary_data, colWidths=[2.5*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+
+        elements.append(summary_table)
+        elements.append(Spacer(1, 20))
+
+        # Detailed Orders Table
+        elements.append(Paragraph("Detailed Orders and Plans", styles['Heading2']))
+
+        if orders:
+            # Prepare table data
+            headers = [
+                'Order ID', 'Client', 'Status', 'Priority',
+                'Ordered', 'Pending', 'Cut', 'Dispatched',
+                'Plan Coverage', 'Has Plan', 'Indicators'
+            ]
+
+            table_data = [headers]
+
+            for order in orders:
+                row = [
+                    order.get('order_frontend_id', ''),
+                    order.get('client', {}).get('name', ''),
+                    order.get('order_status', '').replace('_', ' '),
+                    order.get('priority', 'Normal'),
+                    str(order.get('total_quantity_ordered', 0)),
+                    str(order.get('total_quantity_pending', 0)),
+                    str(order.get('total_quantity_cut', 0)),
+                    str(order.get('total_quantity_dispatched', 0)),
+                    f"{order.get('plan_coverage_percentage', 0):.1f}%",
+                    'Yes' if order.get('has_plan') else 'No',
+                ]
+
+                # Add status indicators
+                indicators = []
+                if order.get('is_fully_planned'):
+                    indicators.append('Planned')
+                if order.get('is_fully_produced'):
+                    indicators.append('Produced')
+                if order.get('is_fully_dispatched'):
+                    indicators.append('Dispatched')
+                if order.get('is_overdue'):
+                    indicators.append('Overdue')
+
+                row.append(', '.join(indicators) if indicators else '-')
+                table_data.append(row)
+
+            # Create the table
+            orders_table = Table(table_data, repeatRows=1)
+
+            # Style the table
+            table_style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('ALIGN', (4, 1), (7, -1), 'RIGHT'),  # Right align numeric columns
+                ('ALIGN', (8, 1), (8, -1), 'CENTER'),  # Center align percentage
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ])
+
+            # Add alternating row colors
+            for i in range(1, len(table_data)):
+                if i % 2 == 0:
+                    table_style.add('BACKGROUND', (0, i), (-1, i), colors.lightgrey)
+
+            orders_table.setStyle(table_style)
+            elements.append(orders_table)
+        else:
+            elements.append(Paragraph("No orders found matching the selected criteria.", styles['Normal']))
+
+        # Build PDF
+        doc.build(elements)
+        buffer.seek(0)
+
+        # Return PDF response
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename=order-plan-execution-{datetime.now().strftime('%Y-%m-%d')}.pdf"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting order plan execution report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
