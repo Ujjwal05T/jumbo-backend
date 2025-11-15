@@ -9,6 +9,7 @@ import logging
 
 from .base import CRUDBase
 from .. import models, schemas
+from ..services.barcode_generator import BarcodeGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -333,10 +334,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     roll_number_conflicts[roll_num] = []
                 roll_number_conflicts[roll_num].append(spec_key)
         
-        # Calculate total 118" rolls and jumbo rolls needed across all paper specifications
-        total_118_rolls = sum(len(roll_groups) for roll_groups in paper_spec_groups.values())
-        total_jumbo_count = sum((len(roll_groups) + 2) // 3 for roll_groups in paper_spec_groups.values())
-        
+       
         # Create jumbo rolls and link 118" rolls properly
         import uuid
         
@@ -370,7 +368,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             # Create jumbo rolls for this paper specification
             for jumbo_idx in range(spec_jumbo_count):
                 virtual_jumbo_qr = f"VIRTUAL_JUMBO_{uuid.uuid4().hex[:8].upper()}"
-                virtual_jumbo_barcode = f"VJB_{uuid.uuid4().hex[:8].upper()}"
+                virtual_jumbo_barcode = BarcodeGenerator.generate_jumbo_roll_barcode(db)
                 jumbo_roll = models.InventoryMaster(
                     paper_id=paper_record.id,
                     width_inches=jumbo_roll_width,
@@ -398,7 +396,7 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 # Create 118" rolls for the assigned individual roll numbers
                 for seq, roll_num in enumerate(assigned_roll_numbers, 1):
                     virtual_118_qr = f"VIRTUAL_118_{uuid.uuid4().hex[:8].upper()}"
-                    virtual_118_barcode = f"V118_{uuid.uuid4().hex[:8].upper()}"
+                    virtual_118_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
                     roll_118 = models.InventoryMaster(
                         paper_id=paper_record.id,
                         width_inches=jumbo_roll_width,
@@ -453,7 +451,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         # Link cut rolls to their parent 118" rolls based on individual_roll_number
         for cut_roll in selected_cut_rolls:
             # Generate barcode for this cut roll
-            from ..services.barcode_generator import BarcodeGenerator
             import uuid
             barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
             
@@ -956,7 +953,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                     continue
                 
                 # Generate wastage IDs using the new generators
-                from ..services.barcode_generator import BarcodeGenerator
                 wastage_barcode_id = BarcodeGenerator.generate_wastage_barcode(db)
                 
                 # Find paper record for wastage
@@ -1044,10 +1040,114 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         
         # NOTE: Added rolls processing moved to early stage before inventory creation
         # This ensures proper order ID tracking for inventory items
-        
+
         db.commit()
         db.refresh(db_plan)
-        
+
+        # Build hierarchical production structure for simplified frontend consumption
+        production_hierarchy = []
+        jumbo_groups = {}
+
+        print(f"DEBUG: Starting hierarchy build - created_jumbo_rolls: {len(created_jumbo_rolls)}, created_118_rolls: {len(created_118_rolls)}, created_inventory: {len(created_inventory)}")
+        print(f"DEBUG: Sample jumbo roll IDs: {[jr.id for jr in created_jumbo_rolls[:3]]}")
+        print(f"DEBUG: Sample 118\" roll parent_jumbo_ids: {[r118.parent_jumbo_id for r118 in created_118_rolls[:3]]}")
+
+        # Group 118" rolls by parent jumbo
+        for roll_118 in created_118_rolls:
+            parent_jumbo_id = str(roll_118.parent_jumbo_id) if roll_118.parent_jumbo_id else None
+            print(f"DEBUG: 118\" roll {roll_118.barcode_id} -> parent_jumbo_id: {parent_jumbo_id}")
+            if parent_jumbo_id:
+                if parent_jumbo_id not in jumbo_groups:
+                    jumbo_groups[parent_jumbo_id] = {
+                        "jumbo_roll": None,
+                        "intermediate_rolls": [],
+                        "cut_rolls": []
+                    }
+                jumbo_groups[parent_jumbo_id]["intermediate_rolls"].append({
+                    "id": str(roll_118.id),
+                    "barcode_id": roll_118.barcode_id,
+                    "parent_jumbo_id": parent_jumbo_id,
+                    "individual_roll_number": roll_118.individual_roll_number,
+                    "width_inches": float(roll_118.width_inches),
+                    "paper_spec": f"{roll_118.paper.gsm}gsm, {roll_118.paper.bf}bf, {roll_118.paper.shade}"
+                })
+
+        # Group cut rolls by their parent 118" rolls and then by jumbo
+        print(f"DEBUG: Starting cut roll matching - {len(created_inventory)} cut rolls")
+        for cut_roll in created_inventory:
+            parent_118_barcode = None
+            parent_jumbo_id = None
+
+            print(f"DEBUG: Processing cut roll {cut_roll.barcode_id}, parent_118_roll_id: {getattr(cut_roll, 'parent_118_roll_id', 'None')}")
+
+            # Use the proper UUID relationship: parent_118_roll_id
+            if hasattr(cut_roll, 'parent_118_roll_id') and cut_roll.parent_118_roll_id:
+                # Find the 118" roll by UUID and get its parent jumbo
+                for roll_118 in created_118_rolls:
+                    if str(roll_118.id) == str(cut_roll.parent_118_roll_id):
+                        parent_118_barcode = roll_118.barcode_id
+                        parent_jumbo_id = str(roll_118.parent_jumbo_id) if roll_118.parent_jumbo_id else None
+                        print(f"DEBUG: Found parent 118\" roll {roll_118.barcode_id} for cut roll {cut_roll.barcode_id}")
+                        break
+
+            if parent_jumbo_id and parent_jumbo_id in jumbo_groups:
+                print(f"DEBUG: Matched cut roll {cut_roll.barcode_id} to jumbo {parent_jumbo_id}")
+                jumbo_groups[parent_jumbo_id]["cut_rolls"].append({
+                    "id": str(cut_roll.id),
+                    "barcode_id": cut_roll.barcode_id,
+                    "width_inches": float(cut_roll.width_inches),
+                    "parent_118_roll_barcode": parent_118_barcode,
+                    "paper_spec": f"{cut_roll.paper.gsm}gsm, {cut_roll.paper.bf}bf, {cut_roll.paper.shade}",
+                    "status": cut_roll.status
+                })
+            else:
+                print(f"DEBUG: No match found for cut roll {cut_roll.barcode_id}, parent_jumbo_id: {parent_jumbo_id}")
+
+        # Add jumbo roll details to each group
+        for jumbo_roll in created_jumbo_rolls:
+            jumbo_id = str(jumbo_roll.id)
+            if jumbo_id in jumbo_groups:
+                jumbo_groups[jumbo_id]["jumbo_roll"] = {
+                    "id": jumbo_id,
+                    "barcode_id": jumbo_roll.barcode_id,
+                    "frontend_id": jumbo_roll.frontend_id,
+                    "width_inches": float(jumbo_roll.width_inches),
+                    "paper_spec": f"{jumbo_roll.paper.gsm}gsm, {jumbo_roll.paper.bf}bf, {jumbo_roll.paper.shade}",
+                    "status": jumbo_roll.status,
+                    "location": jumbo_roll.location
+                }
+
+        # Convert to final array format
+        production_hierarchy = []
+        for jumbo_id, group in jumbo_groups.items():
+            if group["jumbo_roll"]:
+                production_hierarchy.append({
+                    "jumbo_roll": group["jumbo_roll"],
+                    "intermediate_rolls": group["intermediate_rolls"],
+                    "cut_rolls": group["cut_rolls"]
+                })
+                print(f"DEBUG: Final jumbo group {jumbo_id}: {len(group['cut_rolls'])} cut rolls")
+
+        print(f"DEBUG: Final production_hierarchy built: {len(production_hierarchy)} jumbo groups")
+
+
+        # Simplified wastage items
+        wastage_items = [
+            {
+                "id": str(w.id),
+                "barcode_id": w.barcode_id,
+                "width_inches": float(w.width_inches),
+                "paper_spec": f"{w.paper.gsm}gsm, {w.paper.bf}bf, {w.paper.shade}",
+                "notes": w.notes,
+                "status": w.status
+            }
+            for w in created_wastage
+        ]
+
+        print(f"DEBUG: Final production_hierarchy built: {len(production_hierarchy)} jumbo groups")
+        print(f"DEBUG: Production hierarchy data preview: {production_hierarchy[:1] if production_hierarchy else 'EMPTY'}")
+        print(f"DEBUG: About to return response with production_hierarchy length: {len(production_hierarchy)}")
+
         return {
             "plan_id": str(db_plan.id),
             "status": db_plan.status,
@@ -1075,33 +1175,44 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
                 "allocated_wastage": [str(w.id) for w in allocated_wastage],
                 "created_gupta_orders": [order["order"]["frontend_id"] for order in created_gupta_orders]
             },
-            "created_inventory_details": [
-                {
-                    "id": str(inv.id),
-                    "barcode_id": inv.barcode_id,
-                    "qr_code": inv.qr_code,
-                    "width_inches": float(inv.width_inches),
-                    "paper_id": str(inv.paper_id),
-                    "status": inv.status,
-                    "created_at": inv.created_at.isoformat() if inv.created_at else None
-                } for inv in created_inventory
-            ],
-            "created_wastage_details": [
-                {
-                    "id": str(w.id),
-                    "frontend_id": w.frontend_id,
-                    "barcode_id": w.barcode_id,
-                    "width_inches": float(w.width_inches),
-                    "paper_id": str(w.paper_id),
-                    "status": w.status,
-                    "location": w.location,
-                    "notes": w.notes,
-                    "created_at": w.created_at.isoformat() if w.created_at else None
-                } for w in created_wastage
-            ],
-            "message": f"Production started successfully - Updated {len(updated_orders)} orders, {len(updated_order_items)} order items, resolved {len(updated_pending_orders)} pending orders, created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_wastage)} wastage items, and created {len(created_pending_from_unselected)} PHASE 2 pending orders from unselected cuts"
+            "production_hierarchy": production_hierarchy,
+            "wastage_items": wastage_items,
+            "message": f"Production started successfully - Created {len(created_jumbo_rolls)} jumbo rolls with {len(created_inventory)} cut rolls and {len(created_wastage)} wastage items"
         }
-    
+    def _create_jumbo_id_mapping(self, created_jumbo_rolls, planResult):
+        """
+        Create mapping from original jumbo roll IDs to actual database jumbo barcodes.
+        This maps planning algorithm IDs (like "JR-001") to actual barcodes (like "JR_00002").
+        """
+        jumbo_id_mapping = {}
+
+        if not planResult or not created_jumbo_rolls or not hasattr(planResult, 'jumbo_roll_details'):
+            return jumbo_id_mapping
+
+        try:
+            # Map original jumbo roll IDs to actual database jumbo rolls
+            for jumbo in created_jumbo_rolls:
+                # Find matching jumbo from plan result by paper spec
+                paper_spec = f"{jumbo.paper.gsm}gsm, {jumbo.paper.bf}bf, {jumbo.paper.shade}"
+
+                for plan_jumbo in planResult.jumbo_roll_details:
+                    if (plan_jumbo and
+                        plan_jumbo.paper_spec == paper_spec):
+
+                        # Map both the jumbo_id and jumbo_frontend_id from planning to actual barcode
+                        if hasattr(plan_jumbo, 'jumbo_id'):
+                            jumbo_id_mapping[plan_jumbo.jumbo_id] = jumbo.barcode_id
+                        if hasattr(plan_jumbo, 'jumbo_frontend_id'):
+                            jumbo_id_mapping[plan_jumbo.jumbo_frontend_id] = jumbo.barcode_id
+
+                        logger.info(f"🔄 JUMBO MAPPING: {plan_jumbo.jumbo_id} → {jumbo.barcode_id} ({paper_spec})")
+                        break
+
+        except Exception as e:
+            logger.error(f"Error creating jumbo ID mapping: {e}")
+
+        return jumbo_id_mapping
+
     def allocate_wastage_for_orders(
         self, 
         db: Session, 
@@ -1375,7 +1486,6 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
 
     def _generate_scr_barcode(self, db: Session) -> str:
         """Generate SCR barcode for scrap cut rolls from wastage"""
-        from ..services.barcode_generator import BarcodeGenerator
         return BarcodeGenerator.generate_scrap_cut_roll_barcode(db)
 
     def _process_added_rolls_early(

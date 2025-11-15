@@ -660,6 +660,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     created_jumbo_rolls = []
     created_118_rolls = []
     created_wastage = []
+    allocated_wastage = []  # Not applicable for pending orders - users select specific rolls
     
     # Create plan record (same pattern as main production)
     plan_name = f"Pending Production Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
@@ -1151,7 +1152,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
         # Create jumbo rolls for this paper specification
         for jumbo_idx in range(spec_jumbo_count):
             virtual_jumbo_qr = f"VIRTUAL_JUMBO_{uuid4().hex[:8].upper()}"
-            virtual_jumbo_barcode = f"VJB_{uuid4().hex[:8].upper()}"
+            virtual_jumbo_barcode = BarcodeGenerator.generate_jumbo_roll_barcode(db)
             jumbo_roll = models.InventoryMaster(
                 paper_id=paper_record.id,
                 width_inches=jumbo_roll_width,
@@ -1178,7 +1179,7 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             # Create 118" rolls for this jumbo
             for roll_118_idx in range(rolls_for_this_jumbo):
                 virtual_118_qr = f"VIRTUAL_118_{uuid4().hex[:8].upper()}"
-                virtual_118_barcode = f"V118_{uuid4().hex[:8].upper()}"
+                virtual_118_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
                 roll_118 = models.InventoryMaster(
                     paper_id=paper_record.id,
                     width_inches=jumbo_roll_width,
@@ -1612,21 +1613,113 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     logger.info("🎯 ===== END PRODUCTION SUMMARY =====")
     logger.info("")
 
-    # Return response matching StartProductionResponse format
+    # Build hierarchical production structure for simplified frontend consumption (same as plans.py)
+    production_hierarchy = []
+    jumbo_groups = {}
+
+    print(f"DEBUG PENDING: Starting hierarchy build - created_jumbo_rolls: {len(created_jumbo_rolls)}, created_118_rolls: {len(created_118_rolls)}, created_inventory: {len(created_inventory)}")
+
+    # Group 118" rolls by parent jumbo
+    for roll_118 in created_118_rolls:
+        parent_jumbo_id = str(roll_118.parent_jumbo_id) if roll_118.parent_jumbo_id else None
+        if parent_jumbo_id:
+            if parent_jumbo_id not in jumbo_groups:
+                jumbo_groups[parent_jumbo_id] = {
+                    "jumbo_roll": None,
+                    "intermediate_rolls": [],
+                    "cut_rolls": []
+                }
+            jumbo_groups[parent_jumbo_id]["intermediate_rolls"].append({
+                "id": str(roll_118.id),
+                "barcode_id": roll_118.barcode_id,
+                "parent_jumbo_id": parent_jumbo_id,
+                "individual_roll_number": roll_118.individual_roll_number,
+                "width_inches": float(roll_118.width_inches),
+                "paper_spec": f"{roll_118.paper.gsm}gsm, {roll_118.paper.bf}bf, {roll_118.paper.shade}"
+            })
+
+    # Group cut rolls by their parent 118" rolls and then by jumbo
+    print(f"DEBUG PENDING: Starting cut roll matching - {len(created_inventory)} cut rolls")
+    for cut_roll in created_inventory:
+        parent_118_barcode = None
+        parent_jumbo_id = None
+
+        # Use the proper UUID relationship: parent_118_roll_id
+        if hasattr(cut_roll, 'parent_118_roll_id') and cut_roll.parent_118_roll_id:
+            # Find the 118" roll by UUID and get its parent jumbo
+            for roll_118 in created_118_rolls:
+                if str(roll_118.id) == str(cut_roll.parent_118_roll_id):
+                    parent_118_barcode = roll_118.barcode_id
+                    parent_jumbo_id = str(roll_118.parent_jumbo_id) if roll_118.parent_jumbo_id else None
+                    break
+
+        if parent_jumbo_id and parent_jumbo_id in jumbo_groups:
+            jumbo_groups[parent_jumbo_id]["cut_rolls"].append({
+                "id": str(cut_roll.id),
+                "barcode_id": cut_roll.barcode_id,
+                "width_inches": float(cut_roll.width_inches),
+                "parent_118_roll_barcode": parent_118_barcode,
+                "paper_spec": f"{cut_roll.paper.gsm}gsm, {cut_roll.paper.bf}bf, {cut_roll.paper.shade}",
+                "status": cut_roll.status
+            })
+
+    # Add jumbo roll details to each group
+    for jumbo_roll in created_jumbo_rolls:
+        jumbo_id = str(jumbo_roll.id)
+        if jumbo_id in jumbo_groups:
+            jumbo_groups[jumbo_id]["jumbo_roll"] = {
+                "id": jumbo_id,
+                "barcode_id": jumbo_roll.barcode_id,
+                "frontend_id": jumbo_roll.frontend_id,
+                "width_inches": float(jumbo_roll.width_inches),
+                "paper_spec": f"{jumbo_roll.paper.gsm}gsm, {jumbo_roll.paper.bf}bf, {jumbo_roll.paper.shade}",
+                "status": jumbo_roll.status,
+                "location": jumbo_roll.location
+            }
+
+    # Convert to final array format
+    production_hierarchy = []
+    for jumbo_id, group in jumbo_groups.items():
+        if group["jumbo_roll"]:
+            production_hierarchy.append({
+                "jumbo_roll": group["jumbo_roll"],
+                "intermediate_rolls": group["intermediate_rolls"],
+                "cut_rolls": group["cut_rolls"]
+            })
+
+    print(f"DEBUG PENDING: Final production_hierarchy built: {len(production_hierarchy)} jumbo groups")
+
+    # Simplified wastage items
+    wastage_items = [
+        {
+            "id": str(w.id),
+            "barcode_id": w.barcode_id,
+            "width_inches": float(w.width_inches),
+            "paper_spec": f"{w.paper.gsm}gsm, {w.paper.bf}bf, {w.paper.shade}",
+            "notes": w.notes,
+            "status": w.status
+        }
+        for w in created_wastage
+    ]
+
+    # Return response matching StartProductionResponse format with hierarchical structure
     return {
         "plan_id": str(db_plan.id),
         "status": "completed", 
         "executed_at": db_plan.executed_at.isoformat() if db_plan.executed_at else datetime.utcnow().isoformat(),
         "summary": {
             "orders_updated": len(updated_orders),
-            "order_items_updated": len(updated_order_items), 
+            "order_items_updated": len(updated_order_items),
             "pending_orders_resolved": len(updated_pending_orders),
             "inventory_created": len(created_inventory),
             "pending_orders_created_phase2": len(created_pending_from_unused),
             "jumbo_rolls_created": len(created_jumbo_rolls),
             "intermediate_118_rolls_created": len(created_118_rolls),
+            "wastage_items_created": len(created_wastage),
+            "wastage_items_allocated": len(allocated_wastage),  # Always 0 for pending orders
             "manual_orders_created": len(created_manual_orders),
-            "manual_order_items_created": sum(len(order["items"]) for order in created_manual_orders)
+            "manual_order_items_created": sum(len(order["items"]) for order in created_manual_orders),
+            "gupta_orders_created": 0  # 0 for pending orders
         },
         "details": {
             "updated_orders": updated_orders,  # Already List[str]
@@ -1636,11 +1729,12 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             "created_jumbo_rolls": [str(jr.id) for jr in created_jumbo_rolls],  # List[str]
             "created_118_rolls": [str(r118.id) for r118 in created_118_rolls],  # List[str]
             "created_wastage": [str(w.id) for w in created_wastage],  # List[str]
+            "allocated_wastage": [str(w.id) for w in allocated_wastage],  # List[str] - always empty for pending orders
             "created_gupta_orders": [],  # List[str] - empty for pending flow
             "created_manual_orders": [order["order"].frontend_id for order in created_manual_orders],  # List[str]
             "created_manual_order_items": [f"{order['order'].frontend_id}: {len(order['items'])} items" for order in created_manual_orders]  # List[str]
         },
-        "created_inventory_details": [
+        "created_inventory_details": [  # Keep for backward compatibility
             {
                 "id": str(inv.id),
                 "barcode_id": inv.barcode_id,
@@ -1651,6 +1745,8 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 "created_at": inv.created_at.isoformat() if inv.created_at else None
             } for inv in created_inventory
         ],
+        "production_hierarchy": production_hierarchy,
+        "wastage_items": wastage_items,
         "message": f"Production started successfully from pending suggestions - Plan {db_plan.frontend_id} completed: Processed {len(updated_pending_orders)} pending orders (with partial fulfillment tracking), created {len(created_jumbo_rolls)} jumbo rolls, {len(created_118_rolls)} intermediate rolls, {len(created_inventory)} cut roll inventory items, {len(created_plan_links)} plan links"
     }
 

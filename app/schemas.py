@@ -1000,6 +1000,8 @@ class StartProductionResponse(BaseModel):
     summary: ProductionStartSummary
     details: Dict[str, List[str]]
     created_inventory_details: List[InventoryDetail] = Field(default_factory=list)
+    production_hierarchy: List[Dict[str, Any]] = Field(default_factory=list)
+    wastage_items: List[Dict[str, Any]] = Field(default_factory=list)
     message: str
 
 # ============================================================================

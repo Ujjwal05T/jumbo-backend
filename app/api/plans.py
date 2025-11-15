@@ -298,6 +298,10 @@ def start_production(
         # Execute production logic
         result = crud_operations.start_production_for_plan(db=db, plan_id=plan_uuid, request_data=request_data.model_dump())
 
+        print(f"API DEBUG: CRUD result keys: {list(result.keys())}")
+        print(f"API DEBUG: Has production_hierarchy: {'production_hierarchy' in result}")
+        print(f"API DEBUG: Has created_inventory_details: {'created_inventory_details' in result}")
+
         # Add rollback info to response
         minutes_remaining = 0
         if snapshot:

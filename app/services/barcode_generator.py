@@ -196,24 +196,26 @@ class BarcodeGenerator:
     def validate_barcode_format(barcode_id: str, barcode_type: str = "cut_roll") -> bool:
         """
         Validate barcode format.
-        
+
         Args:
             barcode_id: Barcode to validate
-            barcode_type: Type - "cut_roll", "inventory", "jumbo", or "wastage"
-            
+            barcode_type: Type - "cut_roll", "inventory", "jumbo", "118_roll", or "wastage"
+
         Returns:
             bool: True if valid format
         """
         if not barcode_id:
             return False
-            
+
         try:
             if barcode_type == "cut_roll":
                 return barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()
             elif barcode_type == "inventory":
                 return barcode_id.startswith("INV_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             elif barcode_type == "jumbo":
-                return barcode_id.startswith("JMB_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+                return barcode_id.startswith("JR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()
+            elif barcode_type == "118_roll":
+                return barcode_id.startswith("SET_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             elif barcode_type == "wastage":
                 return barcode_id.startswith("WSB-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             else:
@@ -221,6 +223,98 @@ class BarcodeGenerator:
         except:
             return False
     
+    @staticmethod
+    def generate_118_roll_barcode(db: Session) -> str:
+        """
+        Generate barcode for 118" rolls in SET_00001 format.
+
+        Args:
+            db: Database session
+
+        Returns:
+            str: Next barcode ID like SET_00001, SET_00002, etc.
+        """
+        try:
+            # Get the highest existing barcode number from inventory
+            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
+                models.InventoryMaster.barcode_id.like('SET_%')
+            ).scalar()
+
+            if result is None:
+                # No barcodes exist yet, start with 1
+                next_number = 1
+            else:
+                # Extract number from SET_00123 format
+                try:
+                    if result and result.startswith('SET_'):
+                        current_number = int(result[4:])  # Remove 'SET_' prefix
+                        next_number = current_number + 1
+                    else:
+                        next_number = 1
+                except (ValueError, AttributeError):
+                    logger.warning(f"Invalid 118 roll barcode format found: {result}, starting from 1")
+                    next_number = 1
+
+            # Format as SET_00001 (5 digits with leading zeros)
+            barcode_id = f"SET_{next_number:05d}"
+
+            logger.info(f"Generated 118 roll barcode: {barcode_id}")
+            return barcode_id
+
+        except Exception as e:
+            logger.error(f"Error generating 118 roll barcode: {e}")
+            # Fallback to timestamp-based ID
+            import time
+            fallback_id = f"SET_{int(time.time())}"
+            logger.warning(f"Using fallback 118 roll barcode: {fallback_id}")
+            return fallback_id
+
+    @staticmethod
+    def generate_jumbo_roll_barcode(db: Session) -> str:
+        """
+        Generate barcode for jumbo rolls in JR_00001 format.
+
+        Args:
+            db: Database session
+
+        Returns:
+            str: Next barcode ID like JR_00001, JR_00002, etc.
+        """
+        try:
+            # Get the highest existing barcode number from inventory
+            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
+                models.InventoryMaster.barcode_id.like('JR_%')
+            ).scalar()
+
+            if result is None:
+                # No barcodes exist yet, start with 1
+                next_number = 1
+            else:
+                # Extract number from JR_00123 format
+                try:
+                    if result and result.startswith('JR_'):
+                        current_number = int(result[3:])  # Remove 'JR_' prefix
+                        next_number = current_number + 1
+                    else:
+                        next_number = 1
+                except (ValueError, AttributeError):
+                    logger.warning(f"Invalid jumbo roll barcode format found: {result}, starting from 1")
+                    next_number = 1
+
+            # Format as JR_00001 (5 digits with leading zeros)
+            barcode_id = f"JR_{next_number:05d}"
+
+            logger.info(f"Generated jumbo roll barcode: {barcode_id}")
+            return barcode_id
+
+        except Exception as e:
+            logger.error(f"Error generating jumbo roll barcode: {e}")
+            # Fallback to timestamp-based ID
+            import time
+            fallback_id = f"JR_{int(time.time())}"
+            logger.warning(f"Using fallback jumbo roll barcode: {fallback_id}")
+            return fallback_id
+
     @staticmethod
     def is_barcode_unique(db: Session, barcode_id: str, table: str = "inventory") -> bool:
         """
