@@ -1142,13 +1142,16 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             continue
         
         logger.info(f"✅ Found paper record: {paper_record.frontend_id}")
-        
-        # Calculate how many jumbo rolls needed (3 cut rolls per jumbo, flexible 1-3)
-        spec_cut_count = len(cut_rolls_for_spec)
-        spec_jumbo_count = (spec_cut_count + 2) // 3  # Ceiling division for 1-3 rolls per jumbo
-        
-        logger.info(f"📊 SPEC {gsm}gsm {bf}bf {shade}: {spec_cut_count} cut rolls → {spec_jumbo_count} jumbo rolls needed")
-        
+
+        # Get unique individual_roll_numbers for this paper spec (sorted)
+        roll_numbers = sorted(cut_rolls_for_spec.keys())
+
+        # Calculate how many jumbo rolls needed (3 individual_roll_numbers per jumbo)
+        spec_jumbo_count = (len(roll_numbers) + 2) // 3  # Ceiling division
+
+        logger.info(f"📊 SPEC {gsm}gsm {bf}bf {shade}: {len(roll_numbers)} SETs (individual roll numbers) → {spec_jumbo_count} jumbo rolls needed")
+        logger.info(f"📊 Individual roll numbers: {roll_numbers}")
+
         # Create jumbo rolls for this paper specification
         for jumbo_idx in range(spec_jumbo_count):
             virtual_jumbo_qr = f"VIRTUAL_JUMBO_{uuid4().hex[:8].upper()}"
@@ -1166,18 +1169,21 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 created_at=datetime.utcnow(),
                 location="Virtual Production"
             )
-            
+
             db.add(jumbo_roll)
             db.flush()  # Get the ID
             created_jumbo_rolls.append(jumbo_roll)
-            logger.info(f"🎯 Created jumbo roll: {jumbo_roll.frontend_id}")
-            
-            # Determine how many 118" rolls this jumbo should have (1-3, flexible)
-            remaining_cuts = spec_cut_count - (jumbo_idx * 3)
-            rolls_for_this_jumbo = min(3, remaining_cuts)
-            
-            # Create 118" rolls for this jumbo
-            for roll_118_idx in range(rolls_for_this_jumbo):
+            logger.info(f"🎯 Created jumbo roll: {jumbo_roll.frontend_id} (barcode: {jumbo_roll.barcode_id})")
+
+            # Assign 3 individual roll numbers to this jumbo (or remaining if less than 3)
+            start_idx = jumbo_idx * 3
+            end_idx = min(start_idx + 3, len(roll_numbers))
+            assigned_roll_numbers = roll_numbers[start_idx:end_idx]
+
+            logger.info(f"📦 ASSIGNING ROLLS: Jumbo {jumbo_roll.frontend_id} gets SETs {assigned_roll_numbers}")
+
+            # Create 118" rolls for each assigned individual_roll_number
+            for seq, roll_num in enumerate(assigned_roll_numbers, 1):
                 virtual_118_qr = f"VIRTUAL_118_{uuid4().hex[:8].upper()}"
                 virtual_118_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
                 roll_118 = models.InventoryMaster(
@@ -1192,13 +1198,15 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                     created_by_id=UUID(created_by_id),
                     created_at=datetime.utcnow(),
                     location="Virtual Production",
-                    parent_jumbo_id=jumbo_roll.id
+                    parent_jumbo_id=jumbo_roll.id,
+                    roll_sequence=seq,
+                    individual_roll_number=roll_num  # ✅ CRITICAL: Assign SET number
                 )
-                
+
                 db.add(roll_118)
                 db.flush()  # Get the ID
                 created_118_rolls.append(roll_118)
-                logger.info(f"📏 Created 118\" roll: {roll_118.frontend_id}")
+                logger.info(f"📏 Created 118\" roll: {roll_118.frontend_id} (barcode: {roll_118.barcode_id}, SET #{roll_num})")
     
     # Create cut roll inventory
     logger.info(f"🔧 Creating {len(selected_cut_rolls_dict)} cut roll inventory items...")
@@ -1216,13 +1224,27 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             if not cut_roll_paper:
                 logger.error(f"❌ No paper found for GSM={cut_roll['gsm']}, BF={cut_roll['bf']}, Shade={cut_roll['shade']} - skipping")
                 continue
-            
-            # Find a suitable 118" roll to attach this cut to
-            suitable_118_roll = db.query(models.InventoryMaster).filter(
-                models.InventoryMaster.paper_id == cut_roll_paper.id,
-                models.InventoryMaster.roll_type == "118",
-                models.InventoryMaster.status == "consumed"
-            ).first()
+
+            # Find the matching 118" roll from NEWLY CREATED rolls based on individual_roll_number
+            suitable_118_roll = None
+            individual_roll_number = cut_roll.get("individual_roll_number")
+
+            if individual_roll_number:
+                # Find the 118" roll with matching individual_roll_number AND same paper type
+                matching_118_rolls = [
+                    roll for roll in created_118_rolls
+                    if (roll.individual_roll_number == individual_roll_number and
+                        roll.paper_id == cut_roll_paper.id)
+                ]
+
+                if matching_118_rolls:
+                    # Use the first matching roll (they should all be equivalent)
+                    suitable_118_roll = matching_118_rolls[0]
+                    logger.info(f"✅ MATCHED 118\" ROLL: {suitable_118_roll.barcode_id} for SET #{individual_roll_number}")
+                else:
+                    logger.warning(f"⚠️ No matching 118\" roll found for SET #{individual_roll_number} with paper {cut_roll_paper.frontend_id}")
+            else:
+                logger.warning(f"⚠️ Cut roll has no individual_roll_number, cannot link to 118\" roll")
             
             # Create the cut roll inventory record
             barcode_id = BarcodeGenerator.generate_cut_roll_barcode(db)
