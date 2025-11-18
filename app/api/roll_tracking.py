@@ -581,3 +581,358 @@ def calculate_match_score(roll_width: float, target_width: float, tolerance: flo
         return 1.0 - (width_diff / tolerance) * 0.5  # Penalty for difference
     else:
         return 0.0
+
+@router.get("/track/hierarchy/{barcode}", response_model=Dict[str, Any], tags=["Roll Tracking"])
+def track_roll_hierarchy(
+    barcode: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get complete production hierarchy for any barcode (Jumbo, SET/118", or Cut Roll)
+    Returns the full hierarchical structure with parent and child relationships
+    """
+    try:
+        # Find the inventory item by barcode
+        inventory_item = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper)
+        ).filter(
+            or_(
+                models.InventoryMaster.barcode_id == barcode,
+                models.InventoryMaster.qr_code == barcode
+            )
+        ).first()
+
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail=f"Roll with barcode '{barcode}' not found")
+
+        # Determine roll type and build appropriate hierarchy
+        result = {
+            "searched_barcode": barcode,
+            "roll_type": inventory_item.roll_type,
+            "hierarchy": {},
+            "searched_roll_info": None
+        }
+
+        # Get searched roll info
+        result["searched_roll_info"] = {
+            "id": str(inventory_item.id),
+            "barcode_id": inventory_item.barcode_id,
+            "qr_code": inventory_item.qr_code,
+            "frontend_id": inventory_item.frontend_id,
+            "width_inches": float(inventory_item.width_inches),
+            "weight_kg": float(inventory_item.weight_kg),
+            "roll_type": inventory_item.roll_type,
+            "status": inventory_item.status,
+            "location": inventory_item.location,
+            "individual_roll_number": inventory_item.individual_roll_number,
+            "roll_sequence": inventory_item.roll_sequence,
+            "is_wastage_roll": inventory_item.is_wastage_roll,
+            "created_at": inventory_item.created_at.isoformat(),
+            "paper_specs": {
+                "paper_id": str(inventory_item.paper.id),
+                "name": inventory_item.paper.name,
+                "gsm": inventory_item.paper.gsm,
+                "bf": float(inventory_item.paper.bf),
+                "shade": inventory_item.paper.shade,
+                "type": inventory_item.paper.type
+            } if inventory_item.paper else None
+        }
+
+        # Build hierarchy based on roll type
+        if inventory_item.roll_type == "jumbo":
+            # Searched item is a JUMBO ROLL
+            result["hierarchy"] = build_jumbo_hierarchy(db, inventory_item)
+
+        elif inventory_item.roll_type == "118":
+            # Searched item is a 118" / SET ROLL
+            result["hierarchy"] = build_set_hierarchy(db, inventory_item)
+
+        elif inventory_item.roll_type == "cut":
+            # Searched item is a CUT ROLL
+            result["hierarchy"] = build_cut_roll_hierarchy(db, inventory_item)
+
+        else:
+            # Unknown roll type, return basic info
+            result["hierarchy"] = {
+                "message": f"Roll type '{inventory_item.roll_type}' does not have hierarchical relationships"
+            }
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error tracking hierarchy for barcode {barcode}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def build_jumbo_hierarchy(db: Session, jumbo_roll: models.InventoryMaster) -> Dict[str, Any]:
+    """Build hierarchy starting from a Jumbo Roll"""
+    hierarchy = {
+        "jumbo_roll": {
+            "id": str(jumbo_roll.id),
+            "barcode_id": jumbo_roll.barcode_id,
+            "frontend_id": jumbo_roll.frontend_id,
+            "width_inches": float(jumbo_roll.width_inches),
+            "weight_kg": float(jumbo_roll.weight_kg),
+            "status": jumbo_roll.status,
+            "location": jumbo_roll.location,
+            "paper_specs": {
+                "name": jumbo_roll.paper.name,
+                "gsm": jumbo_roll.paper.gsm,
+                "bf": float(jumbo_roll.paper.bf),
+                "shade": jumbo_roll.paper.shade
+            } if jumbo_roll.paper else None
+        },
+        "intermediate_rolls": [],
+        "total_cut_rolls": 0
+    }
+
+    # Get all 118" rolls from this jumbo
+    set_rolls = db.query(models.InventoryMaster).options(
+        joinedload(models.InventoryMaster.paper)
+    ).filter(
+        models.InventoryMaster.parent_jumbo_id == jumbo_roll.id,
+        models.InventoryMaster.roll_type == "118"
+    ).order_by(models.InventoryMaster.individual_roll_number).all()
+
+    total_cut_rolls = 0
+
+    for set_roll in set_rolls:
+        # Get all cut rolls from this SET
+        cut_rolls = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper)
+        ).filter(
+            models.InventoryMaster.parent_118_roll_id == set_roll.id,
+            models.InventoryMaster.roll_type == "cut"
+        ).order_by(models.InventoryMaster.width_inches).all()
+
+        cut_rolls_data = []
+        for cut_roll in cut_rolls:
+            cut_rolls_data.append({
+                "id": str(cut_roll.id),
+                "barcode_id": cut_roll.barcode_id,
+                "width_inches": float(cut_roll.width_inches),
+                "weight_kg": float(cut_roll.weight_kg),
+                "status": cut_roll.status,
+                "location": cut_roll.location,
+                "is_wastage_roll": cut_roll.is_wastage_roll,
+                "created_at": cut_roll.created_at.isoformat(),
+                "paper_specs": {
+                    "name": cut_roll.paper.name,
+                    "gsm": cut_roll.paper.gsm,
+                    "bf": float(cut_roll.paper.bf),
+                    "shade": cut_roll.paper.shade
+                } if cut_roll.paper else None
+            })
+
+        total_cut_rolls += len(cut_rolls_data)
+
+        hierarchy["intermediate_rolls"].append({
+            "id": str(set_roll.id),
+            "barcode_id": set_roll.barcode_id,
+            "frontend_id": set_roll.frontend_id,
+            "individual_roll_number": set_roll.individual_roll_number,
+            "roll_sequence": set_roll.roll_sequence,
+            "width_inches": float(set_roll.width_inches),
+            "weight_kg": float(set_roll.weight_kg),
+            "status": set_roll.status,
+            "location": set_roll.location,
+            "cut_rolls": cut_rolls_data,
+            "cut_rolls_count": len(cut_rolls_data)
+        })
+
+    hierarchy["total_cut_rolls"] = total_cut_rolls
+    hierarchy["total_sets"] = len(set_rolls)
+
+    return hierarchy
+
+
+def build_set_hierarchy(db: Session, set_roll: models.InventoryMaster) -> Dict[str, Any]:
+    """Build hierarchy starting from a 118" / SET Roll"""
+    hierarchy = {
+        "parent_jumbo_roll": None,
+        "current_set_roll": {
+            "id": str(set_roll.id),
+            "barcode_id": set_roll.barcode_id,
+            "frontend_id": set_roll.frontend_id,
+            "individual_roll_number": set_roll.individual_roll_number,
+            "roll_sequence": set_roll.roll_sequence,
+            "width_inches": float(set_roll.width_inches),
+            "weight_kg": float(set_roll.weight_kg),
+            "status": set_roll.status,
+            "location": set_roll.location,
+            "paper_specs": {
+                "name": set_roll.paper.name,
+                "gsm": set_roll.paper.gsm,
+                "bf": float(set_roll.paper.bf),
+                "shade": set_roll.paper.shade
+            } if set_roll.paper else None
+        },
+        "cut_rolls_from_this_set": [],
+        "sibling_sets": []
+    }
+
+    # Get parent jumbo roll
+    if set_roll.parent_jumbo_id:
+        parent_jumbo = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper)
+        ).filter(
+            models.InventoryMaster.id == set_roll.parent_jumbo_id
+        ).first()
+
+        if parent_jumbo:
+            hierarchy["parent_jumbo_roll"] = {
+                "id": str(parent_jumbo.id),
+                "barcode_id": parent_jumbo.barcode_id,
+                "frontend_id": parent_jumbo.frontend_id,
+                "width_inches": float(parent_jumbo.width_inches),
+                "weight_kg": float(parent_jumbo.weight_kg),
+                "status": parent_jumbo.status,
+                "location": parent_jumbo.location
+            }
+
+            # Get sibling SET rolls from the same jumbo
+            sibling_sets = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.parent_jumbo_id == parent_jumbo.id,
+                models.InventoryMaster.roll_type == "118",
+                models.InventoryMaster.id != set_roll.id
+            ).order_by(models.InventoryMaster.individual_roll_number).all()
+
+            for sibling in sibling_sets:
+                hierarchy["sibling_sets"].append({
+                    "id": str(sibling.id),
+                    "barcode_id": sibling.barcode_id,
+                    "individual_roll_number": sibling.individual_roll_number,
+                    "roll_sequence": sibling.roll_sequence,
+                    "status": sibling.status
+                })
+
+    # Get all cut rolls from this SET
+    cut_rolls = db.query(models.InventoryMaster).options(
+        joinedload(models.InventoryMaster.paper)
+    ).filter(
+        models.InventoryMaster.parent_118_roll_id == set_roll.id,
+        models.InventoryMaster.roll_type == "cut"
+    ).order_by(models.InventoryMaster.width_inches).all()
+
+    for cut_roll in cut_rolls:
+        hierarchy["cut_rolls_from_this_set"].append({
+            "id": str(cut_roll.id),
+            "barcode_id": cut_roll.barcode_id,
+            "width_inches": float(cut_roll.width_inches),
+            "weight_kg": float(cut_roll.weight_kg),
+            "status": cut_roll.status,
+            "location": cut_roll.location,
+            "is_wastage_roll": cut_roll.is_wastage_roll,
+            "created_at": cut_roll.created_at.isoformat(),
+            "paper_specs": {
+                "name": cut_roll.paper.name,
+                "gsm": cut_roll.paper.gsm,
+                "bf": float(cut_roll.paper.bf),
+                "shade": cut_roll.paper.shade
+            } if cut_roll.paper else None
+        })
+
+    hierarchy["total_cut_rolls"] = len(cut_rolls)
+
+    return hierarchy
+
+
+def build_cut_roll_hierarchy(db: Session, cut_roll: models.InventoryMaster) -> Dict[str, Any]:
+    """Build hierarchy starting from a Cut Roll"""
+    hierarchy = {
+        "parent_jumbo_roll": None,
+        "parent_set_roll": None,
+        "current_cut_roll": {
+            "id": str(cut_roll.id),
+            "barcode_id": cut_roll.barcode_id,
+            "frontend_id": cut_roll.frontend_id,
+            "width_inches": float(cut_roll.width_inches),
+            "weight_kg": float(cut_roll.weight_kg),
+            "status": cut_roll.status,
+            "location": cut_roll.location,
+            "is_wastage_roll": cut_roll.is_wastage_roll,
+            "paper_specs": {
+                "name": cut_roll.paper.name,
+                "gsm": cut_roll.paper.gsm,
+                "bf": float(cut_roll.paper.bf),
+                "shade": cut_roll.paper.shade
+            } if cut_roll.paper else None
+        },
+        "sibling_cut_rolls": [],
+        "all_sets_from_jumbo": []
+    }
+
+    # Get parent SET roll
+    if cut_roll.parent_118_roll_id:
+        parent_set = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.id == cut_roll.parent_118_roll_id
+        ).first()
+
+        if parent_set:
+            hierarchy["parent_set_roll"] = {
+                "id": str(parent_set.id),
+                "barcode_id": parent_set.barcode_id,
+                "individual_roll_number": parent_set.individual_roll_number,
+                "roll_sequence": parent_set.roll_sequence,
+                "status": parent_set.status
+            }
+
+            # Get sibling cut rolls from the same SET
+            sibling_cuts = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper)
+            ).filter(
+                models.InventoryMaster.parent_118_roll_id == parent_set.id,
+                models.InventoryMaster.roll_type == "cut",
+                models.InventoryMaster.id != cut_roll.id
+            ).order_by(models.InventoryMaster.width_inches).all()
+
+            for sibling in sibling_cuts:
+                hierarchy["sibling_cut_rolls"].append({
+                    "id": str(sibling.id),
+                    "barcode_id": sibling.barcode_id,
+                    "width_inches": float(sibling.width_inches),
+                    "weight_kg": float(sibling.weight_kg),
+                    "status": sibling.status,
+                    "is_wastage_roll": sibling.is_wastage_roll
+                })
+
+            # Get parent jumbo roll
+            if parent_set.parent_jumbo_id:
+                parent_jumbo = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == parent_set.parent_jumbo_id
+                ).first()
+
+                if parent_jumbo:
+                    hierarchy["parent_jumbo_roll"] = {
+                        "id": str(parent_jumbo.id),
+                        "barcode_id": parent_jumbo.barcode_id,
+                        "frontend_id": parent_jumbo.frontend_id,
+                        "status": parent_jumbo.status
+                    }
+
+                    # Get all SET rolls from this jumbo
+                    all_sets = db.query(models.InventoryMaster).filter(
+                        models.InventoryMaster.parent_jumbo_id == parent_jumbo.id,
+                        models.InventoryMaster.roll_type == "118"
+                    ).order_by(models.InventoryMaster.individual_roll_number).all()
+
+                    for set_roll in all_sets:
+                        # Count cut rolls in each SET
+                        cut_count = db.query(func.count(models.InventoryMaster.id)).filter(
+                            models.InventoryMaster.parent_118_roll_id == set_roll.id,
+                            models.InventoryMaster.roll_type == "cut"
+                        ).scalar()
+
+                        hierarchy["all_sets_from_jumbo"].append({
+                            "id": str(set_roll.id),
+                            "barcode_id": set_roll.barcode_id,
+                            "individual_roll_number": set_roll.individual_roll_number,
+                            "roll_sequence": set_roll.roll_sequence,
+                            "status": set_roll.status,
+                            "cut_rolls_count": cut_count,
+                            "is_current_parent": set_roll.id == parent_set.id
+                        })
+
+    return hierarchy
