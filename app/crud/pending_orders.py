@@ -522,7 +522,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
         cancelled_by_id: UUID
     ) -> Dict[str, Any]:
         """
-        Cancel/delete a pending order item by setting quantity_pending to 0 and status to resolved.
+        Cancel/delete a pending order item by setting quantity_pending to 0 and status to cancelled.
         This removes it from pending lists and algorithms without physical deletion.
         """
         from datetime import datetime
@@ -549,7 +549,7 @@ class CRUDPendingOrder(CRUDBase[models.PendingOrderItem, schemas.PendingOrderIte
 
         # Cancel the pending order item
         pending_item.quantity_pending = 0
-        pending_item._status = "resolved"
+        pending_item._status = "cancelled"
         pending_item.resolved_at = datetime.utcnow()
 
         try:

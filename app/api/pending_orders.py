@@ -227,7 +227,7 @@ def cancel_pending_order_item(
     db: Session = Depends(get_db)
 ):
     """
-    Cancel/delete a pending order item by setting quantity to 0 and status to resolved.
+    Cancel/delete a pending order item by setting quantity to 0 and status to cancelled.
     This removes it from pending lists and algorithms without physical deletion.
     """
     try:

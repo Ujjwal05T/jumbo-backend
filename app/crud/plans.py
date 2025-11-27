@@ -647,206 +647,158 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             
             created_inventory.append(inventory_item)
         
-        # NEW CORRECT PENDING ORDER RESOLUTION LOGIC  
-        # Now process the created inventory items to resolve pending orders
+        # NEW PENDING ORDER RESOLUTION LOGIC - COUNT-FIRST APPROACH
+        # PHASE 1: Count how many cut rolls reference each pending order
         try:
-            resolved_pending_count = 0
-            processed_pending_orders = set()  # Track which pending orders we've already processed
-            
-            # Process each created inventory item to find its source pending order (if any)
-            for i, inventory_item in enumerate(created_inventory):
-                # Check if this inventory item came from a pending order (read from database)
+            from collections import defaultdict
+
+            pending_order_cut_roll_counts = defaultdict(int)
+
+            logger.info("📊 PHASE 1: Counting cut rolls per pending order")
+
+            # Count cut rolls grouped by source_pending_id
+            for inventory_item in created_inventory:
                 source_type = inventory_item.source_type
                 source_pending_id = inventory_item.source_pending_id
-                
-                
+
                 if source_type == 'pending_order' and source_pending_id:
-                    # This cut roll was generated from a pending order - resolve it
-                    try:
-                        # Convert string UUID to UUID object if needed
-                        if isinstance(source_pending_id, str):
-                            pending_uuid = UUID(source_pending_id)
+                    # Normalize to string for consistent key handling
+                    pending_id_str = str(source_pending_id)
+                    pending_order_cut_roll_counts[pending_id_str] += 1
+
+            logger.info(f"📊 Found {len(pending_order_cut_roll_counts)} unique pending orders referenced by cut rolls")
+            for pending_id, count in pending_order_cut_roll_counts.items():
+                logger.info(f"  → Pending order {pending_id[:8]}... has {count} cut rolls")
+
+            # PHASE 2: Process each unique pending order ONCE
+            resolved_pending_count = 0
+            partially_resolved_count = 0
+
+            logger.info("📊 PHASE 2: Processing pending order resolutions")
+
+            for pending_id_str, cut_rolls_count in pending_order_cut_roll_counts.items():
+                try:
+                    # Convert to UUID
+                    pending_uuid = UUID(pending_id_str)
+
+                    # Find the pending order
+                    pending_order = db.query(models.PendingOrderItem).filter(
+                        models.PendingOrderItem.id == pending_uuid,
+                        models.PendingOrderItem._status == "pending"
+                    ).first()
+
+                    if not pending_order:
+                        logger.warning(f"❌ Pending order {pending_id_str[:8]}... not found or not in 'pending' status")
+                        continue
+
+                    # Store old values for logging
+                    old_fulfilled = getattr(pending_order, 'quantity_fulfilled', 0) or 0
+                    old_pending = pending_order.quantity_pending
+
+                    logger.info(f"📊 PROCESSING: {pending_order.frontend_id}")
+                    logger.info(f"  → Current fulfilled: {old_fulfilled}")
+                    logger.info(f"  → Current pending: {old_pending}")
+                    logger.info(f"  → Cut rolls to resolve: {cut_rolls_count}")
+
+                    # Calculate new quantities (don't exceed available quantity)
+                    cut_rolls_to_resolve = min(cut_rolls_count, old_pending)
+                    new_fulfilled = old_fulfilled + cut_rolls_to_resolve
+                    new_pending = max(0, old_pending - cut_rolls_to_resolve)
+
+                    # Update quantities
+                    pending_order.quantity_fulfilled = new_fulfilled
+                    pending_order.quantity_pending = new_pending
+
+                    logger.info(f"  → New fulfilled: {new_fulfilled} (+{cut_rolls_to_resolve})")
+                    logger.info(f"  → New pending: {new_pending}")
+
+                    # CRITICAL: Only mark as "included_in_plan" if ALL quantities are fulfilled
+                    if new_pending == 0:
+                        # Fully resolved - change status
+                        status_update_success = pending_order.mark_as_included_in_plan(db, resolved_by_production=True)
+
+                        if status_update_success:
+                            logger.info(f"✅ FULLY RESOLVED: {pending_order.frontend_id} marked as 'included_in_plan'")
+                            resolved_pending_count += 1
+                            updated_pending_orders.append(str(pending_order.id))
                         else:
-                            pending_uuid = source_pending_id
-                        
-                        # Check if we've already processed this pending order
-                        if source_pending_id in processed_pending_orders:
-                            continue
-                            
-                        # Check if pending order exists at all
-                        any_pending = db.query(models.PendingOrderItem).filter(
-                            models.PendingOrderItem.id == pending_uuid
-                        ).first()
-                        
-                        if not any_pending:
-                            logger.warning(f"❌ PENDING ORDER RESOLUTION: Pending order {str(source_pending_id)[:8]}... does not exist in database")
-                            continue
-                            
-                        # Find the pending order - now using proper 1:1 source tracking
-                        
-                        pending_order = db.query(models.PendingOrderItem).filter(
-                            models.PendingOrderItem.id == pending_uuid,
-                            models.PendingOrderItem._status == "pending"
-                        ).first()
-                        
-                        if not pending_order:
-                            logger.warning(f"❌ QUERY FAILED: No pending order found with id {str(pending_uuid)[:8]} and status='pending'")
-                            continue
-                        
-                        if pending_order.quantity_pending > 0:
-                            processed_pending_orders.add(source_pending_id)  # Mark as processed
-                            
-                            # Use the safe method that includes validation
-                            
-                            status_update_success = pending_order.mark_as_included_in_plan(db, resolved_by_production=True)
-                            
-                            if status_update_success:
-                                logger.info(f"✅ STATUS TRANSITION SUCCESS: {pending_order.frontend_id} marked as included_in_plan")
-                            else:
-                                logger.warning(f"❌ STATUS TRANSITION FAILED: Could not mark {pending_order.frontend_id} as included_in_plan")
-                            
-                            if status_update_success:
-                                # Update quantity fields based on how many cut rolls were actually used
-                                old_fulfilled = getattr(pending_order, 'quantity_fulfilled', 0) or 0
-                                old_pending = pending_order.quantity_pending
-                                
-                                logger.info(f"📊 QUANTITY UPDATE: Starting quantity update for {pending_order.frontend_id}")
-                                logger.info(f"  → Current fulfilled: {old_fulfilled}")
-                                logger.info(f"  → Current pending: {old_pending}")
-                                
-                                # With proper source tracking: 1 cut roll = 1 pending unit
-                                cut_rolls_to_resolve = 1
-                                logger.info(f"  → Cut rolls to resolve: {cut_rolls_to_resolve} (1:1 mapping)")
-                                
-                                pending_order.quantity_fulfilled = old_fulfilled + cut_rolls_to_resolve
-                                pending_order.quantity_pending = max(0, old_pending - cut_rolls_to_resolve)
-                                
-                                logger.info(f"✅ QUANTITY UPDATE SUCCESS: {pending_order.frontend_id}")
-                                logger.info(f"  → New fulfilled: {old_fulfilled} → {pending_order.quantity_fulfilled} (+{cut_rolls_to_resolve})")
-                                logger.info(f"  → New pending: {old_pending} → {pending_order.quantity_pending} (-{cut_rolls_to_resolve})")
-                                
-                                # NEW: Decrement quantity_in_pending from original order item
-                                original_order_item = db.query(models.OrderItem).filter(
-                                    models.OrderItem.order_id == pending_order.original_order_id,
-                                    models.OrderItem.width_inches == pending_order.width_inches,
-                                    models.OrderItem.paper.has(
-                                        and_(
-                                            models.PaperMaster.gsm == pending_order.gsm,
-                                            models.PaperMaster.bf == pending_order.bf,
-                                            models.PaperMaster.shade == pending_order.shade
-                                        )
-                                    )
-                                ).first()
-                                
-                                if original_order_item:
-                                    logger.info(f"🔄 CRITICAL ORDER ITEM UPDATE: Found original order item {original_order_item.frontend_id}")
-                                    logger.info(f"  → BEFORE UPDATE - quantity_in_pending: {original_order_item.quantity_in_pending}")
-                                    logger.info(f"  → BEFORE UPDATE - quantity_fulfilled: {original_order_item.quantity_fulfilled}")
-                                    logger.info(f"  → BEFORE UPDATE - quantity_rolls (total): {original_order_item.quantity_rolls}")
-                                    logger.info(f"  → BEFORE UPDATE - remaining_quantity: {original_order_item.remaining_quantity}")
-                                    
-                                    # Store before values
-                                    old_in_pending = original_order_item.quantity_in_pending
-                                    old_fulfilled = original_order_item.quantity_fulfilled
-                                    
-                                    # Update quantities - THIS IS THE CRITICAL PART
-                                    logger.info(f"🔧 CRITICAL: Updating quantities by {cut_rolls_to_resolve} cut rolls")
-                                    
-                                    # Decrement quantity_in_pending by the number of cut rolls resolved
-                                    if original_order_item.quantity_in_pending >= cut_rolls_to_resolve:
-                                        original_order_item.quantity_in_pending -= cut_rolls_to_resolve
-                                        logger.info(f"✅ DECREMENTED quantity_in_pending by {cut_rolls_to_resolve}")
-                                    else:
-                                        logger.warning(f"⚠️ WARNING: quantity_in_pending ({original_order_item.quantity_in_pending}) < cut_rolls_to_resolve ({cut_rolls_to_resolve})")
-                                        original_order_item.quantity_in_pending = max(0, original_order_item.quantity_in_pending - cut_rolls_to_resolve)
-                                    
-                                    # NOTE: quantity_fulfilled will be incremented later during QR scanning
-                                    # Removed increment here to avoid double counting
-                                    
-                                    logger.info(f"🔍 CRITICAL RESULT - ORDER ITEM UPDATE: {original_order_item.frontend_id}")
-                                    logger.info(f"  → AFTER UPDATE - quantity_in_pending: {old_in_pending} → {original_order_item.quantity_in_pending} (change: {original_order_item.quantity_in_pending - old_in_pending})")
-                                    logger.info(f"  → quantity_fulfilled unchanged: {original_order_item.quantity_fulfilled} (will be updated during QR scanning)")
-                                    logger.info(f"  → AFTER UPDATE - remaining_quantity: {original_order_item.remaining_quantity}")
-                                    
-                                    # Validate the pending quantity update was successful
-                                    if original_order_item.quantity_in_pending == old_in_pending - cut_rolls_to_resolve:
-                                        logger.info(f"✅ VALIDATION SUCCESS: quantity_in_pending updated correctly")
-                                    else:
-                                        logger.error(f"❌ VALIDATION FAILED: quantity_in_pending not updated correctly!")
-                                        logger.error(f"   Expected: {old_in_pending - cut_rolls_to_resolve}, Got: {original_order_item.quantity_in_pending}")
-                                        
-                                    # Final critical check
-                                    logger.info(f"🔍 FINAL CHECK: Is order item properly resolved?")
-                                    logger.info(f"  → Total rolls ordered: {original_order_item.quantity_rolls}")
-                                    logger.info(f"  → Rolls fulfilled: {original_order_item.quantity_fulfilled}")
-                                    logger.info(f"  → Rolls in pending: {original_order_item.quantity_in_pending}")
-                                    logger.info(f"  → Remaining unfulfilled: {original_order_item.remaining_quantity}")
-                                    logger.info(f"  → Is fully fulfilled: {original_order_item.is_fully_fulfilled}")
-                                    
-                                else:
-                                    logger.error(f"❌ CRITICAL FAILURE: Could not find original order item for resolved pending order {pending_order.frontend_id}")
-                                    logger.error(f"   This means the pending order resolution is incomplete!")
-                                    logger.error(f"   Search criteria: order_id={pending_order.original_order_id}, width={pending_order.width_inches}, gsm={pending_order.gsm}, bf={pending_order.bf}, shade={pending_order.shade}")
-                                
-                                # Force flush to database to ensure changes are persisted
-                                db.flush()
-                                logger.info(f"🔄 DATABASE FLUSH: Forcing database update...")
-                                
-                                # Verify database persistence by re-querying
-                                verification_pending = db.query(models.PendingOrderItem).filter(
-                                    models.PendingOrderItem.id == pending_uuid
-                                ).first()
-                                
-                                if verification_pending:
-                                    logger.info(f"🔍 VERIFICATION: Re-queried pending order from DB")
-                                    logger.info(f"  → Status in DB: {verification_pending.status}")
-                                    logger.info(f"  → quantity_pending in DB: {verification_pending.quantity_pending}")
-                                    logger.info(f"  → quantity_fulfilled in DB: {verification_pending.quantity_fulfilled}")
-                                else:
-                                    logger.error(f"❌ VERIFICATION FAILED: Could not re-query pending order from DB!")
-                                
-                                if original_order_item:
-                                    # Re-verify original order item in database
-                                    verification_order_item = db.query(models.OrderItem).filter(
-                                        models.OrderItem.id == original_order_item.id
-                                    ).first()
-                                    
-                                    if verification_order_item:
-                                        logger.info(f"🔍 VERIFICATION: Re-queried order item {verification_order_item.frontend_id} from DB")
-                                        logger.info(f"  → quantity_in_pending in DB: {verification_order_item.quantity_in_pending}")
-                                        logger.info(f"  → quantity_fulfilled in DB: {verification_order_item.quantity_fulfilled}")
-                                        
-                                        # Critical check: Are the changes actually persisted?
-                                        if (verification_order_item.quantity_fulfilled == old_fulfilled and
-                                            verification_order_item.quantity_in_pending == old_in_pending - cut_rolls_to_resolve):
-                                            logger.info(f"✅ DATABASE PERSISTENCE VERIFIED: Order item changes saved to database")
-                                        else:
-                                            logger.error(f"❌ DATABASE PERSISTENCE FAILED: Order item changes NOT saved to database!")
-                                            logger.error(f"   Expected fulfilled (unchanged): {old_fulfilled}, Got: {verification_order_item.quantity_fulfilled}")
-                                            logger.error(f"   Expected in_pending: {old_in_pending - cut_rolls_to_resolve}, Got: {verification_order_item.quantity_in_pending}")
-                                    else:
-                                        logger.error(f"❌ VERIFICATION FAILED: Could not re-query order item from DB!")
-                                
-                                resolved_pending_count += 1
-                                updated_pending_orders.append(str(pending_order.id))
-                                
-                                logger.info(f"✅ SUCCESS: Resolved pending {pending_order.frontend_id} - qty_pending: {old_pending} -> {pending_order.quantity_pending}")
-                            else:
-                                logger.warning(f"❌ FAILED: Could not mark pending {pending_order.frontend_id} as included_in_plan")
+                            logger.warning(f"❌ STATUS UPDATE FAILED: Could not mark {pending_order.frontend_id} as included_in_plan")
+                    else:
+                        # Partially resolved - keep status as "pending"
+                        logger.info(f"⚠️ PARTIALLY RESOLVED: {pending_order.frontend_id} remains in 'pending' status ({new_pending} units still pending)")
+                        partially_resolved_count += 1
+                        updated_pending_orders.append(str(pending_order.id))
+
+                    # Update original order item quantities
+                    original_order_item = db.query(models.OrderItem).filter(
+                        models.OrderItem.order_id == pending_order.original_order_id,
+                        models.OrderItem.width_inches == pending_order.width_inches,
+                        models.OrderItem.paper.has(
+                            and_(
+                                models.PaperMaster.gsm == pending_order.gsm,
+                                models.PaperMaster.bf == pending_order.bf,
+                                models.PaperMaster.shade == pending_order.shade
+                            )
+                        )
+                    ).first()
+
+                    if original_order_item:
+                        logger.info(f"🔄 ORDER ITEM UPDATE: {original_order_item.frontend_id}")
+                        logger.info(f"  → BEFORE - quantity_in_pending: {original_order_item.quantity_in_pending}")
+                        logger.info(f"  → BEFORE - quantity_fulfilled: {original_order_item.quantity_fulfilled}")
+
+                        old_in_pending = original_order_item.quantity_in_pending
+
+                        # Decrement quantity_in_pending by the number of cut rolls resolved
+                        if original_order_item.quantity_in_pending >= cut_rolls_to_resolve:
+                            original_order_item.quantity_in_pending -= cut_rolls_to_resolve
+                            logger.info(f"  → AFTER - quantity_in_pending: {original_order_item.quantity_in_pending} (-{cut_rolls_to_resolve})")
                         else:
-                            logger.info(f"ℹ️ NO QUANTITY: Pending order {pending_order.frontend_id} has no remaining quantity to resolve")
-                            
-                    except Exception as e:
-                        logger.error(f"❌ ERROR: Exception resolving pending order for cut roll {i+1}: {e}")
-                        import traceback
-                        logger.error(f"❌ TRACEBACK: {traceback.format_exc()}")
-                        
-                elif source_type == 'regular_order':
-                    logger.info(f"ℹ️ REGULAR ORDER: Cut roll {i+1} came from regular order - no pending order to resolve")
-                else:
-                    logger.info(f"ℹ️ NO SOURCE: Cut roll {i+1} has no source tracking - likely from regular order")
-            
-            logger.info(f"✅ RESOLUTION COMPLETE: Resolved {resolved_pending_count} pending orders based on source tracking of selected cut rolls")
+                            logger.warning(f"⚠️ WARNING: quantity_in_pending ({original_order_item.quantity_in_pending}) < cut_rolls_to_resolve ({cut_rolls_to_resolve})")
+                            original_order_item.quantity_in_pending = max(0, original_order_item.quantity_in_pending - cut_rolls_to_resolve)
+                            logger.info(f"  → AFTER - quantity_in_pending: {original_order_item.quantity_in_pending}")
+
+                        # NOTE: quantity_fulfilled will be incremented later during QR scanning
+                        logger.info(f"  → quantity_fulfilled unchanged: {original_order_item.quantity_fulfilled} (will be updated during QR scanning)")
+
+                        # Validation
+                        if original_order_item.quantity_in_pending == old_in_pending - cut_rolls_to_resolve:
+                            logger.info(f"✅ VALIDATION: Order item quantity_in_pending updated correctly")
+                        else:
+                            logger.error(f"❌ VALIDATION FAILED: Expected {old_in_pending - cut_rolls_to_resolve}, got {original_order_item.quantity_in_pending}")
+
+                        logger.info(f"🔍 FINAL CHECK: Order item status")
+                        logger.info(f"  → Total rolls ordered: {original_order_item.quantity_rolls}")
+                        logger.info(f"  → Rolls fulfilled: {original_order_item.quantity_fulfilled}")
+                        logger.info(f"  → Rolls in pending: {original_order_item.quantity_in_pending}")
+                        logger.info(f"  → Remaining unfulfilled: {original_order_item.remaining_quantity}")
+                    else:
+                        logger.error(f"❌ CRITICAL: Could not find original order item for {pending_order.frontend_id}")
+                        logger.error(f"   Search criteria: order_id={pending_order.original_order_id}, width={pending_order.width_inches}, gsm={pending_order.gsm}, bf={pending_order.bf}, shade={pending_order.shade}")
+
+                    # Flush to database
+                    db.flush()
+
+                    # Verify database persistence
+                    verification_pending = db.query(models.PendingOrderItem).filter(
+                        models.PendingOrderItem.id == pending_uuid
+                    ).first()
+
+                    if verification_pending:
+                        logger.info(f"🔍 VERIFICATION: Database state for {verification_pending.frontend_id}")
+                        logger.info(f"  → Status: {verification_pending.status}")
+                        logger.info(f"  → quantity_pending: {verification_pending.quantity_pending}")
+                        logger.info(f"  → quantity_fulfilled: {verification_pending.quantity_fulfilled}")
+
+                except Exception as e:
+                    logger.error(f"❌ ERROR: Exception processing pending order {pending_id_str[:8]}...: {e}")
+                    import traceback
+                    logger.error(f"❌ TRACEBACK: {traceback.format_exc()}")
+
+            logger.info(f"✅ RESOLUTION COMPLETE:")
+            logger.info(f"  → Fully resolved (marked as 'included_in_plan'): {resolved_pending_count}")
+            logger.info(f"  → Partially resolved (still 'pending'): {partially_resolved_count}")
+            logger.info(f"  → Total pending orders updated: {len(updated_pending_orders)}")
             
         except Exception as e:
             logger.warning(f"Error updating resolved pending orders during production start: {e}")

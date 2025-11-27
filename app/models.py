@@ -48,6 +48,7 @@ class PendingOrderStatus(str, PyEnum):
     PENDING = "pending"
     INCLUDED_IN_PLAN = "included_in_plan"
     RESOLVED = "resolved"
+    CANCELLED = "cancelled"
 
 class WastageStatus(str, PyEnum):
     AVAILABLE = "available"
