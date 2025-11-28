@@ -22,7 +22,8 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
         matching_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.created_by),
-            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
         ).filter(
             (models.InventoryMaster.qr_code == qr_code) |
             (models.InventoryMaster.barcode_id == qr_code)
@@ -55,7 +56,16 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
                     client_name = f"{related_order.client.company_name} (Inferred)"
             except Exception as e:
                 logger.warning(f"Could not infer client from related orders: {e}")
-        
+
+        # Get parent roll information (118" roll and jumbo roll)
+        parent_118_barcode = None
+        parent_jumbo_barcode = None
+
+        if matching_item.parent_118_roll:
+            parent_118_barcode = matching_item.parent_118_roll.barcode_id
+            if matching_item.parent_118_roll.parent_jumbo:
+                parent_jumbo_barcode = matching_item.parent_118_roll.parent_jumbo.barcode_id
+
         return {
             "inventory_id": str(matching_item.id),
             "qr_code": matching_item.qr_code,
@@ -77,12 +87,16 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
                 "created_at": matching_item.created_at.isoformat(),
                 "created_by": matching_item.created_by.name if matching_item.created_by else None
             },
+            "parent_rolls": {
+                "parent_118_barcode": parent_118_barcode,
+                "parent_jumbo_barcode": parent_jumbo_barcode
+            },
             "client_info": {
                 "client_name": client_name
             },
             "scan_timestamp": matching_item.created_at.isoformat()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -280,7 +294,8 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
         matching_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.created_by),
-            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
         ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
         
         if not matching_item:
@@ -310,7 +325,16 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
                     client_name = f"{related_order.client.company_name} (Inferred)"
             except Exception as e:
                 logger.warning(f"Could not infer client from related orders: {e}")
-        
+
+        # Get parent roll information (118" roll and jumbo roll)
+        parent_118_barcode = None
+        parent_jumbo_barcode = None
+
+        if matching_item.parent_118_roll:
+            parent_118_barcode = matching_item.parent_118_roll.barcode_id
+            if matching_item.parent_118_roll.parent_jumbo:
+                parent_jumbo_barcode = matching_item.parent_118_roll.parent_jumbo.barcode_id
+
         return {
             "inventory_id": str(matching_item.id),
             "qr_code": matching_item.qr_code,
@@ -332,12 +356,16 @@ def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
                 "created_at": matching_item.created_at.isoformat(),
                 "created_by": matching_item.created_by.name if matching_item.created_by else None
             },
+            "parent_rolls": {
+                "parent_118_barcode": parent_118_barcode,
+                "parent_jumbo_barcode": parent_jumbo_barcode
+            },
             "client_info": {
                 "client_name": client_name
             },
             "scan_timestamp": matching_item.created_at.isoformat()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

@@ -270,8 +270,11 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 # Get client info for this cut roll
                 client_name = "Unknown Client"
                 order_date = None
-                if item.allocated_order and item.allocated_order.client:
-                    client_name = item.allocated_order.client.company_name
+                order_frontend_id = None
+                if item.allocated_order:
+                    order_frontend_id = item.allocated_order.frontend_id
+                    if item.allocated_order.client:
+                        client_name = item.allocated_order.client.company_name
                     order_date = item.allocated_order.created_at.isoformat()
 
                 jumbo_groups[parent_jumbo_id]["cut_rolls"].append({
@@ -287,6 +290,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                     },
                     "status": item.status,
                     "client_name": client_name,
+                    "order_frontend_id": order_frontend_id,
                     "order_date": order_date,
                     "created_at": item.created_at.isoformat() if item.created_at else None,
                     "location": item.location or "warehouse"
@@ -318,6 +322,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                 },
                 "status": w.status,
                 "client_name": "Wastage",
+                "order_frontend_id": None,
                 "order_date": None,
                 "created_at": w.created_at.isoformat() if w.created_at else None,
                 "location": w.location or "warehouse"
