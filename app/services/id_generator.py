@@ -22,6 +22,11 @@ class FrontendIDGenerator:
             "sequence_name": "client_master_seq",
             "description": "Client Master IDs (CL-00001, CL-00002, etc.)"
         },
+        "manual_cut_roll": {
+            "prefix": "CLR",
+            "sequence_name": "client_master_seq",
+            "description": "Manual Cut Roll IDs (CLR-00001, CLR-00002, etc.)"
+        },
         "user_master": {
             "prefix": "USR", 
             "sequence_name": "user_master_seq",

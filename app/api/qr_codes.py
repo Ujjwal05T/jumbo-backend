@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import Dict, Any
+from datetime import datetime
 import logging
 
 from .base import get_db
@@ -124,7 +125,8 @@ def update_weight_via_qr(
         # Update weight
         old_weight = matching_item.weight_kg
         matching_item.weight_kg = weight_update.weight_kg
-        
+        matching_item.updated_at = datetime.utcnow()
+
         # If provided, update location
         if weight_update.location:
             matching_item.location = weight_update.location
@@ -172,7 +174,7 @@ def update_weight_via_qr(
                             # Keep in "in_process" until all rolls are weighed
                             logger.info(f"⏳ Order item {order_item.id} remains 'in_process' - needs {order_item.quantity_rolls - order_item.quantity_fulfilled} more rolls")
                 
-                logger.info(f"✅ Updated order item {order_item.id} - status: '{order_item.item_status}', fulfilled: {order_item.quantity_fulfilled}/{order_item.quantity_rolls}")
+                logger.info(f"Updated order item {order_item.id} - status: '{order_item.item_status}', fulfilled: {order_item.quantity_fulfilled}/{order_item.quantity_rolls}")
                 
                 # STEP 6: Check if entire order is now completed based on quantity fulfillment
                 order = order_item.order

@@ -1067,6 +1067,16 @@ class WastageInventory(BaseModel):
     notes: Optional[str] = Field(None, description="Additional notes")
 
     # Relationships (optional, loaded when needed)
+
+# Manual Cut Roll Creation Schema
+class ManualCutRollCreate(BaseModel):
+    """Schema for creating manual cut roll entries"""
+    client_id: UUID = Field(..., description="Client ID for tracking")
+    paper_id: UUID = Field(..., description="Paper master ID")
+    reel_number: str = Field(..., max_length=100, description="Reel/Roll identification number")
+    width_inches: float = Field(..., gt=0, description="Width of the roll in inches")
+    weight_kg: float = Field(..., gt=0, description="Weight of the roll in kg")
+    created_by_id: UUID = Field(..., description="User ID who created this entry")
     paper: Optional[PaperMaster] = None
     created_by: Optional[UserMaster] = None
 

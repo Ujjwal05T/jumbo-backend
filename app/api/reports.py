@@ -3314,3 +3314,226 @@ def get_order_cut_rolls_details(
     except Exception as e:
         logger.error(f"Error getting cut rolls details for order {order_frontend_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# CUT ROLLS WEIGHT UPDATE REPORT - New report for cut rolls with weight updates
+# ============================================================================
+
+@router.get("/reports/cut-rolls-weight-update", tags=["Cut Rolls Weight Report"])
+def get_cut_rolls_weight_update_report(
+    from_date: str = Query(..., description="From date (YYYY-MM-DD)"),
+    to_date: str = Query(..., description="To date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Cut Rolls Weight Update Report
+
+    Returns cut rolls that had their weight updated (status = AVAILABLE) within the specified date range:
+    - Cut roll details with weight information
+    - Parent 11-inch set roll information
+    - Parent jumbo roll information
+    - Associated plan information (plan frontend_id)
+    - Paper specifications (GSM, BF, Shade)
+    - Summary statistics
+    """
+    try:
+        # Validate and parse the dates
+        try:
+            from_dt = datetime.fromisoformat(from_date)
+            to_dt = datetime.fromisoformat(to_date)
+            start_of_day = from_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        # Validate date range
+        if start_of_day > end_of_day:
+            raise HTTPException(status_code=400, detail="From date cannot be after to date")
+
+        # Main query to get cut rolls with weight updates within the specified date range
+        # We look for cut rolls where:
+        # 1. roll_type = 'cut'
+        # 2. status = 'AVAILABLE' (indicates weight was updated)
+        # 3. updated_at falls within the date range
+        query = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan)
+        ).filter(
+            and_(
+                models.InventoryMaster.roll_type == 'cut',
+                models.InventoryMaster.status == 'AVAILABLE',
+                models.InventoryMaster.updated_at >= start_of_day,
+                models.InventoryMaster.updated_at <= end_of_day
+            )
+        )
+
+        cut_rolls = query.order_by(models.InventoryMaster.updated_at.desc()).all()
+
+        if not cut_rolls:
+            return {
+                "success": True,
+                "data": {
+                    "cut_rolls": [],
+                    "summary": {
+                        "total_cut_rolls": 0,
+                        "total_weight_kg": 0,
+                        "unique_jumbo_rolls": 0,
+                        "unique_118_rolls": 0,
+                        "unique_plans": 0,
+                        "unique_paper_types": 0,
+                        "avg_weight_per_roll": 0,
+                        "date_range": {
+                            "from_date": from_date,
+                            "to_date": to_date,
+                            "start_time": start_of_day.isoformat(),
+                            "end_time": end_of_day.isoformat()
+                        }
+                    }
+                }
+            }
+
+        # Process cut rolls data
+        cut_rolls_data = []
+        jumbo_roll_ids = set()
+        roll_118_ids = set()
+        plan_ids = set()
+        paper_type_ids = set()
+        total_weight = 0
+
+        for cut_roll in cut_rolls:
+            # Get paper specifications
+            paper = cut_roll.paper
+            paper_specs = {
+                "paper_name": paper.name if paper else "Unknown",
+                "gsm": paper.gsm if paper else 0,
+                "bf": float(paper.bf) if paper and paper.bf else 0,
+                "shade": paper.shade if paper else "Unknown",
+                "type": paper.type if paper else "Unknown"
+            }
+
+            # Get parent 11-inch roll information
+            parent_118_roll = cut_roll.parent_118_roll
+            parent_118_info = None
+            parent_jumbo_info = None
+
+            if parent_118_roll:
+                parent_118_info = {
+                    "id": str(parent_118_roll.id),
+                    "frontend_id": parent_118_roll.frontend_id or "N/A",
+                    "barcode_id": parent_118_roll.barcode_id or "N/A",
+                    "width_inches": float(parent_118_roll.width_inches),
+                    "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0,
+                    "roll_sequence": parent_118_roll.roll_sequence
+                }
+                roll_118_ids.add(str(parent_118_roll.id))
+
+                # Get parent jumbo roll information
+                parent_jumbo = parent_118_roll.parent_jumbo
+                if parent_jumbo:
+                    parent_jumbo_info = {
+                        "id": str(parent_jumbo.id),
+                        "frontend_id": parent_jumbo.frontend_id or "N/A",
+                        "barcode_id": parent_jumbo.barcode_id or "N/A",
+                        "width_inches": float(parent_jumbo.width_inches),
+                        "weight_kg": float(parent_jumbo.weight_kg) if parent_jumbo.weight_kg else 0
+                    }
+                    jumbo_roll_ids.add(str(parent_jumbo.id))
+                else:
+                    # If no jumbo parent, check if 118 roll itself is a jumbo
+                    if parent_118_roll.roll_type == 'jumbo':
+                        parent_jumbo_info = {
+                            "id": str(parent_118_roll.id),
+                            "frontend_id": parent_118_roll.frontend_id or "N/A",
+                            "barcode_id": parent_118_roll.barcode_id or "N/A",
+                            "width_inches": float(parent_118_roll.width_inches),
+                            "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0
+                        }
+                        jumbo_roll_ids.add(str(parent_118_roll.id))
+
+            # Get plan information
+            plan_info = None
+            if cut_roll.plan_inventory:
+                for plan_link in cut_roll.plan_inventory:
+                    if plan_link.plan:
+                        plan_info = {
+                            "id": str(plan_link.plan.id),
+                            "frontend_id": plan_link.plan.frontend_id or "N/A",
+                            "name": plan_link.plan.name or "Unnamed Plan",
+                            "status": plan_link.plan.status,
+                            "created_at": plan_link.plan.created_at.isoformat() if plan_link.plan.created_at else None
+                        }
+                        plan_ids.add(str(plan_link.plan.id))
+                        break  # Take the first plan found
+
+            # Get allocated order information
+            order_info = None
+            if cut_roll.allocated_to_order_id:
+                order_info = {
+                    "id": str(cut_roll.allocated_to_order_id),
+                    "frontend_id": None  # Will be populated if we join with OrderMaster
+                }
+
+            # Compile cut roll data
+            cut_roll_data = {
+                "id": str(cut_roll.id),
+                "frontend_id": cut_roll.frontend_id or "N/A",
+                "barcode_id": cut_roll.barcode_id or "N/A",
+                "width_inches": float(cut_roll.width_inches),
+                "weight_kg": float(cut_roll.weight_kg) if cut_roll.weight_kg else 0,
+                "location": cut_roll.location or "N/A",
+                "status": cut_roll.status,
+                "production_date": cut_roll.updated_at.isoformat() if cut_roll.updated_at else None,
+                "roll_sequence": cut_roll.roll_sequence,
+                "individual_roll_number": cut_roll.individual_roll_number,
+
+                # Related data
+                "paper_specs": paper_specs,
+                "parent_118_roll": parent_118_info,
+                "parent_jumbo_roll": parent_jumbo_info,
+                "plan_info": plan_info,
+                "allocated_order": order_info,
+
+                # Source tracking
+                "source_type": cut_roll.source_type,
+                "is_wastage_roll": cut_roll.is_wastage_roll
+            }
+
+            cut_rolls_data.append(cut_roll_data)
+
+            # Update summary statistics
+            total_weight += float(cut_roll.weight_kg) if cut_roll.weight_kg else 0
+            if paper:
+                paper_type_ids.add(str(paper.id))
+
+        # Calculate summary
+        summary = {
+            "total_cut_rolls": len(cut_rolls_data),
+            "total_weight_kg": round(total_weight, 2),
+            "unique_jumbo_rolls": len(jumbo_roll_ids),
+            "unique_118_rolls": len(roll_118_ids),
+            "unique_plans": len(plan_ids),
+            "unique_paper_types": len(paper_type_ids),
+            "avg_weight_per_roll": round(total_weight / max(len(cut_rolls_data), 1), 2),
+            "date_range": {
+                "from_date": from_date,
+                "to_date": to_date,
+                "start_time": start_of_day.isoformat(),
+                "end_time": end_of_day.isoformat()
+            }
+        }
+
+        return {
+            "success": True,
+            "data": {
+                "cut_rolls": cut_rolls_data,
+                "summary": summary
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in cut rolls weight update report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -807,7 +807,7 @@ def get_clients_for_dispatch(db: Session = Depends(get_db)):
 @router.get("/dispatch/warehouse-items", tags=["Dispatch"])
 def get_warehouse_items(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 1000,
     client_id: str = None,
     order_id: str = None,
     db: Session = Depends(get_db)

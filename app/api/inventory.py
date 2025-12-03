@@ -3,9 +3,11 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
+from datetime import datetime
 
 from .base import get_db
-from .. import crud_operations, schemas
+from .. import crud_operations, schemas, models
+from ..services.id_generator import FrontendIDGenerator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -116,17 +118,133 @@ def update_inventory_status(
         import uuid
         inventory_uuid = uuid.UUID(inventory_id)
         new_status = request_data.get("status")
-        
+
         if not new_status:
             raise HTTPException(status_code=400, detail="Status is required")
-            
+
         updated_item = crud_operations.update_inventory_status(db=db, inventory_id=inventory_uuid, new_status=new_status)
         if not updated_item:
             raise HTTPException(status_code=404, detail="Inventory item not found")
-            
+
         return updated_item
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid inventory ID format")
     except Exception as e:
         logger.error(f"Error updating inventory status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# MANUAL CUT ROLL ENDPOINTS
+# ============================================================================
+
+@router.post("/manual-cut-rolls", tags=["Manual Cut Rolls"])
+def create_manual_cut_roll(
+    roll_data: schemas.ManualCutRollCreate,
+    db: Session = Depends(get_db)
+):
+    """Create a manual cut roll entry"""
+    try:
+        # Validate client exists
+        client = crud_operations.get_client(db, roll_data.client_id)
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found")
+
+        # Validate paper exists
+        paper = crud_operations.get_paper(db, roll_data.paper_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="Paper not found")
+
+        # Generate unique frontend_id and barcode_id
+        frontend_id = FrontendIDGenerator.generate_frontend_id("manual_cut_roll", db)
+        barcode_id = f"MCR-{frontend_id.split('-')[-1]}"
+
+        # Create manual cut roll record
+        manual_roll = models.ManualCutRoll(
+            frontend_id=frontend_id,
+            barcode_id=barcode_id,
+            client_id=roll_data.client_id,
+            paper_id=roll_data.paper_id,
+            reel_number=roll_data.reel_number,
+            width_inches=float(roll_data.width_inches),
+            weight_kg=float(roll_data.weight_kg),
+            status="available",
+            location="MANUAL_STORAGE",
+            created_by_id=roll_data.created_by_id,
+            created_at=datetime.utcnow()
+        )
+
+        db.add(manual_roll)
+        db.commit()
+        db.refresh(manual_roll)
+
+        logger.info(f"Created manual cut roll {frontend_id} for client {client.company_name}")
+
+        return {
+            "message": "Manual cut roll created successfully",
+            "manual_cut_roll_id": str(manual_roll.id),
+            "frontend_id": manual_roll.frontend_id,
+            "barcode_id": manual_roll.barcode_id,
+            "client_name": client.company_name,
+            "paper_spec": f"{paper.gsm}gsm, {paper.bf}bf, {paper.shade}",
+            "reel_number": manual_roll.reel_number,
+            "width_inches": float(manual_roll.width_inches),
+            "weight_kg": float(manual_roll.weight_kg),
+            "status": manual_roll.status
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating manual cut roll: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/manual-cut-rolls", tags=["Manual Cut Rolls"])
+def get_manual_cut_rolls(
+    skip: int = 0,
+    limit: int = 100,
+    status: str = None,
+    client_id: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get all manual cut rolls with optional filters"""
+    try:
+        query = db.query(models.ManualCutRoll)
+
+        if status:
+            query = query.filter(models.ManualCutRoll.status == status)
+
+        if client_id:
+            import uuid
+            query = query.filter(models.ManualCutRoll.client_id == uuid.UUID(client_id))
+
+        manual_rolls = query.offset(skip).limit(limit).all()
+
+        return {
+            "manual_cut_rolls": [
+                {
+                    "id": str(roll.id),
+                    "frontend_id": roll.frontend_id,
+                    "barcode_id": roll.barcode_id,
+                    "client_id": str(roll.client_id),
+                    "client_name": roll.client.company_name if roll.client else "N/A",
+                    "paper_id": str(roll.paper_id),
+                    "paper_spec": f"{roll.paper.gsm}gsm, {roll.paper.bf}bf, {roll.paper.shade}" if roll.paper else "N/A",
+                    "reel_number": roll.reel_number,
+                    "width_inches": float(roll.width_inches),
+                    "weight_kg": float(roll.weight_kg),
+                    "status": roll.status,
+                    "location": roll.location,
+                    "created_at": roll.created_at.isoformat() if roll.created_at else None,
+                    "created_by": roll.created_by.username if roll.created_by else "N/A"
+                }
+                for roll in manual_rolls
+            ],
+            "total": query.count()
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting manual cut rolls: {e}")
         raise HTTPException(status_code=500, detail=str(e))

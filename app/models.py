@@ -401,7 +401,8 @@ class InventoryMaster(Base):
     
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    
+    updated_at = Column(DateTime, nullable=True)
+
     # Wastage tracking fields
     is_wastage_roll = Column(Boolean, default=False, nullable=False, index=True)
     wastage_source_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)
@@ -423,6 +424,17 @@ class InventoryMaster(Base):
     parent_118_roll = relationship("InventoryMaster", foreign_keys=[parent_118_roll_id], remote_side=[id])
     child_118_rolls = relationship("InventoryMaster", foreign_keys=[parent_jumbo_id], back_populates="parent_jumbo")
     child_cut_rolls = relationship("InventoryMaster", foreign_keys=[parent_118_roll_id], back_populates="parent_118_roll")
+
+# Current Jumbo Roll - Stores ALL jumbo rolls set by user as a history log
+# NOTE: This table maintains a complete history of all jumbo rolls added over time
+# Each new entry is added as a new record, previous records are NOT deleted
+class CurrentJumboRoll(Base):
+    __tablename__ = "current_jumbo_roll"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    jumbo_barcode_id = Column(String(50), nullable=False, index=True)  # Jumbo roll barcode (JR_XXXXX) - allows duplicates for history
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, nullable=True)
 
 # Plan Master - Cutting optimization plans
 class PlanMaster(Base):
@@ -733,6 +745,40 @@ class WastageInventory(Base):
     created_by = relationship("UserMaster")
 
 
+class ManualCutRoll(Base):
+    """
+    Manual cut roll entries from external sources
+    These are rolls that are manually entered into the system (not from production)
+    Tracked separately for better auditing and can be dispatched like regular inventory
+    """
+    __tablename__ = "manual_cut_roll"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # MCR-00001, MCR-00002, etc.
+    barcode_id = Column(String(100), unique=True, nullable=True, index=True)  # Generated barcode for scanning
+
+    # Roll details
+    client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
+    paper_id = Column(UNIQUEIDENTIFIER, ForeignKey("paper_master.id"), nullable=False, index=True)
+    reel_number = Column(String(100), nullable=False, index=True)  # Manual reel identification
+    width_inches = Column(Numeric(6, 2), nullable=False, index=True)
+    weight_kg = Column(Numeric(8, 2), nullable=False)
+
+    # Status and location
+    status = Column(String(50), default="available", nullable=False, index=True)  # available, dispatched, damaged
+    location = Column(String(255), default="MANUAL_STORAGE", nullable=True)
+
+    # Audit fields
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    client = relationship("ClientMaster")
+    paper = relationship("PaperMaster")
+    created_by = relationship("UserMaster")
+
+
 class OrderEditLog(Base):
     """
     Audit log for tracking order modifications
@@ -915,7 +961,7 @@ models_with_frontend_id = [
     DispatchItem,
     WastageInventory,
     OrderEditLog,
-    OutwardChallan
+    ManualCutRoll
 ]
 
 for model in models_with_frontend_id:
