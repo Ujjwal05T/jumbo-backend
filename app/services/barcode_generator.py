@@ -16,10 +16,12 @@ class BarcodeGenerator:
     def generate_cut_roll_barcode(db: Session) -> str:
         """
         Generate next sequential cut roll barcode in CR_00001 format.
-        
+        Range: CR_00001 to CR_07999, then skips to CR_09001+
+        (CR_08000 to CR_09000 reserved for manual cut rolls)
+
         Args:
             db: Database session
-            
+
         Returns:
             str: Next barcode ID like CR_00001, CR_00002, etc.
         """
@@ -28,7 +30,7 @@ class BarcodeGenerator:
             result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
                 models.InventoryMaster.barcode_id.like('CR_%')
             ).scalar()
-            
+
             if result is None:
                 # No barcodes exist yet, start with 1
                 next_number = 1
@@ -43,13 +45,22 @@ class BarcodeGenerator:
                 except (ValueError, AttributeError):
                     logger.warning(f"Invalid barcode format found: {result}, starting from 1")
                     next_number = 1
-            
+
+            # Skip the reserved range for manual cut rolls (8000-9000)
+            if next_number == 8000:
+                logger.info(f"Reached CR_08000, skipping to CR_09001 (manual cut roll range)")
+                next_number = 9001
+            elif 8000 < next_number <= 9000:
+                # Should not happen, but safety check
+                logger.warning(f"Next number {next_number} in reserved manual range, jumping to 9001")
+                next_number = 9001
+
             # Format as CR_00001 (5 digits with leading zeros)
             barcode_id = f"CR_{next_number:05d}"
-            
+
             logger.info(f"Generated cut roll barcode: {barcode_id}")
             return barcode_id
-            
+
         except Exception as e:
             logger.error(f"Error generating cut roll barcode: {e}")
             # Fallback to timestamp-based ID
@@ -147,6 +158,61 @@ class BarcodeGenerator:
             return fallback_id
 
     @staticmethod
+    def generate_manual_cut_roll_barcode(db: Session) -> str:
+        """
+        Generate barcode for manual cut rolls in CR_08000 to CR_09000 format.
+        This is a reserved range within the CR_ series for manually entered rolls.
+
+        Args:
+            db: Database session
+
+        Returns:
+            str: Next barcode ID like CR_08000, CR_08001, etc.
+        """
+        try:
+            # Get the highest existing manual cut roll barcode number
+            result = db.query(func.max(models.ManualCutRoll.barcode_id)).filter(
+                models.ManualCutRoll.barcode_id.like('CR_%')
+            ).scalar()
+
+            if result is None:
+                # No manual cut roll barcodes exist yet, start with 8000
+                next_number = 8000
+            else:
+                # Extract number from CR_08000 format
+                try:
+                    if result and result.startswith('CR_'):
+                        current_number = int(result[3:])  # Remove 'CR_' prefix
+                        next_number = current_number + 1
+                    else:
+                        next_number = 8000
+                except (ValueError, AttributeError):
+                    logger.warning(f"Invalid manual cut roll barcode format found: {result}, starting from 8000")
+                    next_number = 8000
+
+            # Check if we've exceeded the reserved range
+            if next_number > 9000:
+                logger.error(f"Manual cut roll range exhausted! Attempted to generate CR_{next_number:05d}")
+                raise ValueError("Manual cut roll barcode range (CR_08000 to CR_09000) is exhausted. Maximum 1001 manual rolls reached.")
+
+            # Format as CR_08000 (5 digits with leading zeros)
+            barcode_id = f"CR_{next_number:05d}"
+
+            logger.info(f"Generated manual cut roll barcode: {barcode_id}")
+            return barcode_id
+
+        except ValueError:
+            # Re-raise the exhaustion error
+            raise
+        except Exception as e:
+            logger.error(f"Error generating manual cut roll barcode: {e}")
+            # Fallback to timestamp-based ID (still in format but with timestamp)
+            import time
+            fallback_id = f"CR_{int(time.time()) % 1000 + 8000:05d}"
+            logger.warning(f"Using fallback manual cut roll barcode: {fallback_id}")
+            return fallback_id
+
+    @staticmethod
     def generate_scrap_cut_roll_barcode(db: Session) -> str:
         """
         Generate barcode for scrap cut rolls (from wastage) in SCR-00001 format.
@@ -199,7 +265,7 @@ class BarcodeGenerator:
 
         Args:
             barcode_id: Barcode to validate
-            barcode_type: Type - "cut_roll", "inventory", "jumbo", "118_roll", or "wastage"
+            barcode_type: Type - "cut_roll", "manual_cut_roll", "inventory", "jumbo", "118_roll", "wastage", or "scrap_cut_roll"
 
         Returns:
             bool: True if valid format
@@ -209,7 +275,20 @@ class BarcodeGenerator:
 
         try:
             if barcode_type == "cut_roll":
-                return barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()
+                # Validates CR_XXXXX format (both production and manual use same format)
+                if not (barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()):
+                    return False
+                # Optional: Check range - production (1-7999, 9001+), manual (8000-9000)
+                return True
+            elif barcode_type == "manual_cut_roll":
+                # Validates CR_08000 to CR_09000 range specifically
+                if not (barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()):
+                    return False
+                try:
+                    barcode_num = int(barcode_id[3:])
+                    return 8000 <= barcode_num <= 9000
+                except ValueError:
+                    return False
             elif barcode_type == "inventory":
                 return barcode_id.startswith("INV_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             elif barcode_type == "jumbo":
@@ -218,6 +297,8 @@ class BarcodeGenerator:
                 return barcode_id.startswith("SET_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             elif barcode_type == "wastage":
                 return barcode_id.startswith("WSB-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+            elif barcode_type == "scrap_cut_roll":
+                return barcode_id.startswith("SCR-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
             else:
                 return False
         except:

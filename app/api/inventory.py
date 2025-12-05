@@ -8,6 +8,7 @@ from datetime import datetime
 from .base import get_db
 from .. import crud_operations, schemas, models
 from ..services.id_generator import FrontendIDGenerator
+from ..services.barcode_generator import BarcodeGenerator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -155,9 +156,11 @@ def create_manual_cut_roll(
         if not paper:
             raise HTTPException(status_code=404, detail="Paper not found")
 
-        # Generate unique frontend_id and barcode_id
+        # Generate unique barcode_id in CR_08000-09000 range
+        barcode_id = BarcodeGenerator.generate_manual_cut_roll_barcode(db)
+
+        # Generate frontend_id (MCR format for internal tracking)
         frontend_id = FrontendIDGenerator.generate_frontend_id("manual_cut_roll", db)
-        barcode_id = f"MCR-{frontend_id.split('-')[-1]}"
 
         # Create manual cut roll record
         manual_roll = models.ManualCutRoll(

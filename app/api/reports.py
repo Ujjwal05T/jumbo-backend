@@ -3537,3 +3537,156 @@ def get_cut_rolls_weight_update_report(
     except Exception as e:
         logger.error(f"Error in cut rolls weight update report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/all-cut-rolls", tags=["All Cut Rolls Report"])
+def get_all_cut_rolls_report(
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    page_size: int = Query(100, ge=1, le=1000, description="Items per page (max 1000)"),
+    db: Session = Depends(get_db)
+):
+    """
+    All Cut Rolls Report with Pagination
+
+    Returns all cut rolls in the system with pagination support:
+    - Cut roll details with weight information
+    - Parent 11-inch set roll information
+    - Parent jumbo roll information
+    - Associated plan information (plan frontend_id)
+    - Paper specifications (GSM, BF, Shade)
+    - Pagination metadata (total items, total pages, current page)
+    - Client-side filtering can be applied on the frontend
+    """
+    try:
+        # Calculate offset for pagination
+        offset = (page - 1) * page_size
+
+        # Base query to get all cut rolls
+        base_query = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan)
+        ).filter(
+            models.InventoryMaster.roll_type == 'cut'
+        )
+
+        # Get total count for pagination
+        total_count = base_query.count()
+
+        # Get paginated results ordered by creation date (newest first)
+        cut_rolls = base_query.order_by(
+            models.InventoryMaster.created_at.desc()
+        ).offset(offset).limit(page_size).all()
+
+        # Calculate pagination metadata
+        total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+
+        # Process cut rolls data
+        cut_rolls_data = []
+        for cut_roll in cut_rolls:
+            # Get paper specifications
+            paper = cut_roll.paper
+            paper_specs = {
+                "gsm": paper.gsm if paper else 0,
+                "bf": float(paper.bf) if paper and paper.bf else 0,
+                "shade": paper.shade if paper else "Unknown",
+                "type": paper.type if paper else "Unknown"
+            }
+
+            # Get parent 11-inch roll information
+            parent_118_roll = cut_roll.parent_118_roll
+            parent_118_info = None
+            parent_jumbo_info = None
+
+            if parent_118_roll:
+                parent_118_info = {
+                    "id": str(parent_118_roll.id),
+                    "barcode_id": parent_118_roll.barcode_id or "N/A",
+                    "width_inches": float(parent_118_roll.width_inches),
+                    "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0,
+                    "roll_sequence": parent_118_roll.roll_sequence
+                }
+
+                # Get parent jumbo roll information
+                parent_jumbo = parent_118_roll.parent_jumbo
+                if parent_jumbo:
+                    parent_jumbo_info = {
+                        "id": str(parent_jumbo.id),
+                        "barcode_id": parent_jumbo.barcode_id or "N/A",
+                        "width_inches": float(parent_jumbo.width_inches),
+                    }
+                else:
+                    # If no jumbo parent, check if 118 roll itself is a jumbo
+                    if parent_118_roll.roll_type == 'jumbo':
+                        parent_jumbo_info = {
+                            "id": str(parent_118_roll.id),
+                            "barcode_id": parent_118_roll.barcode_id or "N/A",
+                            "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0
+                        }
+
+            # Get plan information
+            plan_info = None
+            if cut_roll.plan_inventory:
+                for plan_link in cut_roll.plan_inventory:
+                    if plan_link.plan:
+                        plan_info = {
+                            "frontend_id": plan_link.plan.frontend_id or "N/A",
+                            "status": plan_link.plan.status,
+                            "created_at": plan_link.plan.created_at.isoformat() if plan_link.plan.created_at else None
+                        }
+                        break  # Take the first plan found
+
+            # Get allocated order information
+            order_info = None
+            if cut_roll.allocated_to_order_id:
+                order_info = {
+                    "id": str(cut_roll.allocated_to_order_id),
+                    "frontend_id": None  # Will be populated if we join with OrderMaster
+                }
+
+            # Compile cut roll data
+            cut_roll_data = {
+                "id": str(cut_roll.id),
+                "barcode_id": cut_roll.barcode_id or "N/A",
+                "width_inches": float(cut_roll.width_inches),
+                "weight_kg": float(cut_roll.weight_kg) if cut_roll.weight_kg else 0,
+                "location": cut_roll.location or "N/A",
+                "status": cut_roll.status,
+                "created_at": cut_roll.created_at.isoformat() if cut_roll.created_at else None,
+                "updated_at": cut_roll.updated_at.isoformat() if cut_roll.updated_at else None,
+                "production_date": cut_roll.production_date.isoformat() if cut_roll.production_date else None,
+                "roll_sequence": cut_roll.roll_sequence,
+                "individual_roll_number": cut_roll.individual_roll_number,
+
+                # Related data
+                "paper_specs": paper_specs,
+                "parent_118_roll": parent_118_info,
+                "parent_jumbo_roll": parent_jumbo_info,
+                "plan_info": plan_info,
+                "allocated_order": order_info,
+
+                # Source tracking
+                "source_type": cut_roll.source_type,
+                "is_wastage_roll": cut_roll.is_wastage_roll
+            }
+
+            cut_rolls_data.append(cut_roll_data)
+
+        return {
+            "success": True,
+            "data": {
+                "cut_rolls": cut_rolls_data,
+                "pagination": {
+                    "current_page": page,
+                    "page_size": page_size,
+                    "total_items": total_count,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_previous": page > 1
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error in all cut rolls report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

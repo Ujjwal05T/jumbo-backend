@@ -290,18 +290,68 @@ def generate_qr_code(
 
 @router.get("/barcode/{barcode_id}", response_model=Dict[str, Any], tags=["Barcode Management"])
 def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
-    """Scan barcode and return cut roll details"""
+    """Scan barcode and return cut roll details (checks both InventoryMaster and ManualCutRoll tables)"""
     try:
-        # Find inventory item by barcode ID with relationships loaded
+        # First try InventoryMaster (production rolls)
         matching_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.created_by),
             joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
             joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
         ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
-        
+
+        # If not found in InventoryMaster, check ManualCutRoll table
+        manual_roll = None
         if not matching_item:
-            raise HTTPException(status_code=404, detail="Barcode not found in inventory")
+            manual_roll = db.query(models.ManualCutRoll).options(
+                joinedload(models.ManualCutRoll.paper),
+                joinedload(models.ManualCutRoll.client),
+                joinedload(models.ManualCutRoll.created_by)
+            ).filter(models.ManualCutRoll.barcode_id == barcode_id).first()
+
+        if not matching_item and not manual_roll:
+            raise HTTPException(status_code=404, detail="Barcode not found in inventory or manual cut rolls")
+
+        # Handle manual cut roll response
+        if manual_roll:
+            paper = manual_roll.paper
+            client_name = manual_roll.client.company_name if manual_roll.client else None
+
+            return {
+                "inventory_id": str(manual_roll.id),
+                "qr_code": None,
+                "barcode_id": manual_roll.barcode_id,
+                "roll_type": "manual_cut",
+                "is_manual": True,
+                "roll_details": {
+                    "width_inches": float(manual_roll.width_inches),
+                    "weight_kg": float(manual_roll.weight_kg),
+                    "roll_type": "manual_cut",
+                    "status": manual_roll.status,
+                    "location": manual_roll.location,
+                    "reel_number": manual_roll.reel_number
+                },
+                "paper_specifications": {
+                    "gsm": paper.gsm if paper else None,
+                    "bf": float(paper.bf) if paper else None,
+                    "shade": paper.shade if paper else None,
+                    "paper_type": paper.type if paper else None
+                } if paper else None,
+                "production_info": {
+                    "created_at": manual_roll.created_at.isoformat() if manual_roll.created_at else None,
+                    "created_by": manual_roll.created_by.name if manual_roll.created_by else None
+                },
+                "parent_rolls": {
+                    "parent_118_barcode": None,
+                    "parent_jumbo_barcode": None
+                },
+                "client_info": {
+                    "client_name": client_name
+                },
+                "scan_timestamp": manual_roll.created_at.isoformat() if manual_roll.created_at else None
+            }
+
+        # Handle production roll response (existing logic continues below)
         
         # Paper and created_by are already loaded via relationships
         paper = matching_item.paper

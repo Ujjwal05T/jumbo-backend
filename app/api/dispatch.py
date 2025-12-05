@@ -413,6 +413,67 @@ def get_wastage_inventory_items(
         logger.error(f"Error fetching wastage inventory items: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/dispatch/manual-cut-rolls", tags=["Dispatch History"])
+def get_manual_cut_rolls_for_dispatch(
+    status: str = "available",
+    client_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get manual cut rolls available for dispatch"""
+    try:
+        from sqlalchemy.orm import joinedload
+
+        # Query manual cut rolls with status "available"
+        query = db.query(models.ManualCutRoll).options(
+            joinedload(models.ManualCutRoll.paper),
+            joinedload(models.ManualCutRoll.client),
+            joinedload(models.ManualCutRoll.created_by)
+        ).filter(
+            models.ManualCutRoll.status == status
+        )
+
+        # Filter by client if provided
+        if client_id and client_id.strip() and client_id != "none":
+            query = query.filter(models.ManualCutRoll.client_id == uuid.UUID(client_id))
+
+        manual_rolls = query.order_by(desc(models.ManualCutRoll.created_at)).all()
+
+        # Format response
+        manual_roll_list = []
+        for roll in manual_rolls:
+            manual_roll_list.append({
+                "id": str(roll.id),
+                "frontend_id": roll.frontend_id,
+                "barcode_id": roll.barcode_id,
+                "reel_number": roll.reel_number,
+                "width_inches": float(roll.width_inches),
+                "weight_kg": float(roll.weight_kg),
+                "paper_spec": f"{roll.paper.gsm}gsm, {roll.paper.bf}bf, {roll.paper.shade}" if roll.paper else "Unknown",
+                "paper": {
+                    "id": str(roll.paper.id),
+                    "name": roll.paper.name,
+                    "gsm": roll.paper.gsm,
+                    "bf": float(roll.paper.bf),
+                    "shade": roll.paper.shade
+                } if roll.paper else None,
+                "client_name": roll.client.company_name if roll.client else "Unknown",
+                "client_id": str(roll.client_id),
+                "status": roll.status,
+                "location": roll.location,
+                "created_at": roll.created_at.isoformat() if roll.created_at else None,
+                "created_by": roll.created_by.name if roll.created_by else "Unknown",
+                "is_manual": True
+            })
+
+        return {
+            "manual_cut_rolls": manual_roll_list,
+            "total_count": len(manual_roll_list)
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching manual cut rolls for dispatch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/dispatch/{dispatch_id}/pdf", tags=["Dispatch PDF"])
 def generate_dispatch_pdf(
     dispatch_id: str,

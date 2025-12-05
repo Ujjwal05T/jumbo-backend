@@ -611,7 +611,7 @@ def create_dispatch_record(
     dispatch_data: schemas.DispatchFormData,
     db: Session = Depends(get_db)
 ):
-    """Create dispatch record with form data and mark items as dispatched - supports regular inventory and wastage items"""
+    """Create dispatch record with form data and mark items as dispatched - supports regular inventory, wastage items, and manual cut rolls"""
     try:
         # Validate client exists
         client = crud_operations.get_client(db, dispatch_data.client_id)
@@ -619,8 +619,8 @@ def create_dispatch_record(
             raise HTTPException(status_code=404, detail="Client not found")
 
         # Validate at least one item type is provided
-        if not dispatch_data.inventory_ids and not dispatch_data.wastage_ids:
-            raise HTTPException(status_code=400, detail="At least one inventory_id or wastage_id must be provided")
+        if not dispatch_data.inventory_ids and not dispatch_data.wastage_ids and not dispatch_data.manual_cut_roll_ids:
+            raise HTTPException(status_code=400, detail="At least one inventory_id, wastage_id, or manual_cut_roll_id must be provided")
 
         # Get regular inventory items to be dispatched
         inventory_items = []
@@ -655,8 +655,25 @@ def create_dispatch_record(
             wastage_items.append(wastage_item)
             total_weight += float(wastage_item.weight_kg) if wastage_item.weight_kg else 0.0
 
+        # Get manual cut roll items to be dispatched
+        manual_cut_rolls = []
+        for manual_roll_id in dispatch_data.manual_cut_roll_ids:
+            manual_roll = db.query(models.ManualCutRoll).filter(
+                models.ManualCutRoll.id == manual_roll_id
+            ).first()
+
+            if not manual_roll:
+                logger.warning(f"Manual cut roll {manual_roll_id} not found, skipping")
+                continue
+            if manual_roll.status != "available":
+                logger.warning(f"Manual cut roll {manual_roll_id} not available (status: {manual_roll.status}), skipping")
+                continue
+
+            manual_cut_rolls.append(manual_roll)
+            total_weight += float(manual_roll.weight_kg)
+
         # Validate we have at least some items
-        total_items_count = len(inventory_items) + len(wastage_items)
+        total_items_count = len(inventory_items) + len(wastage_items) + len(manual_cut_rolls)
         if total_items_count == 0:
             raise HTTPException(status_code=400, detail="No available items found for dispatch")
         
@@ -755,11 +772,30 @@ def create_dispatch_record(
             wastage_item.status = "used"
             completed_items.append(f"wastage_{str(wastage_item.id)}")
 
+        # Process manual cut roll items
+        for manual_roll in manual_cut_rolls:
+            # Create dispatch item with manual roll barcode_id (CR_08000-09000 range)
+            dispatch_item = models.DispatchItem(
+                dispatch_record_id=dispatch_record.id,
+                inventory_id=None,  # No link to regular inventory
+                qr_code=manual_roll.barcode_id or manual_roll.frontend_id or "",
+                barcode_id=manual_roll.barcode_id,  # CR_08XXX barcode
+                width_inches=float(manual_roll.width_inches),
+                weight_kg=float(manual_roll.weight_kg),
+                paper_spec=f"{manual_roll.paper.gsm}gsm, {manual_roll.paper.bf}bf, {manual_roll.paper.shade}" if manual_roll.paper else "Unknown"
+            )
+            db.add(dispatch_item)
+
+            # Mark manual cut roll as used
+            manual_roll.status = "used"
+            manual_roll.location = "dispatched"
+            completed_items.append(f"manual_{str(manual_roll.id)}")
+
         db.commit()
         db.refresh(dispatch_record)
 
         return {
-            "message": f"Dispatch record created successfully with {total_items_count} items ({len(inventory_items)} regular, {len(wastage_items)} wastage)",
+            "message": f"Dispatch record created successfully with {total_items_count} items ({len(inventory_items)} regular, {len(wastage_items)} wastage, {len(manual_cut_rolls)} manual)",
             "dispatch_id": str(dispatch_record.id),
             "dispatch_number": dispatch_record.dispatch_number,
             "client_name": client.company_name,
@@ -772,6 +808,7 @@ def create_dispatch_record(
                 "dispatched_items": total_items_count,
                 "regular_items": len(inventory_items),
                 "wastage_items": len(wastage_items),
+                "manual_cut_rolls": len(manual_cut_rolls),
                 "orders_completed": len(updated_orders),
                 "total_weight": total_weight
             }
