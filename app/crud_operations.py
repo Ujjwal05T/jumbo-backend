@@ -27,7 +27,7 @@ from .crud.snapshots import snapshot
 def create_client(db, client_data):
     return client.create_client(db=db, client=client_data)
 
-def get_clients(db, skip=0, limit=100, status="active"):
+def get_clients(db, skip=0, limit=1000, status="active"):
     return client.get_clients(db=db, skip=skip, limit=limit, status=status)
 
 def get_client(db, client_id):

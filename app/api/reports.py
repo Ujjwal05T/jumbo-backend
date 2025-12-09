@@ -3565,7 +3565,8 @@ def get_all_cut_rolls_report(
         base_query = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
             joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
-            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan)
+            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
         ).filter(
             models.InventoryMaster.roll_type == 'cut'
         )
@@ -3636,12 +3637,14 @@ def get_all_cut_rolls_report(
                         }
                         break  # Take the first plan found
 
-            # Get allocated order information
+            # Get allocated order and client information
             order_info = None
-            if cut_roll.allocated_to_order_id:
+            if cut_roll.allocated_order:
+                allocated_order = cut_roll.allocated_order
                 order_info = {
-                    "id": str(cut_roll.allocated_to_order_id),
-                    "frontend_id": None  # Will be populated if we join with OrderMaster
+                    "id": str(allocated_order.id),
+                    "frontend_id": allocated_order.frontend_id or "N/A",
+                    "client_company_name": allocated_order.client.company_name if allocated_order.client else "N/A"
                 }
 
             # Compile cut roll data

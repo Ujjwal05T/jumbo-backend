@@ -28,7 +28,7 @@ def create_client(client: schemas.ClientMasterCreate, db: Session = Depends(get_
 @router.get("/clients", response_model=List[schemas.ClientMaster], tags=["Client Master"])
 def get_clients(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 1000,
     status: str = "active",
     db: Session = Depends(get_db)
 ):

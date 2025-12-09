@@ -9,7 +9,7 @@ from .. import models, schemas
 
 class CRUDClient(CRUDBase[models.ClientMaster, schemas.ClientMasterCreate, schemas.ClientMasterUpdate]):
     def get_clients(
-        self, db: Session, *, skip: int = 0, limit: int = 100, status: str = "active"
+        self, db: Session, *, skip: int = 0, limit: int = 1000, status: str = "active"
     ) -> List[models.ClientMaster]:
         """Get clients with filtering by status"""
         return (

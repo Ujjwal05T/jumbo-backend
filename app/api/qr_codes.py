@@ -17,21 +17,95 @@ logger = logging.getLogger(__name__)
 
 @router.get("/qr/{qr_code}", response_model=Dict[str, Any], tags=["QR Code Management"])
 def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
-    """Scan QR code or barcode and return cut roll details"""
+    """Scan QR code or barcode and return cut roll details (checks both InventoryMaster and ManualCutRoll tables)"""
     try:
-        # Find inventory item by QR code or barcode ID with relationships loaded
-        matching_item = db.query(models.InventoryMaster).options(
-            joinedload(models.InventoryMaster.paper),
-            joinedload(models.InventoryMaster.created_by),
-            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
-            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
-        ).filter(
-            (models.InventoryMaster.qr_code == qr_code) |
-            (models.InventoryMaster.barcode_id == qr_code)
-        ).first()
-        
-        if not matching_item:
-            raise HTTPException(status_code=404, detail="QR code or barcode not found in inventory")
+        # Determine search order based on barcode prefix
+        # For barcodes starting with "CR_", check ManualCutRoll first
+        check_manual_first = qr_code.startswith("CR_")
+
+        matching_item = None
+        manual_roll = None
+
+        if check_manual_first:
+            # Check ManualCutRoll table first for CR_ prefixed barcodes
+            manual_roll = db.query(models.ManualCutRoll).options(
+                joinedload(models.ManualCutRoll.paper),
+                joinedload(models.ManualCutRoll.client),
+                joinedload(models.ManualCutRoll.created_by)
+            ).filter(models.ManualCutRoll.barcode_id == qr_code).first()
+
+            # If not found in ManualCutRoll, check InventoryMaster as fallback
+            if not manual_roll:
+                matching_item = db.query(models.InventoryMaster).options(
+                    joinedload(models.InventoryMaster.paper),
+                    joinedload(models.InventoryMaster.created_by),
+                    joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+                    joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
+                ).filter(
+                    (models.InventoryMaster.qr_code == qr_code) |
+                    (models.InventoryMaster.barcode_id == qr_code)
+                ).first()
+        else:
+            # Default behavior: Check InventoryMaster first
+            matching_item = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper),
+                joinedload(models.InventoryMaster.created_by),
+                joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+                joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
+            ).filter(
+                (models.InventoryMaster.qr_code == qr_code) |
+                (models.InventoryMaster.barcode_id == qr_code)
+            ).first()
+
+            # If not found in InventoryMaster, check ManualCutRoll table
+            if not matching_item:
+                manual_roll = db.query(models.ManualCutRoll).options(
+                    joinedload(models.ManualCutRoll.paper),
+                    joinedload(models.ManualCutRoll.client),
+                    joinedload(models.ManualCutRoll.created_by)
+                ).filter(models.ManualCutRoll.barcode_id == qr_code).first()
+
+        if not matching_item and not manual_roll:
+            raise HTTPException(status_code=404, detail="QR code or barcode not found in inventory or manual cut rolls")
+
+        # Handle manual cut roll response
+        if manual_roll:
+            paper = manual_roll.paper
+            client_name = manual_roll.client.company_name if manual_roll.client else None
+
+            return {
+                "inventory_id": str(manual_roll.id),
+                "qr_code": None,
+                "barcode_id": manual_roll.barcode_id,
+                "roll_type": "manual_cut",
+                "is_manual": True,
+                "roll_details": {
+                    "width_inches": float(manual_roll.width_inches),
+                    "weight_kg": float(manual_roll.weight_kg),
+                    "roll_type": "manual_cut",
+                    "status": manual_roll.status,
+                    "location": manual_roll.location,
+                    "reel_number": manual_roll.reel_number
+                },
+                "paper_specifications": {
+                    "gsm": paper.gsm if paper else None,
+                    "bf": float(paper.bf) if paper else None,
+                    "shade": paper.shade if paper else None,
+                    "paper_type": paper.type if paper else None
+                } if paper else None,
+                "production_info": {
+                    "created_at": manual_roll.created_at.isoformat() if manual_roll.created_at else None,
+                    "created_by": manual_roll.created_by.name if manual_roll.created_by else None
+                },
+                "parent_rolls": {
+                    "parent_118_barcode": None,
+                    "parent_jumbo_barcode": None
+                },
+                "client_info": {
+                    "client_name": client_name
+                },
+                "scan_timestamp": manual_roll.created_at.isoformat() if manual_roll.created_at else None
+            }
         
         # Paper and created_by are already loaded via relationships
         paper = matching_item.paper
@@ -109,18 +183,81 @@ def update_weight_via_qr(
     weight_update: schemas.QRWeightUpdate,
     db: Session = Depends(get_db)
 ):
-    """Update cut roll weight via QR code scan"""
+    """Update cut roll weight via QR code scan (supports both production and manual cut rolls)"""
     try:
-        # Find inventory item by QR code or barcode ID with paper relationship loaded
-        matching_item = db.query(models.InventoryMaster).options(
-            joinedload(models.InventoryMaster.paper)
-        ).filter(
-            (models.InventoryMaster.qr_code == weight_update.qr_code) |
-            (models.InventoryMaster.barcode_id == weight_update.qr_code)
-        ).first()
-        
-        if not matching_item:
-            raise HTTPException(status_code=404, detail="QR code or barcode not found in inventory")
+        # Determine search order based on barcode prefix
+        # For barcodes starting with "CR_", check ManualCutRoll first
+        check_manual_first = weight_update.qr_code.startswith("CR_")
+
+        matching_item = None
+        manual_roll = None
+
+        if check_manual_first:
+            # Check ManualCutRoll table first for CR_ prefixed barcodes
+            manual_roll = db.query(models.ManualCutRoll).options(
+                joinedload(models.ManualCutRoll.paper)
+            ).filter(models.ManualCutRoll.barcode_id == weight_update.qr_code).first()
+
+            # If not found in ManualCutRoll, check InventoryMaster as fallback
+            if not manual_roll:
+                matching_item = db.query(models.InventoryMaster).options(
+                    joinedload(models.InventoryMaster.paper)
+                ).filter(
+                    (models.InventoryMaster.qr_code == weight_update.qr_code) |
+                    (models.InventoryMaster.barcode_id == weight_update.qr_code)
+                ).first()
+        else:
+            # Default behavior: Check InventoryMaster first
+            matching_item = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper)
+            ).filter(
+                (models.InventoryMaster.qr_code == weight_update.qr_code) |
+                (models.InventoryMaster.barcode_id == weight_update.qr_code)
+            ).first()
+
+            # If not found in InventoryMaster, check ManualCutRoll table
+            if not matching_item:
+                manual_roll = db.query(models.ManualCutRoll).options(
+                    joinedload(models.ManualCutRoll.paper)
+                ).filter(models.ManualCutRoll.barcode_id == weight_update.qr_code).first()
+
+        if not matching_item and not manual_roll:
+            raise HTTPException(status_code=404, detail="QR code or barcode not found in inventory or manual cut rolls")
+
+        # Handle manual cut roll weight update
+        if manual_roll:
+            old_weight = manual_roll.weight_kg
+            manual_roll.weight_kg = weight_update.weight_kg
+            manual_roll.updated_at = datetime.utcnow()
+
+            # If provided, update location
+            if weight_update.location:
+                manual_roll.location = weight_update.location
+
+            # Auto-update status to 'available' when weight is added
+            if manual_roll.weight_kg > 0.1:
+                manual_roll.status = "available"
+                logger.info(f"🔄 Auto-updated manual cut roll {manual_roll.id} status to 'available' after weight update")
+
+            db.commit()
+            db.refresh(manual_roll)
+
+            return {
+                "inventory_id": str(manual_roll.id),
+                "qr_code": None,
+                "barcode_id": manual_roll.barcode_id,
+                "is_manual": True,
+                "weight_update": {
+                    "old_weight_kg": float(old_weight),
+                    "new_weight_kg": float(manual_roll.weight_kg),
+                    "weight_difference": float(manual_roll.weight_kg - old_weight),
+                    "is_first_time_weight": old_weight <= 0.1 and manual_roll.weight_kg > 0.1
+                },
+                "current_status": manual_roll.status,
+                "current_location": manual_roll.location,
+                "updated_at": manual_roll.created_at.isoformat() if manual_roll.created_at else None,
+                "message": f"Manual cut roll weight updated successfully from {old_weight}kg to {manual_roll.weight_kg}kg"
+            }
         
         # Update weight
         old_weight = matching_item.weight_kg
@@ -292,22 +429,45 @@ def generate_qr_code(
 def scan_barcode(barcode_id: str, db: Session = Depends(get_db)):
     """Scan barcode and return cut roll details (checks both InventoryMaster and ManualCutRoll tables)"""
     try:
-        # First try InventoryMaster (production rolls)
-        matching_item = db.query(models.InventoryMaster).options(
-            joinedload(models.InventoryMaster.paper),
-            joinedload(models.InventoryMaster.created_by),
-            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
-            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
-        ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
+        # Determine search order based on barcode prefix
+        # For barcodes starting with "CR_", check ManualCutRoll first
+        check_manual_first = barcode_id.startswith("CR_")
 
-        # If not found in InventoryMaster, check ManualCutRoll table
+        matching_item = None
         manual_roll = None
-        if not matching_item:
+
+        if check_manual_first:
+            # Check ManualCutRoll table first for CR_ prefixed barcodes
             manual_roll = db.query(models.ManualCutRoll).options(
                 joinedload(models.ManualCutRoll.paper),
                 joinedload(models.ManualCutRoll.client),
                 joinedload(models.ManualCutRoll.created_by)
             ).filter(models.ManualCutRoll.barcode_id == barcode_id).first()
+
+            # If not found in ManualCutRoll, check InventoryMaster as fallback
+            if not manual_roll:
+                matching_item = db.query(models.InventoryMaster).options(
+                    joinedload(models.InventoryMaster.paper),
+                    joinedload(models.InventoryMaster.created_by),
+                    joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+                    joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
+                ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
+        else:
+            # Default behavior: Check InventoryMaster first
+            matching_item = db.query(models.InventoryMaster).options(
+                joinedload(models.InventoryMaster.paper),
+                joinedload(models.InventoryMaster.created_by),
+                joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+                joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
+            ).filter(models.InventoryMaster.barcode_id == barcode_id).first()
+
+            # If not found in InventoryMaster, check ManualCutRoll table
+            if not matching_item:
+                manual_roll = db.query(models.ManualCutRoll).options(
+                    joinedload(models.ManualCutRoll.paper),
+                    joinedload(models.ManualCutRoll.client),
+                    joinedload(models.ManualCutRoll.created_by)
+                ).filter(models.ManualCutRoll.barcode_id == barcode_id).first()
 
         if not matching_item and not manual_roll:
             raise HTTPException(status_code=404, detail="Barcode not found in inventory or manual cut rolls")

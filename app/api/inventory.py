@@ -8,7 +8,6 @@ from datetime import datetime
 from .base import get_db
 from .. import crud_operations, schemas, models
 from ..services.id_generator import FrontendIDGenerator
-from ..services.barcode_generator import BarcodeGenerator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -156,8 +155,32 @@ def create_manual_cut_roll(
         if not paper:
             raise HTTPException(status_code=404, detail="Paper not found")
 
-        # Generate unique barcode_id in CR_08000-09000 range
-        barcode_id = BarcodeGenerator.generate_manual_cut_roll_barcode(db)
+        # Validate reel_number is numeric and in range 8000-9000
+        try:
+            reel_no = int(roll_data.reel_number)
+            if reel_no < 1000 or reel_no > 9000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Reel number must be between 8000 and 9000"
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Reel number must be a valid number between 8000 and 9000"
+            )
+
+        # Generate barcode_id from reel_number: CR_0{reel_no}
+        barcode_id = f"CR_0{roll_data.reel_number}"
+
+        # Check if barcode_id already exists
+        existing_roll = db.query(models.ManualCutRoll).filter(
+            models.ManualCutRoll.barcode_id == barcode_id
+        ).first()
+        if existing_roll:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reel number {roll_data.reel_number} already exists. Please use a different number."
+            )
 
         # Generate frontend_id (MCR format for internal tracking)
         frontend_id = FrontendIDGenerator.generate_frontend_id("manual_cut_roll", db)
@@ -207,7 +230,7 @@ def create_manual_cut_roll(
 @router.get("/manual-cut-rolls", tags=["Manual Cut Rolls"])
 def get_manual_cut_rolls(
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 1000,
     status: str = None,
     client_id: str = None,
     db: Session = Depends(get_db)
@@ -223,7 +246,8 @@ def get_manual_cut_rolls(
             import uuid
             query = query.filter(models.ManualCutRoll.client_id == uuid.UUID(client_id))
 
-        manual_rolls = query.offset(skip).limit(limit).all()
+        # MSSQL requires ORDER BY when using OFFSET/LIMIT
+        manual_rolls = query.order_by(models.ManualCutRoll.created_at.desc()).offset(skip).limit(limit).all()
 
         return {
             "manual_cut_rolls": [

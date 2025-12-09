@@ -846,6 +846,20 @@ class DispatchFormData(BaseModel):
     manual_cut_roll_ids: List[UUID] = Field(default_factory=list)  # Manual cut roll items
     created_by_id: UUID
 
+class DispatchUpdateData(BaseModel):
+    """Schema for updating an existing dispatch record"""
+    vehicle_number: Optional[str] = Field(None, max_length=50)
+    driver_name: Optional[str] = Field(None, max_length=255)
+    driver_mobile: Optional[str] = Field(None, max_length=20)
+    locket_no: Optional[str] = Field(None, max_length=50)
+    payment_type: Optional[str] = Field(None, description="Payment type (bill/cash)")
+    dispatch_date: Optional[datetime] = None
+    reference_number: Optional[str] = Field(None, max_length=100)
+    inventory_ids: Optional[List[UUID]] = None  # Regular inventory items
+    wastage_ids: Optional[List[UUID]] = None  # Wastage inventory items
+    manual_cut_roll_ids: Optional[List[UUID]] = None  # Manual cut roll items
+    updated_by_id: UUID  # Track who made the changes
+
 class DispatchRecordCreate(BaseModel):
     """Schema for creating dispatch record"""
     vehicle_number: str
