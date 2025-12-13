@@ -4393,3 +4393,129 @@ def get_all_cut_rolls_filtered_report(
     except Exception as e:
         logger.error(f"Error in filtered cut rolls report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/pending-orders-filtered", tags=["Pending Orders Report"])
+def get_pending_orders_filtered_report(
+    # Filter parameters
+    gsm: Optional[int] = Query(None, description="GSM filter"),
+    client_name: Optional[str] = Query(None, description="Client company name filter"),
+    order_id: Optional[str] = Query(None, description="Order frontend_id filter"),
+    from_created_date: Optional[str] = Query(None, description="Created date from (ISO format UTC)"),
+    to_created_date: Optional[str] = Query(None, description="Created date to (ISO format UTC)"),
+
+    db: Session = Depends(get_db)
+):
+    """
+    Pending Orders Report with Server-Side Filtering (No Pagination)
+
+    This endpoint applies filters on the backend and returns ALL matching pending order items.
+    At least one filter should be applied to get results.
+
+    Active Filters (required - at least one):
+    - gsm: Filter by GSM value (exact match)
+    - client_name: Filter by client company name (exact match)
+    - order_id: Filter by order frontend_id (exact match)
+    - from_created_date: Filter by created date from (UTC)
+    - to_created_date: Filter by created date to (UTC)
+
+    Returns:
+    - ALL filtered pending order items with related data (no pagination)
+    - Total count of results
+    """
+    try:
+        
+
+        # Base query to get all pending order items with eager loading
+        base_query = db.query(models.PendingOrderItem).options(
+            joinedload(models.PendingOrderItem.original_order).joinedload(models.OrderMaster.client)
+        ).filter(
+            models.PendingOrderItem._status == 'pending'
+        )
+
+        # Apply filters
+
+        # GSM filter (exact match)
+        if gsm is not None:
+            base_query = base_query.filter(models.PendingOrderItem.gsm == gsm)
+
+        # Created date range filter
+        if from_created_date:
+            try:
+                from_date = datetime.fromisoformat(from_created_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.PendingOrderItem.created_at >= from_date)
+            except ValueError:
+                logger.warning(f"Invalid from_created_date format: {from_created_date}")
+
+        if to_created_date:
+            try:
+                to_date = datetime.fromisoformat(to_created_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.PendingOrderItem.created_at <= to_date)
+            except ValueError:
+                logger.warning(f"Invalid to_created_date format: {to_created_date}")
+
+        # Client name filter (exact match, case-insensitive)
+        if client_name:
+            base_query = base_query.join(
+                models.OrderMaster,
+                models.PendingOrderItem.original_order_id == models.OrderMaster.id
+            ).join(
+                models.ClientMaster,
+                models.OrderMaster.client_id == models.ClientMaster.id
+            ).filter(func.lower(models.ClientMaster.company_name) == func.lower(client_name))
+
+        # Order ID filter (exact match)
+        if order_id:
+            base_query = base_query.join(
+                models.OrderMaster,
+                models.PendingOrderItem.original_order_id == models.OrderMaster.id
+            ).filter(models.OrderMaster.frontend_id == order_id)
+
+        # Get ALL filtered results
+        pending_orders = base_query.order_by(models.PendingOrderItem.created_at.desc()).all()
+        total_count = len(pending_orders)
+
+        # Format response data
+        pending_orders_data = []
+        for poi in pending_orders:
+            pending_order_data = {
+                "id": str(poi.id),
+                "frontend_id": poi.frontend_id,
+                "width_inches": float(poi.width_inches) if poi.width_inches else 0,
+                "weight_kg": 0.0,  # Always 0 for pending orders
+                "status": "pending",
+                "created_at": poi.created_at.isoformat() if poi.created_at else None,
+                "paper_specs": {
+                    "gsm": poi.gsm,
+                    "bf": float(poi.bf) if poi.bf else 0,
+                    "shade": poi.shade
+                },
+                "allocated_order": {
+                    "id": str(poi.original_order.id) if poi.original_order else None,
+                    "frontend_id": poi.original_order.frontend_id if poi.original_order else None,
+                    "client_company_name": poi.original_order.client.company_name if poi.original_order and poi.original_order.client else None
+                } if poi.original_order else None,
+                "quantity_pending": poi.quantity_pending,
+                "quantity_fulfilled": poi.quantity_fulfilled
+            }
+
+            pending_orders_data.append(pending_order_data)
+
+        return {
+            "success": True,
+            "data": {
+                "pending_orders": pending_orders_data,
+                "total_items": total_count,
+                "filters_applied": {
+                    "gsm": gsm,
+                    "client_name": client_name,
+                    "order_id": order_id,
+                    "from_created_date": from_created_date,
+                    "to_created_date": to_created_date
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error in pending orders filtered report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

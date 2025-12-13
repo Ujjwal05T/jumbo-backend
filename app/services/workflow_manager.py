@@ -27,35 +27,205 @@ class WorkflowManager:
         self.optimizer = CuttingOptimizer(jumbo_roll_width=jumbo_roll_width)
         self.calculation_service = PlanCalculationService(db=db, jumbo_roll_width=jumbo_roll_width)
     
-    def process_multiple_orders(self, order_ids: List[uuid.UUID]) -> Dict:
+    def process_multiple_orders(
+        self,
+        order_ids: List[uuid.UUID],
+        include_pending_orders: bool = True,
+        include_wastage_allocation: bool = True
+    ) -> Dict:
         """
         NEW FLOW: Process multiple orders - READ ONLY CALCULATION.
         No database writes - pure calculation only.
         Uses 3-input/4-output optimization algorithm.
+
+        Args:
+            order_ids: List of order UUIDs to process
+            include_pending_orders: Whether to include pending orders in calculation
+            include_wastage_allocation: Whether to check and allocate wastage before planning
         """
         try:
             logger.info(f"CALCULATION MODE: Processing {len(order_ids)} orders (read-only)")
-            
+
             # Store order requirements for later use in pending order creation
             self.processed_order_requirements = crud_operations.get_orders_with_paper_specs(self.db, order_ids)
             logger.info(f"STORED: {len(self.processed_order_requirements)} order requirements for pending order tracking")
-            
+
             # Use calculation service for read-only operations
             result = self.calculation_service.calculate_plan_for_orders(
                 order_ids=order_ids,
-                include_pending_orders=True,
-                include_available_inventory=True
+                include_pending_orders=include_pending_orders,
+                include_available_inventory=True,
+                include_wastage_allocation=include_wastage_allocation
             )
             
             logger.info(f"CALCULATION COMPLETE: Generated {len(result.get('cut_rolls_generated', []))} cut rolls, "
                        f"{result.get('jumbo_rolls_available', 0)} jumbo rolls available")
             
             return result
-            
+
         except Exception as e:
             logger.error(f"Error in read-only plan calculation: {str(e)}")
             raise
-    
+
+    def process_manual_plan(
+        self,
+        order_ids: List[uuid.UUID],
+        manual_hierarchy: List[Dict],
+        jumbo_roll_width: int = 118
+    ) -> Dict:
+        """
+        MANUAL FLOW: Process manually created plan without running optimization algorithm.
+        Converts manual hierarchy to optimizer-compatible format.
+
+        Args:
+            order_ids: List of order UUIDs included in manual plan
+            manual_hierarchy: Manual hierarchy structure from frontend
+            jumbo_roll_width: Width of jumbo rolls
+
+        Returns:
+            Dict in same format as optimizer output for compatibility
+        """
+        try:
+            logger.info(f"MANUAL MODE: Processing manual plan for {len(order_ids)} orders")
+
+            # Convert manual hierarchy to optimizer-compatible format
+            result = self._convert_manual_hierarchy_to_optimizer_format(
+                manual_hierarchy=manual_hierarchy,
+                order_ids=order_ids,
+                jumbo_roll_width=jumbo_roll_width
+            )
+
+            logger.info(f"MANUAL PLAN COMPLETE: Generated {len(result.get('cut_rolls_generated', []))} cut rolls, "
+                       f"{result.get('jumbo_rolls_available', 0)} jumbo rolls")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in manual plan processing: {str(e)}")
+            raise
+
+    def _convert_manual_hierarchy_to_optimizer_format(
+        self,
+        manual_hierarchy: List[Dict],
+        order_ids: List[uuid.UUID],
+        jumbo_roll_width: int
+    ) -> Dict:
+        """
+        Convert manual hierarchy input to optimizer-compatible output format.
+        This ensures the manual plan can use the same production flow.
+        """
+        cut_rolls_generated = []
+        jumbo_roll_details = []
+        individual_roll_counter = 1
+
+        # Fetch order data for reference
+        orders_data = crud_operations.get_orders_with_paper_specs(self.db, order_ids)
+        orders_map = {str(order['order_id']): order for order in orders_data}
+
+        # Process each paper spec group in manual hierarchy
+        for spec_group in manual_hierarchy:
+            paper_specs = spec_group.get('paper_specs', {})
+            gsm = paper_specs.get('gsm')
+            bf = paper_specs.get('bf')
+            shade = paper_specs.get('shade')
+
+            # Process each jumbo roll in this spec group
+            for jumbo_data in spec_group.get('jumbo_rolls', []):
+                jumbo_id = f"JUMBO_{jumbo_data.get('jumbo_number', len(jumbo_roll_details) + 1)}"
+                jumbo_frontend_id = f"JR-{str(len(jumbo_roll_details) + 1).zfill(3)}"
+
+                total_cuts = 0
+                total_used_width = 0
+                roll_numbers = []
+
+                # Process each 118" roll in this jumbo
+                for roll_118_data in jumbo_data.get('rolls_118', []):
+                    roll_number = roll_118_data.get('roll_number', individual_roll_counter)
+                    roll_numbers.append(roll_number)
+
+                    # Process cuts in this 118" roll
+                    for cut in roll_118_data.get('cuts', []):
+                        width = cut.get('width')
+                        quantity = cut.get('quantity', 1)
+                        order_id = cut.get('order_id')
+
+                        # Get order details for paper_id
+                        order_data = orders_map.get(str(order_id), {})
+                        paper_id = order_data.get('paper_id', '')
+
+                        # Create cut rolls with same structure as optimizer
+                        for _ in range(quantity):
+                            cut_roll = {
+                                'width': width,
+                                'quantity': 1,
+                                'gsm': gsm,
+                                'bf': bf,
+                                'shade': shade,
+                                'source': 'cutting',
+                                'individual_roll_number': roll_number,
+                                'trim_left': 0,  # Manual plan - user manages trim
+                                'order_id': order_id,
+                                'paper_id': paper_id,
+                                'source_type': 'regular_order',
+                                'jumbo_roll_id': jumbo_id,
+                                'jumbo_roll_frontend_id': jumbo_frontend_id,
+                                'parent_118_roll_id': f"118_{roll_number}",
+                                'roll_sequence': len(roll_118_data.get('cuts', []))
+                            }
+                            cut_rolls_generated.append(cut_roll)
+                            total_cuts += 1
+                            total_used_width += width
+
+                    individual_roll_counter += 1
+
+                # Calculate efficiency for this jumbo
+                total_available_width = jumbo_roll_width * len(roll_numbers)
+                efficiency = (total_used_width / total_available_width * 100) if total_available_width > 0 else 0
+
+                # Create jumbo roll detail
+                jumbo_detail = {
+                    'jumbo_id': jumbo_id,
+                    'jumbo_frontend_id': jumbo_frontend_id,
+                    'paper_spec': f"{gsm}gsm {shade}",
+                    'roll_count': len(roll_numbers),
+                    'total_cuts': total_cuts,
+                    'total_used_width': total_used_width,
+                    'efficiency_percentage': efficiency,
+                    'is_complete': True,
+                    'roll_numbers': roll_numbers
+                }
+                jumbo_roll_details.append(jumbo_detail)
+
+        # Calculate summary statistics
+        total_118_rolls = sum(len(detail['roll_numbers']) for detail in jumbo_roll_details)
+        total_jumbo_rolls = len(jumbo_roll_details)
+
+        # Return in optimizer-compatible format
+        return {
+            'cut_rolls_generated': cut_rolls_generated,
+            'jumbo_rolls_available': total_jumbo_rolls,
+            'pending_orders': [],  # Manual plans don't generate pending orders
+            'wastage_allocations': [],  # Manual plans don't use wastage allocation
+            'jumbo_rolls_needed': total_jumbo_rolls,
+            'summary': {
+                'total_cut_rolls': len(cut_rolls_generated),
+                'total_individual_118_rolls': total_118_rolls,
+                'total_jumbo_rolls_needed': total_jumbo_rolls,
+                'total_pending_orders': 0,
+                'total_pending_quantity': 0,
+                'specification_groups_processed': len(manual_hierarchy),
+                'high_trim_patterns': 0,
+                'algorithm_note': 'Manual Planning Mode',
+                'complete_jumbos': total_jumbo_rolls,
+                'partial_jumbos': 0,
+                'jumbo_roll_width': jumbo_roll_width,
+                'jumbo_rolls_available': total_jumbo_rolls,
+                'individual_118_rolls_available': total_118_rolls,
+                'max_selectable_rolls': total_jumbo_rolls
+            },
+            'jumbo_roll_details': jumbo_roll_details
+        }
+
     def _consolidate_with_pending_orders(self, current_orders: List[models.OrderMaster]) -> List[models.OrderMaster]:
         """
         Find and consolidate matching pending orders with current orders.

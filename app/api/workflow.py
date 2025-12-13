@@ -54,15 +54,51 @@ def process_multiple_orders(
         order_ids = [uuid.UUID(id_str) for id_str in request_data.get("order_ids", [])]
         user_id = request_data.get("user_id")
         jumbo_roll_width = request_data.get("jumbo_roll_width", 118)  # Default to 118 if not provided
-        
+        include_pending_orders = request_data.get("include_pending_orders", True)  # Default to True
+        include_wastage_allocation = request_data.get("include_wastage_allocation", True)  # Default to True
+
         workflow = WorkflowManager(db=db, user_id=user_id, jumbo_roll_width=jumbo_roll_width)
-        result = workflow.process_multiple_orders(order_ids)
-        
+        result = workflow.process_multiple_orders(
+            order_ids=order_ids,
+            include_pending_orders=include_pending_orders,
+            include_wastage_allocation=include_wastage_allocation
+        )
+
         return result
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=f"Invalid order ID format: {ve}")
     except Exception as e:
         logger.error(f"Error processing multiple orders: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/workflow/manual-plan", tags=["Workflow Management"])
+def create_manual_plan(
+    request_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """MANUAL FLOW: Create a plan with manually specified hierarchy (no optimization algorithm)"""
+    try:
+        import uuid
+        order_ids = [uuid.UUID(id_str) for id_str in request_data.get("order_ids", [])]
+        user_id = request_data.get("user_id")
+        jumbo_roll_width = request_data.get("jumbo_roll_width", 118)
+        manual_hierarchy = request_data.get("manual_hierarchy", [])
+
+        if not manual_hierarchy:
+            raise HTTPException(status_code=400, detail="Manual hierarchy is required")
+
+        workflow = WorkflowManager(db=db, user_id=user_id, jumbo_roll_width=jumbo_roll_width)
+        result = workflow.process_manual_plan(
+            order_ids=order_ids,
+            manual_hierarchy=manual_hierarchy,
+            jumbo_roll_width=jumbo_roll_width
+        )
+
+        return result
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Invalid input: {ve}")
+    except Exception as e:
+        logger.error(f"Error processing manual plan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/workflow/status", tags=["Workflow Management"])

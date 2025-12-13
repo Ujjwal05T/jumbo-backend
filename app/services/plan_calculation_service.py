@@ -29,19 +29,21 @@ class PlanCalculationService:
         self.optimizer = CuttingOptimizer(jumbo_roll_width=jumbo_roll_width)
     
     def calculate_plan_for_orders(
-        self, 
-        order_ids: List[uuid.UUID], 
+        self,
+        order_ids: List[uuid.UUID],
         include_pending_orders: bool = True,
-        include_available_inventory: bool = True
+        include_available_inventory: bool = True,
+        include_wastage_allocation: bool = True
     ) -> Dict[str, Any]:
         """
         Calculate optimization plan for given orders (READ-ONLY).
-        
+
         Args:
             order_ids: List of order UUIDs to process
             include_pending_orders: Whether to include pending orders in calculation
             include_available_inventory: Whether to include available inventory
-            
+            include_wastage_allocation: Whether to check and allocate wastage before planning
+
         Returns:
             Dict containing calculation results without any database writes
         """
@@ -67,12 +69,16 @@ class PlanCalculationService:
             #     available_inventory = self._get_available_inventory(paper_specs)
             
             # WASTAGE ALLOCATION: Check and allocate available wastage before planning
-            wastage_allocations, reduced_order_requirements = self._check_and_reduce_orders_with_wastage(order_requirements)
-            
+            wastage_allocations = []
+            if include_wastage_allocation:
+                wastage_allocations, reduced_order_requirements = self._check_and_reduce_orders_with_wastage(order_requirements)
+            else:
+                reduced_order_requirements = order_requirements
+
             logger.info(f"CALCULATION: Processing {len(order_requirements)} orders, "
                        f"{len(pending_requirements)} pending, {len(available_inventory)} inventory, "
                        f"{len(wastage_allocations)} wastage matches")
-            
+
             # PURE CALCULATION: Run optimization algorithm with reduced order requirements
             optimization_result = self.optimizer.optimize_with_new_algorithm(
                 order_requirements=reduced_order_requirements,
@@ -484,6 +490,7 @@ class PlanCalculationService:
                 allocation = {
                     'wastage_id': wastage_roll.id,
                     'wastage_frontend_id': wastage_roll.frontend_id,
+                    'wastage_reel_no': wastage_roll.reel_no,
                     'order_id': order_id,
                     'order_item_id': order_item_id,
                     'paper_id': paper_id,
