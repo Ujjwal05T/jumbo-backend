@@ -235,14 +235,26 @@ def update_weight_via_qr(
                 manual_roll.location = weight_update.location
 
             # Auto-update status to 'available' when weight is added
-            if manual_roll.weight_kg > 0.1:
+            if manual_roll.weight_kg > 0.1 and manual_roll.status != "used":  # Real weight added
                 manual_roll.status = "available"
                 logger.info(f"🔄 Auto-updated manual cut roll {manual_roll.id} status to 'available' after weight update")
+
+            # Check and update weight in DispatchItem if it exists (check both qr_code and barcode_id)
+            dispatch_item_updated = False
+            dispatch_item = db.query(models.DispatchItem).filter(
+                (models.DispatchItem.qr_code == weight_update.qr_code) |
+                (models.DispatchItem.barcode_id == weight_update.qr_code)
+            ).first()
+
+            if dispatch_item:
+                dispatch_item.weight_kg = weight_update.weight_kg
+                dispatch_item_updated = True
+                logger.info(f" Updated weight in DispatchItem {dispatch_item.id} for code {weight_update.qr_code}")
 
             db.commit()
             db.refresh(manual_roll)
 
-            return {
+            response_data = {
                 "inventory_id": str(manual_roll.id),
                 "qr_code": None,
                 "barcode_id": manual_roll.barcode_id,
@@ -258,6 +270,17 @@ def update_weight_via_qr(
                 "updated_at": manual_roll.created_at.isoformat() if manual_roll.created_at else None,
                 "message": f"Manual cut roll weight updated successfully from {old_weight}kg to {manual_roll.weight_kg}kg"
             }
+
+            # Add dispatch item update info to response
+            if dispatch_item_updated and dispatch_item:
+                response_data["dispatch_item_update"] = {
+                    "dispatch_item_id": str(dispatch_item.id),
+                    "dispatch_record_id": str(dispatch_item.dispatch_record_id),
+                    "updated": True,
+                    "message": "Weight also updated in dispatch record"
+                }
+
+            return response_data
         
         # Update weight
         old_weight = matching_item.weight_kg
@@ -270,7 +293,7 @@ def update_weight_via_qr(
         
         # AUTOMATIC STATUS UPDATE: When weight is added, automatically set status to 'available'
         # This means the cut roll is now ready for dispatch
-        if matching_item.weight_kg > 0.1:  # Real weight added
+        if matching_item.weight_kg > 0.1 and matching_item.status != "used":  # Real weight added
             matching_item.status = "available"
             logger.info(f"🔄 Auto-updated inventory {matching_item.id} status to 'available' after weight update")
         
@@ -333,9 +356,30 @@ def update_weight_via_qr(
                         order.updated_at = func.now()
                         logger.info(f"🏭 Order {order.id} - all items in warehouse, ready for dispatch!")
         
+        # Check and update weight in DispatchItem if it exists (check both qr_code and barcode_id)
+        dispatch_item_updated = False
+        dispatch_item = db.query(models.DispatchItem).filter(
+            (models.DispatchItem.qr_code == weight_update.qr_code) |
+            (models.DispatchItem.barcode_id == weight_update.qr_code)
+        ).first()
+
+
+
+        if dispatch_item:
+            dispatch_item.weight_kg = weight_update.weight_kg
+            dispatch_item_updated = True
+            dispatch_record = db.query(models.DispatchRecord).filter(
+                models.DispatchRecord.id == dispatch_item.dispatch_record_id
+            ).first()
+            if dispatch_record:
+                dispatch_record.updated_at = datetime.utcnow()
+                # Convert all weights to float before summing to avoid Decimal/float mismatch
+                dispatch_record.total_weight_kg = sum(float(item.weight_kg) for item in dispatch_record.dispatch_items)
+            logger.info(f"📦 Updated weight in DispatchItem {dispatch_item.id} for code {weight_update.qr_code}")
+
         db.commit()
         db.refresh(matching_item)
-        
+
         # Build response with fulfillment information
         response_data = {
             "inventory_id": str(matching_item.id),
@@ -352,7 +396,7 @@ def update_weight_via_qr(
             "updated_at": matching_item.created_at.isoformat(),
             "message": f"Weight updated successfully from {old_weight}kg to {matching_item.weight_kg}kg"
         }
-        
+
         # Add fulfillment information if order items were updated
         if matching_item.paper and matching_item.weight_kg > 0.1 and order_items:
             order_item = order_items[0]
@@ -366,7 +410,16 @@ def update_weight_via_qr(
                 "order_status": order_item.order.status if order_item.order else None,
                 "is_order_completed": order_item.order.status == "completed" if order_item.order else False
             }
-        
+
+        # Add dispatch item update info to response
+        if dispatch_item_updated and dispatch_item:
+            response_data["dispatch_item_update"] = {
+                "dispatch_item_id": str(dispatch_item.id),
+                "dispatch_record_id": str(dispatch_item.dispatch_record_id),
+                "updated": True,
+                "message": "Weight also updated in dispatch record"
+            }
+
         return response_data
         
     except HTTPException:

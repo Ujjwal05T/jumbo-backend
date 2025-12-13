@@ -63,8 +63,8 @@ class PlanCalculationService:
             
             # READ ONLY: Fetch available inventory if requested
             available_inventory = []
-            if include_available_inventory:
-                available_inventory = self._get_available_inventory(paper_specs)
+            # if include_available_inventory:
+            #     available_inventory = self._get_available_inventory(paper_specs)
             
             # WASTAGE ALLOCATION: Check and allocate available wastage before planning
             wastage_allocations, reduced_order_requirements = self._check_and_reduce_orders_with_wastage(order_requirements)

@@ -1052,6 +1052,17 @@ class WastageInventoryUpdate(BaseModel):
     location: Optional[str] = Field(None, description="Storage location")
     notes: Optional[str] = Field(None, max_length=500, description="Additional notes")
 
+class WastageInventoryPaper(BaseModel):
+    """Nested paper details for wastage inventory"""
+    id: UUID
+    type: str
+    gsm: int
+    bf: float
+    shade: str
+
+    class Config:
+        from_attributes = True
+
 class WastageInventory(BaseModel):
     """Schema for wastage inventory item"""
     id: UUID
@@ -1082,6 +1093,10 @@ class WastageInventory(BaseModel):
     notes: Optional[str] = Field(None, description="Additional notes")
 
     # Relationships (optional, loaded when needed)
+    paper: Optional[WastageInventoryPaper] = Field(None, description="Paper specifications")
+
+    class Config:
+        from_attributes = True
 
 # Manual Cut Roll Creation Schema
 class ManualCutRollCreate(BaseModel):

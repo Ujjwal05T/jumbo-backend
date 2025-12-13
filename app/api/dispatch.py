@@ -352,6 +352,454 @@ def update_dispatch_status(
         logger.error(f"Error updating dispatch status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.put("/dispatch/{dispatch_id}", tags=["Dispatch History"])
+def update_dispatch_record(
+    dispatch_id: str,
+    update_data: schemas.DispatchUpdateData,
+    db: Session = Depends(get_db)
+):
+    """
+    Update dispatch record - allows editing vehicle details and adding/removing items
+
+    IMPORTANT: This endpoint performs complex database operations:
+    - Removes items: Reverts inventory status back to 'available'
+    - Adds items: Marks inventory as 'used' and updates order status
+    - Recalculates totals automatically
+
+    Restrictions:
+    - Cannot edit dispatches with status 'delivered' or 'returned'
+    - Cannot change client_id (too complex, create new dispatch instead)
+    """
+    try:
+        logger.info("=" * 80)
+        logger.info(f"DISPATCH UPDATE REQUEST for {dispatch_id}")
+        logger.info(f"Update data: {update_data}")
+        logger.info("=" * 80)
+
+        dispatch_uuid = uuid.UUID(dispatch_id)
+
+        # ===== 1. FETCH AND VALIDATE EXISTING DISPATCH =====
+        dispatch = db.query(models.DispatchRecord).options(
+            joinedload(models.DispatchRecord.dispatch_items)
+        ).filter(models.DispatchRecord.id == dispatch_uuid).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+        logger.info(f"Found dispatch: {dispatch.dispatch_number}, current items: {len(dispatch.dispatch_items)}")
+
+        # Check if dispatch can be edited
+        if dispatch.status in ["delivered", "returned"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot edit dispatch with status '{dispatch.status}'. Only 'dispatched' status can be edited."
+            )
+
+        if dispatch.delivered_at:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot edit dispatch that has been marked as delivered"
+            )
+
+        # ===== 2. UPDATE BASIC DISPATCH DETAILS =====
+        if update_data.vehicle_number is not None:
+            dispatch.vehicle_number = update_data.vehicle_number
+        if update_data.driver_name is not None:
+            dispatch.driver_name = update_data.driver_name
+        if update_data.driver_mobile is not None:
+            dispatch.driver_mobile = update_data.driver_mobile
+        if update_data.locket_no is not None:
+            dispatch.locket_no = update_data.locket_no
+        if update_data.payment_type is not None:
+            dispatch.payment_type = update_data.payment_type
+        if update_data.reference_number is not None:
+            dispatch.reference_number = update_data.reference_number
+
+        # Dispatch date validation (±7 days from original)
+        if update_data.dispatch_date is not None:
+            from datetime import timedelta
+            original_date = dispatch.dispatch_date
+            date_diff = abs((update_data.dispatch_date - original_date).days)
+            if date_diff > 7:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Dispatch date can only be changed within ±7 days of original date. Difference: {date_diff} days"
+                )
+            dispatch.dispatch_date = update_data.dispatch_date
+
+        # ===== 3. HANDLE ITEMS CHANGES (ADD/REMOVE) =====
+        items_changed = False
+
+        if (update_data.inventory_ids is not None or
+            update_data.wastage_ids is not None or
+            update_data.manual_cut_roll_ids is not None):
+
+            items_changed = True
+
+            # Get current items
+            current_inventory_ids = set()
+            current_wastage_ids = set()
+            current_manual_ids = set()
+
+            logger.info("=== BUILDING CURRENT ITEM SETS ===")
+            for item in dispatch.dispatch_items:
+                if item.inventory_id:
+                    # Regular inventory item
+                    current_inventory_ids.add(item.inventory_id)
+                    logger.info(f"  Current regular: {item.barcode_id} → {item.inventory_id}")
+                else:
+                    # Identify by barcode pattern
+                    if item.barcode_id and item.barcode_id.startswith('WSB'):
+                        # Wastage item
+                        wastage = db.query(models.WastageInventory).filter(
+                            or_(
+                                models.WastageInventory.barcode_id == item.barcode_id,
+                                models.WastageInventory.reel_no == item.barcode_id
+                            )
+                        ).first()
+                        if wastage:
+                            current_wastage_ids.add(wastage.id)
+                            logger.info(f"  Current wastage: {item.barcode_id} → {wastage.id}")
+                        else:
+                            logger.warning(f"  ⚠️ Could not find wastage for barcode: {item.barcode_id}")
+                    elif item.barcode_id and item.barcode_id.startswith('CR_'):
+                        # Manual cut roll (can be CR_05, CR_06, CR_07, CR_08, etc.)
+                        manual = db.query(models.ManualCutRoll).filter(
+                            models.ManualCutRoll.barcode_id == item.barcode_id
+                        ).first()
+                        if manual:
+                            current_manual_ids.add(manual.id)
+                            logger.info(f"  Current manual: {item.barcode_id} → {manual.id}")
+                        else:
+                            logger.warning(f"  ⚠️ Could not find manual for barcode: {item.barcode_id}")
+
+            logger.info(f"Current sets - Regular: {len(current_inventory_ids)}, Wastage: {len(current_wastage_ids)}, Manual: {len(current_manual_ids)}")
+            logger.info(f"Current inventory IDs: {current_inventory_ids}")
+            logger.info(f"Current wastage IDs: {current_wastage_ids}")
+            logger.info(f"Current manual IDs: {current_manual_ids}")
+
+            # Get new items (if provided, otherwise keep current)
+            new_inventory_ids = set(update_data.inventory_ids) if update_data.inventory_ids is not None else current_inventory_ids
+            new_wastage_ids = set(update_data.wastage_ids) if update_data.wastage_ids is not None else current_wastage_ids
+            new_manual_ids = set(update_data.manual_cut_roll_ids) if update_data.manual_cut_roll_ids is not None else current_manual_ids
+
+            logger.info(f"New sets - Regular: {len(new_inventory_ids)}, Wastage: {len(new_wastage_ids)}, Manual: {len(new_manual_ids)}")
+            logger.info(f"New inventory IDs: {new_inventory_ids}")
+            logger.info(f"New wastage IDs: {new_wastage_ids}")
+            logger.info(f"New manual IDs: {new_manual_ids}")
+
+            # Calculate differences
+            removed_inventory_ids = current_inventory_ids - new_inventory_ids
+            added_inventory_ids = new_inventory_ids - current_inventory_ids
+
+            removed_wastage_ids = current_wastage_ids - new_wastage_ids
+            added_wastage_ids = new_wastage_ids - current_wastage_ids
+
+            removed_manual_ids = current_manual_ids - new_manual_ids
+            added_manual_ids = new_manual_ids - current_manual_ids
+
+            logger.info("=== CALCULATED DIFFERENCES ===")
+            logger.info(f"Dispatch {dispatch.dispatch_number} - Items to REMOVE: {len(removed_inventory_ids)} regular, {len(removed_wastage_ids)} wastage, {len(removed_manual_ids)} manual")
+            logger.info(f"  Removed regular IDs: {removed_inventory_ids}")
+            logger.info(f"  Removed wastage IDs: {removed_wastage_ids}")
+            logger.info(f"  Removed manual IDs: {removed_manual_ids}")
+            logger.info(f"Dispatch {dispatch.dispatch_number} - Items to ADD: {len(added_inventory_ids)} regular, {len(added_wastage_ids)} wastage, {len(added_manual_ids)} manual")
+            logger.info(f"  Added regular IDs: {added_inventory_ids}")
+            logger.info(f"  Added wastage IDs: {added_wastage_ids}")
+            logger.info(f"  Added manual IDs: {added_manual_ids}")
+
+            # ===== 4. REMOVE ITEMS (Revert inventory status) =====
+            logger.info("=== STARTING ITEM REMOVAL ===")
+
+            # Remove regular inventory items
+            for inv_id in removed_inventory_ids:
+                logger.info(f"Processing removal of regular item: {inv_id}")
+                # Find and delete dispatch item
+                dispatch_item = db.query(models.DispatchItem).filter(
+                    models.DispatchItem.dispatch_record_id == dispatch.id,
+                    models.DispatchItem.inventory_id == inv_id
+                ).first()
+
+                if dispatch_item:
+                    logger.info(f"  Found dispatch item: {dispatch_item.barcode_id}, deleting...")
+                    db.delete(dispatch_item)
+                else:
+                    logger.warning(f"  ⚠️ Dispatch item not found for inventory {inv_id}")
+
+                # Revert inventory status
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == inv_id
+                ).first()
+
+                if inventory:
+                    logger.info(f"  Reverting {inventory.barcode_id}: {inventory.status} → available")
+                    inventory.status = "available"
+                    inventory.location = "warehouse"
+                    logger.info(f"  ✓ Reverted inventory {inventory.barcode_id} to available")
+
+                    # Revert order item status (fuzzy match - best effort)
+                    # Note: This may revert the wrong order item if multiple matches exist
+                    if inventory.paper:
+                        matching_order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
+                            models.OrderItem.paper_id == inventory.paper_id,
+                            models.OrderItem.width_inches == float(inventory.width_inches),
+                            models.OrderItem.item_status == "completed"
+                        ).limit(1).all()
+
+                        for order_item in matching_order_items:
+                            order_item.item_status = "in_warehouse"
+                            order_item.dispatched_at = None
+                            logger.info(f"  ✓ Reverted order item {order_item.frontend_id} to in_warehouse")
+
+                            # Check if order needs to be reverted from completed
+                            order = db.query(models.OrderMaster).filter(
+                                models.OrderMaster.id == order_item.order_id
+                            ).first()
+
+                            if order and order.status == "completed":
+                                # Check if any items are not completed
+                                has_incomplete = db.query(models.OrderItem).filter(
+                                    models.OrderItem.order_id == order.id,
+                                    models.OrderItem.item_status != "completed"
+                                ).count() > 0
+
+                                if has_incomplete:
+                                    order.status = "in_process"
+                                    logger.info(f"  ✓ Reverted order {order.frontend_id} to in_process")
+                else:
+                    logger.warning(f"  ⚠️ Inventory {inv_id} not found in database")
+
+            # Remove wastage items
+            for wastage_id in removed_wastage_ids:
+                # Find dispatch item by wastage identification
+                wastage = db.query(models.WastageInventory).filter(
+                    models.WastageInventory.id == wastage_id
+                ).first()
+
+                if wastage:
+                    dispatch_item = db.query(models.DispatchItem).filter(
+                        models.DispatchItem.dispatch_record_id == dispatch.id,
+                        models.DispatchItem.inventory_id == None,
+                        or_(
+                            models.DispatchItem.barcode_id == wastage.barcode_id,
+                            models.DispatchItem.barcode_id == wastage.reel_no
+                        )
+                    ).first()
+
+                    if dispatch_item:
+                        db.delete(dispatch_item)
+
+                    # Revert wastage status
+                    wastage.status = "available"
+                    logger.info(f"Reverted wastage {wastage.barcode_id or wastage.reel_no} to available")
+
+            # Remove manual cut rolls
+            for manual_id in removed_manual_ids:
+                manual_roll = db.query(models.ManualCutRoll).filter(
+                    models.ManualCutRoll.id == manual_id
+                ).first()
+
+                if manual_roll:
+                    dispatch_item = db.query(models.DispatchItem).filter(
+                        models.DispatchItem.dispatch_record_id == dispatch.id,
+                        models.DispatchItem.inventory_id == None,
+                        models.DispatchItem.barcode_id == manual_roll.barcode_id
+                    ).first()
+
+                    if dispatch_item:
+                        db.delete(dispatch_item)
+
+                    # Revert manual roll status
+                    manual_roll.status = "available"
+                    manual_roll.location = "warehouse"
+                    logger.info(f"Reverted manual roll {manual_roll.barcode_id} to available")
+
+            # Flush deletions to database before adding new items
+            if removed_inventory_ids or removed_wastage_ids or removed_manual_ids:
+                logger.info("Flushing item removals to database...")
+                db.flush()
+
+            # ===== 5. ADD NEW ITEMS =====
+
+            # Import ID generator
+            from ..services.id_generator import FrontendIDGenerator
+            from sqlalchemy import func
+
+            # Add regular inventory items
+            for inv_id in added_inventory_ids:
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == inv_id
+                ).first()
+
+                if not inventory:
+                    logger.warning(f"Inventory {inv_id} not found, skipping")
+                    continue
+
+                if inventory.status != "available":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Inventory item {inventory.barcode_id} is not available (status: {inventory.status})"
+                    )
+
+                # Create dispatch item
+                dispatch_item = models.DispatchItem(
+                    dispatch_record_id=dispatch.id,
+                    inventory_id=inventory.id,
+                    qr_code=inventory.qr_code or inventory.barcode_id,
+                    barcode_id=inventory.barcode_id,
+                    width_inches=float(inventory.width_inches),
+                    weight_kg=float(inventory.weight_kg),
+                    paper_spec=f"{inventory.paper.gsm}gsm, {inventory.paper.bf}bf, {inventory.paper.shade}" if inventory.paper else "Unknown"
+                )
+                db.add(dispatch_item)
+                db.flush()  # Get ID
+
+                # Generate frontend ID
+                dispatch_item.frontend_id = FrontendIDGenerator.generate_frontend_id("dispatch_item", db)
+
+                # Mark inventory as used
+                inventory.status = "used"
+                inventory.location = "dispatched"
+                logger.info(f"Marked inventory {inventory.barcode_id} as used")
+
+                # Update matching order items
+                if inventory.paper:
+                    matching_order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
+                        models.OrderItem.paper_id == inventory.paper_id,
+                        models.OrderItem.width_inches == float(inventory.width_inches),
+                        models.OrderMaster.status == "in_process",
+                        models.OrderItem.item_status == "in_warehouse"
+                    ).limit(1).all()
+
+                    for order_item in matching_order_items:
+                        order_item.item_status = "completed"
+                        order_item.dispatched_at = func.now()
+                        logger.info(f"Marked order item {order_item.frontend_id} as completed")
+
+                        # Check if order is complete
+                        order = db.query(models.OrderMaster).filter(
+                            models.OrderMaster.id == order_item.order_id
+                        ).first()
+
+                        if order:
+                            all_items_completed = all(
+                                oi.item_status == "completed" for oi in order.order_items
+                            )
+                            if all_items_completed and order.status != "completed":
+                                order.status = "completed"
+                                logger.info(f"Marked order {order.frontend_id} as completed")
+
+            # Add wastage items
+            for wastage_id in added_wastage_ids:
+                wastage = db.query(models.WastageInventory).filter(
+                    models.WastageInventory.id == wastage_id
+                ).first()
+
+                if not wastage:
+                    logger.warning(f"Wastage item {wastage_id} not found, skipping")
+                    continue
+
+                if wastage.status != "available":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Wastage item {wastage.barcode_id or wastage.reel_no} is not available (status: {wastage.status})"
+                    )
+
+                # Create dispatch item
+                dispatch_item = models.DispatchItem(
+                    dispatch_record_id=dispatch.id,
+                    inventory_id=None,
+                    qr_code=wastage.barcode_id or wastage.frontend_id or "",
+                    barcode_id=wastage.reel_no or wastage.barcode_id,
+                    width_inches=float(wastage.width_inches) if wastage.width_inches else 0.0,
+                    weight_kg=float(wastage.weight_kg) if wastage.weight_kg else 0.0,
+                    paper_spec=f"{wastage.paper.gsm}gsm, {wastage.paper.bf}bf, {wastage.paper.shade}" if wastage.paper else "Unknown"
+                )
+                db.add(dispatch_item)
+                db.flush()
+
+                # Generate frontend ID
+                dispatch_item.frontend_id = FrontendIDGenerator.generate_frontend_id("dispatch_item", db)
+
+                # Mark wastage as used
+                wastage.status = "used"
+                logger.info(f"Marked wastage {wastage.barcode_id or wastage.reel_no} as used")
+
+            # Add manual cut rolls
+            for manual_id in added_manual_ids:
+                manual_roll = db.query(models.ManualCutRoll).filter(
+                    models.ManualCutRoll.id == manual_id
+                ).first()
+
+                if not manual_roll:
+                    logger.warning(f"Manual cut roll {manual_id} not found, skipping")
+                    continue
+
+                if manual_roll.status != "available":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Manual cut roll {manual_roll.barcode_id} is not available (status: {manual_roll.status})"
+                    )
+
+                # Create dispatch item
+                dispatch_item = models.DispatchItem(
+                    dispatch_record_id=dispatch.id,
+                    inventory_id=None,
+                    qr_code=manual_roll.barcode_id or manual_roll.frontend_id or "",
+                    barcode_id=manual_roll.barcode_id,
+                    width_inches=float(manual_roll.width_inches),
+                    weight_kg=float(manual_roll.weight_kg),
+                    paper_spec=f"{manual_roll.paper.gsm}gsm, {manual_roll.paper.bf}bf, {manual_roll.paper.shade}" if manual_roll.paper else "Unknown"
+                )
+                db.add(dispatch_item)
+                db.flush()
+
+                # Generate frontend ID
+                dispatch_item.frontend_id = FrontendIDGenerator.generate_frontend_id("dispatch_item", db)
+
+                # Mark manual roll as used
+                manual_roll.status = "used"
+                manual_roll.location = "dispatched"
+                logger.info(f"Marked manual roll {manual_roll.barcode_id} as used")
+
+        # ===== 6. RECALCULATE TOTALS =====
+        if items_changed:
+            # Refresh dispatch items
+            db.refresh(dispatch)
+
+            total_items = len(dispatch.dispatch_items)
+            total_weight = sum(float(item.weight_kg) for item in dispatch.dispatch_items)
+
+            dispatch.total_items = total_items
+            dispatch.total_weight_kg = total_weight
+
+            logger.info(f"Updated dispatch totals - Items: {total_items}, Weight: {total_weight}kg")
+
+        # ===== 7. COMMIT TRANSACTION =====
+        db.commit()
+        db.refresh(dispatch)
+
+        return {
+            "message": "Dispatch record updated successfully",
+            "dispatch_id": str(dispatch.id),
+            "dispatch_number": dispatch.dispatch_number,
+            "total_items": dispatch.total_items,
+            "total_weight_kg": float(dispatch.total_weight_kg) if dispatch.total_weight_kg else 0.0,
+            "updated_fields": {
+                "vehicle_details": update_data.vehicle_number is not None or update_data.driver_name is not None or update_data.driver_mobile is not None,
+                "items_changed": items_changed
+            }
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dispatch ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating dispatch record: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # PDF GENERATION ENDPOINTS
 # ============================================================================

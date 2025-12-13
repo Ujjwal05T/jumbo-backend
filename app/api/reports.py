@@ -1899,13 +1899,18 @@ def get_order_item_tracking(
                         "id": str(dispatch_item.id),
                         "dispatch_record_id": str(dispatch_item.dispatch_record_id),
                         "dispatch_frontend_id": dispatch_item.dispatch_record.frontend_id if dispatch_item.dispatch_record else None,
+                        "dispatch_number": dispatch_item.dispatch_record.dispatch_number if dispatch_item.dispatch_record else None,
                         "inventory_id": str(dispatch_item.inventory_id),
                         "inventory_frontend_id": dispatch_item.inventory.frontend_id if dispatch_item.inventory else None,
-                        "quantity_dispatched": dispatch_item.quantity_dispatched,
+                        "barcode_id": dispatch_item.barcode_id,
+                        "qr_code": dispatch_item.qr_code,
                         "weight_kg": float(dispatch_item.weight_kg) if dispatch_item.weight_kg else 0,
+                        "width_inches": float(dispatch_item.width_inches) if dispatch_item.width_inches else 0,
+                        "paper_spec": dispatch_item.paper_spec,
                         "dispatch_date": dispatch_item.dispatch_record.dispatch_date.isoformat() if dispatch_item.dispatch_record and dispatch_item.dispatch_record.dispatch_date else None,
                         "vehicle_number": dispatch_item.dispatch_record.vehicle_number if dispatch_item.dispatch_record else None,
-                        "status": dispatch_item.dispatch_record.status if dispatch_item.dispatch_record else None
+                        "status": dispatch_item.status,
+                        "dispatched_at": dispatch_item.dispatched_at.isoformat() if dispatch_item.dispatched_at else None
                     }
                     item_data["dispatch_records"].append(dispatch_data)
 
@@ -1974,6 +1979,329 @@ def get_order_item_tracking(
         raise
     except Exception as e:
         logger.error(f"Error in order item tracking: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/order-details/{order_frontend_id}", tags=["Order Tracking"])
+def get_order_details_with_inventory(
+    order_frontend_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get order details including:
+    - Basic order information
+    - Cut rolls linked to this order (from inventory_master with allocated_to_order_id)
+    - Pending order items linked to this order (from pending_order_item with original_order_id)
+    """
+    try:
+        # Get the order
+        order = db.query(models.OrderMaster).options(
+            joinedload(models.OrderMaster.client)
+        ).filter(models.OrderMaster.frontend_id == order_frontend_id).first()
+
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order {order_frontend_id} not found")
+
+        # Get cut rolls from inventory allocated to this order
+        cut_rolls = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.parent_118_roll)
+        ).filter(
+            models.InventoryMaster.allocated_to_order_id == order.id
+        ).order_by(models.InventoryMaster.created_at.desc()).all()
+
+        # Format cut rolls data
+        cut_rolls_data = []
+        for roll in cut_rolls:
+            cut_rolls_data.append({
+                "id": str(roll.id),
+                "frontend_id": roll.frontend_id,
+                "barcode_id": roll.barcode_id,
+                "qr_code": roll.qr_code,
+                "roll_type": roll.roll_type,
+                "width_inches": float(roll.width_inches) if roll.width_inches else 0,
+                "weight_kg": float(roll.weight_kg) if roll.weight_kg else 0,
+                "status": roll.status,
+                "location": roll.location,
+                "production_date": roll.production_date.isoformat() if roll.production_date else None,
+                "paper_specs": {
+                    "name": roll.paper.name if roll.paper else "Unknown",
+                    "gsm": roll.paper.gsm if roll.paper else None,
+                    "bf": float(roll.paper.bf) if roll.paper and roll.paper.bf else None,
+                    "shade": roll.paper.shade if roll.paper else None,
+                    "type": roll.paper.type if roll.paper else None
+                },
+                "parent_jumbo_roll": {
+                    "barcode_id": roll.parent_jumbo.barcode_id if roll.parent_jumbo else None,
+                    "frontend_id": roll.parent_jumbo.frontend_id if roll.parent_jumbo else None
+                },
+                "parent_118_roll": {
+                    "barcode_id": roll.parent_118_roll.barcode_id if roll.parent_118_roll else None,
+                    "frontend_id": roll.parent_118_roll.frontend_id if roll.parent_118_roll else None
+                }
+            })
+
+        # Get pending order items linked to this order (only with status = 'pending')
+        pending_items = db.query(models.PendingOrderItem).options(
+            joinedload(models.PendingOrderItem.production_order)
+        ).filter(
+            models.PendingOrderItem.original_order_id == order.id,
+            models.PendingOrderItem._status == 'pending'
+        ).order_by(models.PendingOrderItem.created_at.desc()).all()
+
+        # Format pending items data
+        pending_items_data = []
+        for item in pending_items:
+            pending_items_data.append({
+                "id": str(item.id),
+                "frontend_id": item.frontend_id,
+                "status": item.status,
+                "reason": item.reason,
+                "quantity_pending": item.quantity_pending,
+                "quantity_fulfilled": item.quantity_fulfilled,
+                "width_inches": float(item.width_inches) if item.width_inches else 0,
+                "paper_specs": {
+                    "gsm": item.gsm,
+                    "bf": float(item.bf) if item.bf else None,
+                    "shade": item.shade
+                },
+                "production_order": {
+                    "frontend_id": item.production_order.frontend_id if item.production_order else None,
+                    "status": item.production_order.status if item.production_order else None
+                },
+                "created_at": item.created_at.isoformat(),
+                "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
+                "included_in_plan_generation": item.included_in_plan_generation,
+                "plan_generation_date": item.plan_generation_date.isoformat() if item.plan_generation_date else None
+            })
+
+        # Return structured data
+        return {
+            "status": "success",
+            "data": {
+                "order": {
+                    "id": str(order.id),
+                    "frontend_id": order.frontend_id,
+                    "client_company_name": order.client.company_name if order.client else "Unknown",
+                    "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+                    "status": order.status,
+                    "priority": order.priority,
+                    "payment_type": order.payment_type,
+                    "created_at": order.created_at.isoformat(),
+                    "updated_at": order.updated_at.isoformat() if order.updated_at else None
+                },
+                "cut_rolls": cut_rolls_data,
+                "pending_items": pending_items_data,
+                "summary": {
+                    "total_cut_rolls": len(cut_rolls_data),
+                    "total_pending_items": len(pending_items_data),
+                    "total_allocated_weight": sum(roll["weight_kg"] for roll in cut_rolls_data)
+                }
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching order details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/plan-details/{plan_frontend_id}", tags=["Plan Tracking"])
+def get_plan_details_with_cut_rolls(
+    plan_frontend_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get plan details including:
+    - Basic plan information
+    - All cut rolls created from this plan's jumbo rolls
+    - Client information from allocated orders
+    - Parent roll hierarchy (jumbo and 118" rolls)
+    """
+    try:
+        # Get the plan
+        plan = db.query(models.PlanMaster).filter(
+            models.PlanMaster.frontend_id == plan_frontend_id
+        ).first()
+
+        if not plan:
+            raise HTTPException(status_code=404, detail=f"Plan {plan_frontend_id} not found")
+
+        # Get all inventory items linked to this plan via PlanInventoryLink
+        plan_inventory_links = db.query(models.PlanInventoryLink).options(
+            joinedload(models.PlanInventoryLink.inventory)
+        ).filter(
+            models.PlanInventoryLink.plan_id == plan.id
+        ).all()
+
+        # Collect all cut rolls from various sources
+        all_cut_roll_ids = set()
+
+        for link in plan_inventory_links:
+            inv = link.inventory
+            if not inv:
+                continue
+
+            if inv.roll_type == 'cut':
+                # Direct cut roll link
+                all_cut_roll_ids.add(inv.id)
+            elif inv.roll_type == '118':
+                # 118" roll - find its cut roll children
+                cut_children = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.parent_118_roll_id == inv.id,
+                    models.InventoryMaster.roll_type == 'cut'
+                ).all()
+                for child in cut_children:
+                    all_cut_roll_ids.add(child.id)
+            elif inv.roll_type == 'jumbo':
+                # Jumbo roll - find 118" children, then their cut roll children
+                rolls_118 = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.parent_jumbo_id == inv.id
+                ).all()
+                for roll_118 in rolls_118:
+                    cut_children = db.query(models.InventoryMaster).filter(
+                        models.InventoryMaster.parent_118_roll_id == roll_118.id,
+                        models.InventoryMaster.roll_type == 'cut'
+                    ).all()
+                    for child in cut_children:
+                        all_cut_roll_ids.add(child.id)
+
+        # Also get cut rolls directly linked via wastage_source_plan_id
+        wastage_rolls = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.wastage_source_plan_id == plan.id,
+            models.InventoryMaster.roll_type == 'cut'
+        ).all()
+        for roll in wastage_rolls:
+            all_cut_roll_ids.add(roll.id)
+
+        # Fetch all cut rolls with their relationships
+        cut_rolls = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.parent_118_roll),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+        ).filter(
+            models.InventoryMaster.id.in_(list(all_cut_roll_ids))
+        ).order_by(models.InventoryMaster.created_at.desc()).all() if all_cut_roll_ids else []
+
+        # Format cut rolls data
+        cut_rolls_data = []
+        for roll in cut_rolls:
+            cut_rolls_data.append({
+                "barcode_id": roll.barcode_id,
+                "width_inches": float(roll.width_inches) if roll.width_inches else 0,
+                "weight_kg": float(roll.weight_kg) if roll.weight_kg else 0,
+                "status": roll.status,
+                "location": roll.location,
+                "client_name": roll.allocated_order.client.company_name if roll.allocated_order and roll.allocated_order.client else None,
+                "order_id": roll.allocated_order.frontend_id if roll.allocated_order else None,
+                "parent_118_roll": roll.parent_118_roll.barcode_id if roll.parent_118_roll else None,
+                "parent_jumbo_roll": roll.parent_jumbo.barcode_id if roll.parent_jumbo else None,
+                "paper_name": roll.paper.name if roll.paper else None,
+                "gsm": roll.paper.gsm if roll.paper else None,
+                "bf": float(roll.paper.bf) if roll.paper and roll.paper.bf else None,
+                "shade": roll.paper.shade if roll.paper else None
+            })
+
+        # Return structured data
+        return {
+            "status": "success",
+            "data": {
+                "plan": {
+                    "frontend_id": plan.frontend_id,
+                    "name": plan.name,
+                    "status": plan.status,
+                    "expected_waste_percentage": float(plan.expected_waste_percentage) if plan.expected_waste_percentage else None,
+                    "actual_waste_percentage": float(plan.actual_waste_percentage) if plan.actual_waste_percentage else None,
+                    "created_at": plan.created_at.isoformat()
+                },
+                "cut_rolls": cut_rolls_data,
+                "summary": {
+                    "total_cut_rolls": len(cut_rolls_data),
+                    "total_weight": sum(roll["weight_kg"] for roll in cut_rolls_data),
+                    "unique_clients": len(set(roll["client_name"] for roll in cut_rolls_data if roll["client_name"]))
+                }
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching plan details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/reports/barcode-details/{barcode_id}", tags=["Barcode Details"])
+def get_barcode_details(
+    barcode_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get details for a barcode including dispatch information.
+    For SCR (Stock/wastage) barcodes: Returns source wastage inventory reel number + dispatch info.
+    For CR (regular cut rolls): Returns dispatch info.
+    """
+    try:
+        # Get the inventory record with this barcode
+        inventory = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.barcode_id == barcode_id
+        ).first()
+
+        if not inventory:
+            raise HTTPException(status_code=404, detail=f"Barcode {barcode_id} not found")
+
+        # For SCR barcodes (wastage rolls), extract wastage inventory details from QR code
+        wastage_details = None
+        if inventory.is_wastage_roll and inventory.qr_code:
+            # QR code format: WCR_{wastage_frontend_id}_{plan_id}
+            # Extract wastage frontend_id from QR code
+            parts = inventory.qr_code.split('_')
+            if len(parts) >= 2 and parts[0] == 'WCR':
+                wastage_frontend_id = parts[1]
+
+                # Query wastage_inventory for this frontend_id
+                wastage = db.query(models.WastageInventory).filter(
+                    models.WastageInventory.frontend_id == wastage_frontend_id
+                ).first()
+
+                if wastage:
+                    wastage_details = {
+                        "source": "Stock",
+                        "reel_no": wastage.reel_no or wastage.barcode_id,
+                        "wastage_barcode": wastage.barcode_id,
+                        "wastage_frontend_id": wastage.frontend_id
+                    }
+
+        # Get dispatch information for this inventory item
+        dispatch_info = None
+        dispatch_item = db.query(models.DispatchItem).options(
+            joinedload(models.DispatchItem.dispatch_record).joinedload(models.DispatchRecord.client)
+        ).filter(
+            models.DispatchItem.inventory_id == inventory.id
+        ).first()
+
+        if dispatch_item and dispatch_item.dispatch_record:
+            dispatch_record = dispatch_item.dispatch_record
+            dispatch_info = {
+                "dispatch_number": dispatch_record.dispatch_number,
+                "dispatch_date": dispatch_record.dispatch_date.isoformat() if dispatch_record.dispatch_date else None,
+                "client_name": dispatch_record.client.company_name if dispatch_record.client else None,
+                "dispatch_frontend_id": dispatch_record.frontend_id
+            }
+
+        return {
+            "status": "success",
+            "data": {
+                "barcode_id": barcode_id,
+                "is_wastage": inventory.is_wastage_roll,
+                "wastage_details": wastage_details,
+                "dispatch_info": dispatch_info
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching barcode details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/reports/order-tracking/fix-allocation", tags=["Order Tracking"])
@@ -3692,4 +4020,376 @@ def get_all_cut_rolls_report(
 
     except Exception as e:
         logger.error(f"Error in all cut rolls report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/all-cut-rolls-filtered", tags=["All Cut Rolls Report"])
+def get_all_cut_rolls_filtered_report(
+    # Filter parameters
+    omni_search: Optional[str] = Query(None, description="Search across barcode, paper name, client, order, plan"),
+    status_filter: Optional[str] = Query(None, description="Status filter: all, weight_updated, available, cutting, used"),
+    paper_name: Optional[str] = Query(None, description="Paper name filter"),
+    gsm: Optional[int] = Query(None, description="GSM filter"),
+    width: Optional[float] = Query(None, description="Width filter (inches)"),
+    location: Optional[str] = Query(None, description="Location filter"),
+    client_name: Optional[str] = Query(None, description="Client company name filter"),
+    order_id: Optional[str] = Query(None, description="Order frontend_id filter"),
+    plan_id: Optional[str] = Query(None, description="Plan frontend_id filter"),
+    from_production_date: Optional[str] = Query(None, description="Production date from (ISO format UTC)"),
+    to_production_date: Optional[str] = Query(None, description="Production date to (ISO format UTC)"),
+
+    db: Session = Depends(get_db)
+):
+    """
+    All Cut Rolls Report with Server-Side Filtering (No Pagination)
+
+    This endpoint applies filters on the backend and returns ALL matching results.
+    At least one filter should be applied to get results.
+
+    Active Filters (required - at least one):
+    - status_filter: available, cutting, used, weight_updated (available+used)
+    - gsm: Filter by GSM value (exact match)
+    - client_name: Filter by client company name (exact match)
+    - order_id: Filter by order frontend_id (exact match)
+    - plan_id: Filter by plan frontend_id (exact match)
+    - from_production_date: Filter by production date from (UTC)
+    - to_production_date: Filter by production date to (UTC)
+
+    Deprecated Filters (kept for backward compatibility, not used in UI):
+    - omni_search: Now handled client-side
+    - paper_name: Now handled client-side
+    - width: Now handled client-side
+    - location: Now handled client-side
+
+    Returns:
+    - ALL filtered cut rolls with related data (no pagination)
+    - Total count of results
+    """
+    try:
+        # Check if at least one filter is applied
+        # Note: omni_search, paper_name, width, location removed (now client-side)
+        has_filters = any([
+            status_filter and status_filter != 'all',
+            gsm is not None,
+            client_name,
+            order_id,
+            plan_id,
+            from_production_date,
+            to_production_date
+        ])
+
+        if not has_filters:
+            return {
+                "success": True,
+                "data": {
+                    "cut_rolls": [],
+                    "total_items": 0,
+                    "message": "Please apply at least one filter to view results"
+                }
+            }
+
+        # Base query to get all cut rolls with eager loading
+        base_query = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+        ).filter(
+            models.InventoryMaster.roll_type == 'cut'
+        )
+
+        # Apply filters
+
+        # Status filter
+        if status_filter and status_filter != 'all':
+            if status_filter == 'weight_updated':
+                # Weight Updated = available + used
+                base_query = base_query.filter(
+                    or_(
+                        models.InventoryMaster.status == 'available',
+                        models.InventoryMaster.status == 'used'
+                    )
+                )
+            else:
+                base_query = base_query.filter(models.InventoryMaster.status == status_filter)
+
+        # GSM filter (exact match)
+        if gsm is not None:
+            base_query = base_query.join(
+                models.PaperMaster,
+                models.InventoryMaster.paper_id == models.PaperMaster.id
+            ).filter(models.PaperMaster.gsm == gsm)
+
+        # Width filter (exact match)
+        if width is not None:
+            base_query = base_query.filter(models.InventoryMaster.width_inches == width)
+
+        # Location filter (partial match, case-insensitive)
+        if location:
+            base_query = base_query.filter(
+                models.InventoryMaster.location.ilike(f"%{location}%")
+            )
+
+        # Production date range filter (using updated_at as production date)
+        if from_production_date:
+            try:
+                from_date = datetime.fromisoformat(from_production_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.InventoryMaster.updated_at >= from_date)
+            except ValueError:
+                logger.warning(f"Invalid from_production_date format: {from_production_date}")
+
+        if to_production_date:
+            try:
+                to_date = datetime.fromisoformat(to_production_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.InventoryMaster.updated_at <= to_date)
+            except ValueError:
+                logger.warning(f"Invalid to_production_date format: {to_production_date}")
+
+        # Client name filter (exact match, case-insensitive)
+        if client_name:
+            base_query = base_query.join(
+                models.OrderMaster,
+                models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id,
+                isouter=True
+            ).join(
+                models.ClientMaster,
+                models.OrderMaster.client_id == models.ClientMaster.id,
+                isouter=True
+            ).filter(func.lower(models.ClientMaster.company_name) == func.lower(client_name))
+
+        # Order ID filter (exact match)
+        if order_id:
+            base_query = base_query.join(
+                models.OrderMaster,
+                models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id,
+                isouter=True
+            ).filter(models.OrderMaster.frontend_id == order_id)
+
+        # Plan ID filter (exact match)
+        if plan_id:
+            base_query = base_query.join(
+                models.PlanInventoryLink,
+                models.InventoryMaster.id == models.PlanInventoryLink.inventory_id,
+                isouter=True
+            ).join(
+                models.PlanMaster,
+                models.PlanInventoryLink.plan_id == models.PlanMaster.id,
+                isouter=True
+            ).filter(models.PlanMaster.frontend_id == plan_id)
+
+        # Paper name filter (partial match, case-insensitive)
+        if paper_name:
+            if not gsm:  # Only join if not already joined by GSM filter
+                base_query = base_query.join(
+                    models.PaperMaster,
+                    models.InventoryMaster.paper_id == models.PaperMaster.id
+                )
+            base_query = base_query.filter(
+                models.PaperMaster.name.ilike(f"%{paper_name}%")
+            )
+
+        # Omni search (searches across multiple fields)
+        if omni_search:
+            search_term = f"%{omni_search}%"
+
+            # Need to join related tables for omni search
+            if not any([client_name, order_id]):  # Join order/client if not already joined
+                base_query = base_query.outerjoin(
+                    models.OrderMaster,
+                    models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id
+                ).outerjoin(
+                    models.ClientMaster,
+                    models.OrderMaster.client_id == models.ClientMaster.id
+                )
+
+            if not plan_id:  # Join plan if not already joined
+                base_query = base_query.outerjoin(
+                    models.PlanInventoryLink,
+                    models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
+                ).outerjoin(
+                    models.PlanMaster,
+                    models.PlanInventoryLink.plan_id == models.PlanMaster.id
+                )
+
+            if not any([gsm, paper_name]):  # Join paper if not already joined
+                base_query = base_query.outerjoin(
+                    models.PaperMaster,
+                    models.InventoryMaster.paper_id == models.PaperMaster.id
+                )
+
+            # Create parent roll alias for searching
+            Parent118 = models.InventoryMaster
+
+            base_query = base_query.outerjoin(
+                Parent118,
+                models.InventoryMaster.parent_118_roll_id == Parent118.id
+            )
+
+            # Apply omni search filter
+            base_query = base_query.filter(
+                or_(
+                    models.InventoryMaster.barcode_id.ilike(search_term),
+                    models.PaperMaster.name.ilike(search_term),
+                    models.ClientMaster.company_name.ilike(search_term),
+                    models.OrderMaster.frontend_id.ilike(search_term),
+                    models.PlanMaster.frontend_id.ilike(search_term),
+                    Parent118.barcode_id.ilike(search_term)
+                )
+            )
+
+        # Get total count
+        total_count = base_query.count()
+
+        # Get ALL filtered results ordered by creation date (newest first)
+        # No pagination - returns all matching records
+        cut_rolls = base_query.order_by(
+            models.InventoryMaster.created_at.desc()
+        ).all()
+
+        # Process cut rolls data (same as original endpoint)
+        cut_rolls_data = []
+        for cut_roll in cut_rolls:
+            # Get paper specifications
+            paper = cut_roll.paper
+            paper_specs = {
+                "paper_name": paper.name if paper else "Unknown",
+                "gsm": paper.gsm if paper else 0,
+                "bf": float(paper.bf) if paper and paper.bf else 0,
+                "shade": paper.shade if paper else "Unknown",
+                "type": paper.type if paper else "Unknown"
+            }
+
+            # Get parent 11-inch roll information
+            parent_118_roll = cut_roll.parent_118_roll
+            parent_118_info = None
+            parent_jumbo_info = None
+
+            if parent_118_roll:
+                parent_118_info = {
+                    "id": str(parent_118_roll.id),
+                    "frontend_id": parent_118_roll.frontend_id or "N/A",
+                    "barcode_id": parent_118_roll.barcode_id or "N/A",
+                    "width_inches": float(parent_118_roll.width_inches),
+                    "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0,
+                    "roll_sequence": parent_118_roll.roll_sequence
+                }
+
+                # Get parent jumbo roll information
+                parent_jumbo = parent_118_roll.parent_jumbo
+                if parent_jumbo:
+                    parent_jumbo_info = {
+                        "id": str(parent_jumbo.id),
+                        "frontend_id": parent_jumbo.frontend_id or "N/A",
+                        "barcode_id": parent_jumbo.barcode_id or "N/A",
+                        "width_inches": float(parent_jumbo.width_inches),
+                        "weight_kg": float(parent_jumbo.weight_kg) if parent_jumbo.weight_kg else 0
+                    }
+                else:
+                    # If no jumbo parent, check if 118 roll itself is a jumbo
+                    if parent_118_roll.roll_type == 'jumbo':
+                        parent_jumbo_info = {
+                            "id": str(parent_118_roll.id),
+                            "frontend_id": parent_118_roll.frontend_id or "N/A",
+                            "barcode_id": parent_118_roll.barcode_id or "N/A",
+                            "width_inches": float(parent_118_roll.width_inches),
+                            "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0
+                        }
+
+            # Get plan information
+            plan_info = None
+            if cut_roll.plan_inventory:
+                for plan_link in cut_roll.plan_inventory:
+                    if plan_link.plan:
+                        plan_info = {
+                            "id": str(plan_link.plan.id),
+                            "frontend_id": plan_link.plan.frontend_id or "N/A",
+                            "name": plan_link.plan.name or "N/A",
+                            "status": plan_link.plan.status,
+                            "created_at": plan_link.plan.created_at.isoformat() if plan_link.plan.created_at else None
+                        }
+                        break  # Take the first plan found
+
+            # Get allocated order and client information
+            order_info = None
+            if cut_roll.allocated_order:
+                allocated_order = cut_roll.allocated_order
+                order_info = {
+                    "id": str(allocated_order.id),
+                    "frontend_id": allocated_order.frontend_id or "N/A",
+                    "client_company_name": allocated_order.client.company_name if allocated_order.client else "N/A"
+                }
+            wastage_details = None
+            if cut_roll.is_wastage_roll and cut_roll.qr_code:
+            # QR code format: WCR_{wastage_frontend_id}_{plan_id}
+            # Extract wastage frontend_id from QR code
+                parts = cut_roll.qr_code.split('_')
+                if len(parts) >= 2 and parts[0] == 'WCR':
+                    wastage_frontend_id = parts[1]
+
+                # Query wastage_inventory for this frontend_id
+                    wastage = db.query(models.WastageInventory).filter(
+                        models.WastageInventory.frontend_id == wastage_frontend_id
+                    ).first()
+
+                    if wastage:
+                        wastage_details = {
+                            "source": "Stock",
+                            "reel_no": wastage.reel_no or wastage.barcode_id,
+                            "wastage_barcode": wastage.barcode_id,
+                            "wastage_frontend_id": wastage.frontend_id
+                        }
+
+            # Compile cut roll data
+            cut_roll_data = {
+                "id": str(cut_roll.id),
+                "frontend_id": cut_roll.frontend_id or "N/A",
+                "barcode_id": cut_roll.barcode_id or "N/A",
+                "width_inches": float(cut_roll.width_inches),
+                "weight_kg": float(cut_roll.weight_kg) if cut_roll.weight_kg else 0,
+                "location": cut_roll.location or "N/A",
+                "status": cut_roll.status,
+                "created_at": cut_roll.created_at.isoformat() if cut_roll.created_at else None,
+                "updated_at": cut_roll.updated_at.isoformat() if cut_roll.updated_at else None,
+                "production_date": cut_roll.production_date.isoformat() if cut_roll.production_date else None,
+                "roll_sequence": cut_roll.roll_sequence,
+                "individual_roll_number": cut_roll.individual_roll_number,
+
+                # Related data
+                "paper_specs": paper_specs,
+                "parent_118_roll": parent_118_info,
+                "parent_jumbo_roll": parent_jumbo_info,
+                "plan_info": plan_info,
+                "allocated_order": order_info,
+                "wastage_details": wastage_details,
+
+                # Source tracking
+                "source_type": cut_roll.source_type,
+                "is_wastage_roll": cut_roll.is_wastage_roll
+            }
+
+            cut_rolls_data.append(cut_roll_data)
+
+        return {
+            "success": True,
+            "data": {
+                "cut_rolls": cut_rolls_data,
+                "total_items": total_count,
+                "filters_applied": {
+                    "omni_search": omni_search,
+                    "status_filter": status_filter,
+                    "paper_name": paper_name,
+                    "gsm": gsm,
+                    "width": width,
+                    "location": location,
+                    "client_name": client_name,
+                    "order_id": order_id,
+                    "plan_id": plan_id,
+                    "from_production_date": from_production_date,
+                    "to_production_date": to_production_date
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error in filtered cut rolls report: {e}")
         raise HTTPException(status_code=500, detail=str(e))

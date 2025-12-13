@@ -83,6 +83,20 @@
 - `POST /auth/register` - Register a new user in UserMaster
 - `POST /auth/login` - Authenticate user and return user information
 
+## Order Tracking Endpoints
+
+- `GET /reports/order-tracking/{order_frontend_id}` - Get comprehensive tracking information for all order items
+- `GET /reports/order-details/{order_frontend_id}` - Get order details including cut rolls and pending items
+- `POST /reports/order-tracking/fix-allocation` - Fix inventory allocation mismatches
+
+## Plan Tracking Endpoints
+
+- `GET /reports/plan-details/{plan_frontend_id}` - Get plan details including cut rolls and client information
+
+## Barcode Details Endpoints
+
+- `GET /reports/barcode-details/{barcode_id}` - Get barcode details including wastage inventory reel number for SCR barcodes
+
 ## Cutting Algorithm Endpoints
 
 - `POST /cutting/generate-plan` - Generate cutting plan from roll specifications
