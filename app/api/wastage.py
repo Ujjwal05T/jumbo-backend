@@ -356,16 +356,120 @@ def search_wastage(
         query = db.query(models.WastageInventory).options(
             joinedload(models.WastageInventory.paper)
         )
-        
+
         search_term = f"%{q.lower()}%"
         query = query.filter(
             models.WastageInventory.frontend_id.ilike(search_term) |
             models.WastageInventory.barcode_id.ilike(search_term)
         )
-        
+
         results = query.limit(limit).all()
         return results
-        
+
     except Exception as e:
         logger.error(f"Error searching wastage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/wastage/allocation/by-reel", response_model=schemas.WastageAllocationInventoryResponse, tags=["Wastage Inventory"])
+def get_wastage_allocation_by_reel_no(
+    reel_no: str = Query(..., description="Reel number from wastage inventory"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get wastage allocation details by reel_no.
+
+    This endpoint:
+    1. Finds the wastage record by reel_no in WastageInventory
+    2. Looks up the corresponding allocated inventory in InventoryMaster (where is_wastage_roll=True)
+    3. Returns inventory details along with order and client information
+    """
+    try:
+        # Step 1: Find wastage record by reel_no
+        wastage_record = db.query(models.WastageInventory).filter(
+            models.WastageInventory.reel_no == reel_no
+        ).first()
+
+        if not wastage_record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Wastage record with reel_no '{reel_no}' not found"
+            )
+
+        logger.info(f"🔍 Found wastage record: {wastage_record.frontend_id} with reel_no: {reel_no}")
+
+        # Step 2: Find corresponding InventoryMaster record
+        # QR code format: WCR_{wastage_frontend_id}_{plan_id}
+        wastage_frontend_id = wastage_record.frontend_id
+
+        inventory_record = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
+            joinedload(models.InventoryMaster.wastage_source_plan)
+        ).filter(
+            models.InventoryMaster.is_wastage_roll == True,
+            models.InventoryMaster.qr_code.like(f"WCR_{wastage_frontend_id}_%")
+        ).first()
+
+        if not inventory_record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No allocated inventory found for wastage {wastage_frontend_id}"
+            )
+
+        logger.info(f"✅ Found inventory record: {inventory_record.frontend_id} with QR: {inventory_record.qr_code}")
+
+        # Step 3: Build order info if allocated
+        order_info = None
+        if inventory_record.allocated_order:
+            order_info = {
+                "order_id": inventory_record.allocated_order.id,
+                "order_frontend_id": inventory_record.allocated_order.frontend_id,
+                "client_name": inventory_record.allocated_order.client.company_name if inventory_record.allocated_order.client else None
+            }
+            logger.info(f"📦 Order info: {order_info}")
+
+        # Step 3.5: Build plan info if available
+        plan_info = None
+        if inventory_record.wastage_source_plan:
+            plan_info = {
+                "plan_id": inventory_record.wastage_source_plan.id,
+                "plan_frontend_id": inventory_record.wastage_source_plan.frontend_id
+            }
+            logger.info(f"📋 Plan info: {plan_info}")
+
+        # Step 4: Build response
+        response_data = {
+            "id": inventory_record.id,
+            "frontend_id": inventory_record.frontend_id,
+            "paper_id": inventory_record.paper_id,
+            "width_inches": float(inventory_record.width_inches),
+            "weight_kg": float(inventory_record.weight_kg),
+            "roll_type": inventory_record.roll_type,
+            "location": inventory_record.location,
+            "status": inventory_record.status,
+            "qr_code": inventory_record.qr_code,
+            "barcode_id": inventory_record.barcode_id,
+            "production_date": inventory_record.production_date,
+            "allocated_to_order_id": inventory_record.allocated_to_order_id,
+            "is_wastage_roll": inventory_record.is_wastage_roll,
+            "wastage_source_order_id": inventory_record.wastage_source_order_id,
+            "wastage_source_plan_id": inventory_record.wastage_source_plan_id,
+            "parent_jumbo_id": inventory_record.parent_jumbo_id,
+            "parent_118_roll_id": inventory_record.parent_118_roll_id,
+            "roll_sequence": inventory_record.roll_sequence,
+            "individual_roll_number": inventory_record.individual_roll_number,
+            "created_at": inventory_record.created_at,
+            "created_by_id": inventory_record.created_by_id,
+            "paper": inventory_record.paper,
+            "order_info": order_info,
+            "plan_info": plan_info
+        }
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting wastage allocation by reel_no: {e}")
         raise HTTPException(status_code=500, detail=str(e))

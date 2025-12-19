@@ -893,6 +893,32 @@ def get_warehouse_items(
             client_name = client_company_name if client_company_name else "N/A"
             order_id = order_frontend_id if order_frontend_id else (str(item.allocated_to_order_id)[:8] + "..." if item.allocated_to_order_id else "N/A")
 
+            # Check if item is a wastage roll and fetch reel_no if it is
+            is_wastage_roll = getattr(item, 'is_wastage_roll', False)
+            reel_no = None
+
+            if is_wastage_roll and item.qr_code:
+                try:
+                    # QR code format: WCR_{wastage_frontend_id}_{plan_id}
+                    # Extract wastage_frontend_id
+                    if item.qr_code.startswith('WCR_'):
+                        parts = item.qr_code.split('_')
+                        if len(parts) >= 2:
+                            wastage_frontend_id = parts[1]
+
+                            # Query WastageInventory by frontend_id
+                            wastage_item = db.query(models.WastageInventory).filter(
+                                models.WastageInventory.frontend_id == wastage_frontend_id
+                            ).first()
+
+                            if wastage_item:
+                                reel_no = wastage_item.reel_no
+                                logger.debug(f"Found reel_no '{reel_no}' for wastage roll QR: {item.qr_code}")
+                            else:
+                                logger.warning(f"WastageInventory not found for frontend_id: {wastage_frontend_id}")
+                except Exception as e:
+                    logger.error(f"Error parsing QR code or fetching wastage reel_no: {e}")
+
             items_data.append({
                 "inventory_id": str(item.id),
                 "qr_code": item.qr_code,
@@ -908,7 +934,8 @@ def get_warehouse_items(
                 "client_name": client_name,
                 "order_id": order_id,
                 "allocated_to_order_id": str(item.allocated_to_order_id) if item.allocated_to_order_id else None,
-                "is_wastage_roll": getattr(item, 'is_wastage_roll', False)
+                "is_wastage_roll": is_wastage_roll,
+                "reel_no": reel_no
             })
         
         # Update filter criteria description

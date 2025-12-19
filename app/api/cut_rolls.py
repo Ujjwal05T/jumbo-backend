@@ -310,6 +310,25 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
 
         # Add wastage cut rolls from production (leftover pieces from cutting jumbo rolls)
         for w in created_wastage:
+            client_name = "Unknown Client"
+            order_date = None
+            order_frontend_id = None
+            if w.allocated_order:
+                order_frontend_id = w.allocated_order.frontend_id
+                if w.allocated_order.client:
+                    client_name = w.allocated_order.client.company_name
+                    order_date = w.allocated_order.created_at.isoformat()
+            if w.qr_code:
+                parts = w.qr_code.split('_')
+                if len(parts) >= 2 and parts[0] == 'WCR':
+                    wastage_frontend_id = parts[1]
+
+                # Query wastage_inventory for this frontend_id
+                    wastage = db.query(models.WastageInventory).filter(
+                        models.WastageInventory.frontend_id == wastage_frontend_id
+                    ).first()
+                    if wastage:
+                        reel_no = wastage.reel_no
             wastage_items.append({
                 "id": str(w.id),
                 "barcode_id": w.barcode_id,  # Use barcode_id directly from InventoryMaster
@@ -320,10 +339,11 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                     "bf": float(w.paper.bf) if w.paper else 0,
                     "shade": w.paper.shade if w.paper else ""
                 },
+                "reel_no": reel_no,
                 "status": w.status,
-                "client_name": "Wastage",
-                "order_frontend_id": None,
-                "order_date": None,
+                "client_name": client_name,
+                "order_frontend_id": order_frontend_id,
+                "order_date": order_date,
                 "created_at": w.created_at.isoformat() if w.created_at else None,
                 "location": w.location or "warehouse"
             })
@@ -399,112 +419,112 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                         "order_date": link.order.created_at.isoformat()
                     }
 
-        # Get wastage allocations with optimized single query
-        wastage_items = []
-        if plan.wastage_allocations:
-            import json
-            try:
-                wastage_allocations = json.loads(plan.wastage_allocations)
-                if wastage_allocations and isinstance(wastage_allocations, list):
-                    # Track seen wastage IDs to ensure uniqueness (keep first occurrence only)
-                    seen_wastage_ids = set()
-                    unique_wastage_allocations = []
+        # # Get wastage allocations with optimized single query - DISABLED (OLD FORMAT)
+        # wastage_items = []
+        # if plan.wastage_allocations:
+        #     import json
+        #     try:
+        #         wastage_allocations = json.loads(plan.wastage_allocations)
+        #         if wastage_allocations and isinstance(wastage_allocations, list):
+        #             # Track seen wastage IDs to ensure uniqueness (keep first occurrence only)
+        #             seen_wastage_ids = set()
+        #             unique_wastage_allocations = []
                     
-                    for alloc in wastage_allocations:
-                        wid = alloc.get("wastage_id")
-                        if wid:
-                            wid_str = str(wid)
-                            if wid_str not in seen_wastage_ids:
-                                seen_wastage_ids.add(wid_str)
-                                unique_wastage_allocations.append(alloc)
+        #             for alloc in wastage_allocations:
+        #                 wid = alloc.get("wastage_id")
+        #                 if wid:
+        #                     wid_str = str(wid)
+        #                     if wid_str not in seen_wastage_ids:
+        #                         seen_wastage_ids.add(wid_str)
+        #                         unique_wastage_allocations.append(alloc)
                     
-                    # Use only unique wastage allocations
-                    wastage_allocations = unique_wastage_allocations
+        #             # Use only unique wastage allocations
+        #             wastage_allocations = unique_wastage_allocations
                     
-                    wastage_ids = [
-                        UUID(alloc["wastage_id"]) if isinstance(alloc["wastage_id"], str) else alloc["wastage_id"]
-                        for alloc in wastage_allocations if alloc.get("wastage_id")
-                    ]
-                    order_ids = [
-                        UUID(alloc["order_id"]) if isinstance(alloc["order_id"], str) else alloc["order_id"]
-                        for alloc in wastage_allocations if alloc.get("order_id")
-                    ]
+        #             wastage_ids = [
+        #                 UUID(alloc["wastage_id"]) if isinstance(alloc["wastage_id"], str) else alloc["wastage_id"]
+        #                 for alloc in wastage_allocations if alloc.get("wastage_id")
+        #             ]
+        #             order_ids = [
+        #                 UUID(alloc["order_id"]) if isinstance(alloc["order_id"], str) else alloc["order_id"]
+        #                 for alloc in wastage_allocations if alloc.get("order_id")
+        #             ]
 
-                    # Query WastageInventory for reel_no using wastage_ids from wastage_allocations
-                    # And also query InventoryMaster for wastage data
-                    wastage_from_inventory = db.query(models.InventoryMaster).options(
-                        joinedload(models.InventoryMaster.paper),
-                        joinedload(models.InventoryMaster.wastage_source_order).joinedload(models.OrderMaster.client)
-                    ).filter(
-                        models.InventoryMaster.is_wastage_roll == True,
-                        models.InventoryMaster.wastage_source_plan_id == plan_id
-                    ).all()
+        #             # Query WastageInventory for reel_no using wastage_ids from wastage_allocations
+        #             # And also query InventoryMaster for wastage data
+        #             wastage_from_inventory = db.query(models.InventoryMaster).options(
+        #                 joinedload(models.InventoryMaster.paper),
+        #                 joinedload(models.InventoryMaster.wastage_source_order).joinedload(models.OrderMaster.client)
+        #             ).filter(
+        #                 models.InventoryMaster.is_wastage_roll == True,
+        #                 models.InventoryMaster.wastage_source_plan_id == plan_id
+        #             ).all()
 
-                    # Query WastageInventory to get reel_no for wastage items from allocations
-                    wastage_from_wastage_inventory = {}
-                    if wastage_ids:
-                        wastage_records = db.query(models.WastageInventory).options(
-                            joinedload(models.WastageInventory.paper)
-                        ).filter(models.WastageInventory.id.in_(wastage_ids)).all()
+        #             # Query WastageInventory to get reel_no for wastage items from allocations
+        #             wastage_from_wastage_inventory = {}
+        #             if wastage_ids:
+        #                 wastage_records = db.query(models.WastageInventory).options(
+        #                     joinedload(models.WastageInventory.paper)
+        #                 ).filter(models.WastageInventory.id.in_(wastage_ids)).all()
 
-                        # Create a mapping of wastage_id -> wastage_record (for reel_no)
-                        wastage_from_wastage_inventory = {str(w.id): w for w in wastage_records}
-                        logger.info(f"Found {len(wastage_from_wastage_inventory)} wastage records from WastageInventory for reel_no")
+        #                 # Create a mapping of wastage_id -> wastage_record (for reel_no)
+        #                 wastage_from_wastage_inventory = {str(w.id): w for w in wastage_records}
+        #                 logger.info(f"Found {len(wastage_from_wastage_inventory)} wastage records from WastageInventory for reel_no")
 
-                    logger.info(f"Found {len(wastage_from_inventory)} wastage items from InventoryMaster")
+        #             logger.info(f"Found {len(wastage_from_inventory)} wastage items from InventoryMaster")
 
-                    for wastage in wastage_from_inventory:
-                        # Get client information from wastage source order
-                        client_name = None
-                        order_date = None
+        #             for wastage in wastage_from_inventory:
+        #                 # Get client information from wastage source order
+        #                 client_name = None
+        #                 order_date = None
 
-                        if wastage.wastage_source_order:
-                            if hasattr(wastage.wastage_source_order, 'client') and wastage.wastage_source_order.client:
-                                client_name = wastage.wastage_source_order.client.company_name
-                            if hasattr(wastage.wastage_source_order, 'created_at'):
-                                order_date = wastage.wastage_source_order.created_at.isoformat()
+        #                 if wastage.wastage_source_order:
+        #                     if hasattr(wastage.wastage_source_order, 'client') and wastage.wastage_source_order.client:
+        #                         client_name = wastage.wastage_source_order.client.company_name
+        #                     if hasattr(wastage.wastage_source_order, 'created_at'):
+        #                         order_date = wastage.wastage_source_order.created_at.isoformat()
 
-                        # Get reel_no from wastage allocations by matching characteristics
-                        reel_no = None
-                        for alloc in wastage_allocations:
-                            # Try to match this wastage item with the allocation
-                            # We can match by order_id or by dimensions
-                            if alloc.get("order_id") and str(alloc["order_id"]) == str(wastage.wastage_source_order_id):
-                                wastage_id = str(alloc.get("wastage_id", ""))
-                                if wastage_id in wastage_from_wastage_inventory:
-                                    reel_no = wastage_from_wastage_inventory[wastage_id].reel_no
-                                    break
+        #                 # Get reel_no from wastage allocations by matching characteristics
+        #                 reel_no = None
+        #                 for alloc in wastage_allocations:
+        #                     # Try to match this wastage item with the allocation
+        #                     # We can match by order_id or by dimensions
+        #                     if alloc.get("order_id") and str(alloc["order_id"]) == str(wastage.wastage_source_order_id):
+        #                         wastage_id = str(alloc.get("wastage_id", ""))
+        #                         if wastage_id in wastage_from_wastage_inventory:
+        #                             reel_no = wastage_from_wastage_inventory[wastage_id].reel_no
+        #                             break
 
-                        # Include all wastage items linked to this plan (client info optional)
-                        wastage_data = {
-                            "id": str(wastage.id),
-                            "frontend_id": wastage.frontend_id,
-                            "barcode_id": wastage.barcode_id or f"SCR_{str(wastage.id)[:5].upper()}",
-                            "width_inches": float(wastage.width_inches) if wastage.width_inches else 0,
-                            "weight_kg": float(wastage.weight_kg) if wastage.weight_kg else 0,
-                            "reel_no": reel_no,  # Reel number from WastageInventory via wastage_allocations
-                            "status": wastage.status,
-                            "location": wastage.location,
-                            "paper_specs": {
-                                "gsm": wastage.paper.gsm if wastage.paper and hasattr(wastage.paper, 'gsm') else 0,
-                                "bf": float(wastage.paper.bf) if wastage.paper and hasattr(wastage.paper, 'bf') else 0.0,
-                                "shade": wastage.paper.shade if wastage.paper and hasattr(wastage.paper, 'shade') else ""
-                            } if wastage.paper else {
-                                "gsm": 0,
-                                "bf": 0.0,
-                                "shade": ""
-                            },
-                            "parent_jumbo_roll_barcode": None,
-                            "jumbo_roll_id": None,
-                            "created_at": wastage.created_at.isoformat() if wastage.created_at else None,
-                            "client_name": client_name or "Unknown Client",
-                            "order_date": order_date
-                        }
+        #                 # Include all wastage items linked to this plan (client info optional)
+        #                 wastage_data = {
+        #                     "id": str(wastage.id),
+        #                     "frontend_id": wastage.frontend_id,
+        #                     "barcode_id": wastage.barcode_id or f"SCR_{str(wastage.id)[:5].upper()}",
+        #                     "width_inches": float(wastage.width_inches) if wastage.width_inches else 0,
+        #                     "weight_kg": float(wastage.weight_kg) if wastage.weight_kg else 0,
+        #                     "reel_no": reel_no,  # Reel number from WastageInventory via wastage_allocations
+        #                     "status": wastage.status,
+        #                     "location": wastage.location,
+        #                     "paper_specs": {
+        #                         "gsm": wastage.paper.gsm if wastage.paper and hasattr(wastage.paper, 'gsm') else 0,
+        #                         "bf": float(wastage.paper.bf) if wastage.paper and hasattr(wastage.paper, 'bf') else 0.0,
+        #                         "shade": wastage.paper.shade if wastage.paper and hasattr(wastage.paper, 'shade') else ""
+        #                     } if wastage.paper else {
+        #                         "gsm": 0,
+        #                         "bf": 0.0,
+        #                         "shade": ""
+        #                     },
+        #                     "parent_jumbo_roll_barcode": None,
+        #                     "jumbo_roll_id": None,
+        #                     "created_at": wastage.created_at.isoformat() if wastage.created_at else None,
+        #                     "client_name": client_name or "Unknown Client",
+        #                     "order_date": order_date
+        #                 }
 
-                        wastage_items.append(wastage_data)
-                        logger.info(f"✅ Added InventoryMaster wastage item: {wastage.barcode_id} for client {client_name}")
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Failed to parse wastage_allocations for plan {plan_id}: {str(e)}")
+        #                 wastage_items.append(wastage_data)
+        #                 logger.info(f"✅ Added InventoryMaster wastage item: {wastage.barcode_id} for client {client_name}")
+        #     except (json.JSONDecodeError, Exception) as e:
+        #         logger.warning(f"Failed to parse wastage_allocations for plan {plan_id}: {str(e)}")
 
         # Calculate production summary from hierarchy (correct data)
         # Now that we have production_hierarchy and wastage_items, calculate summary from them

@@ -1123,6 +1123,65 @@ class PaginatedWastageResponse(BaseModel):
     total_pages: int
 
 
+class WastageAllocationOrderInfo(BaseModel):
+    """Order information for wastage allocation response"""
+    order_id: Optional[UUID] = None
+    order_frontend_id: Optional[str] = None
+    client_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class WastageAllocationPlanInfo(BaseModel):
+    """Plan information for wastage allocation response"""
+    plan_id: Optional[UUID] = None
+    plan_frontend_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class WastageAllocationInventoryResponse(BaseModel):
+    """Response schema for wastage allocation lookup by reel_no"""
+    # Inventory Master fields
+    id: UUID
+    frontend_id: Optional[str] = None
+    paper_id: UUID
+    width_inches: float
+    weight_kg: float
+    roll_type: str
+    location: Optional[str] = None
+    status: str
+    qr_code: Optional[str] = None
+    barcode_id: Optional[str] = None
+    production_date: datetime
+    allocated_to_order_id: Optional[UUID] = None
+
+    # Wastage tracking fields
+    is_wastage_roll: bool
+    wastage_source_order_id: Optional[UUID] = None
+    wastage_source_plan_id: Optional[UUID] = None
+
+    # Jumbo roll hierarchy
+    parent_jumbo_id: Optional[UUID] = None
+    parent_118_roll_id: Optional[UUID] = None
+    roll_sequence: Optional[int] = None
+    individual_roll_number: Optional[int] = None
+
+    # Timestamps
+    created_at: datetime
+    created_by_id: UUID
+
+    # Nested relationships
+    paper: Optional[PaperMaster] = None
+    order_info: Optional[WastageAllocationOrderInfo] = None
+    plan_info: Optional[WastageAllocationPlanInfo] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ============================================================================
 # INVENTORY ITEMS SCHEMAS - For imported stock data
 # ============================================================================

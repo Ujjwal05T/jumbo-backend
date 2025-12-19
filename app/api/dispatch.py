@@ -157,16 +157,49 @@ def get_dispatch_details(
         items = []
         for item in dispatch.dispatch_items:
             inventory = item.inventory if hasattr(item, 'inventory') else None
+
+            # Check if item is from wastage inventory and fetch reel_no
+            reel_no = None
+            is_wastage_item = False
+
+            # Check if barcode starts with SCR or qr_code starts with WCR_
+            if (item.barcode_id and item.barcode_id.startswith('SCR')) or \
+               (item.qr_code and item.qr_code.startswith('WCR_')):
+                is_wastage_item = True
+                try:
+                    # Parse QR code: WCR_{wastage_frontend_id}_{plan_id}
+                    qr_to_parse = item.qr_code if item.qr_code else ""
+
+                    if qr_to_parse.startswith('WCR_'):
+                        parts = qr_to_parse.split('_')
+                        if len(parts) >= 2:
+                            wastage_frontend_id = parts[1]
+
+                            # Query WastageInventory by frontend_id
+                            wastage_item = db.query(models.WastageInventory).filter(
+                                models.WastageInventory.frontend_id == wastage_frontend_id
+                            ).first()
+
+                            if wastage_item:
+                                reel_no = wastage_item.reel_no
+                                logger.debug(f"Found reel_no '{reel_no}' for wastage item QR: {item.qr_code}")
+                            else:
+                                logger.warning(f"WastageInventory not found for frontend_id: {wastage_frontend_id}")
+                except Exception as e:
+                    logger.error(f"Error parsing QR code or fetching wastage reel_no: {e}")
+
             items.append({
                 "id": str(item.id),
                 "frontend_id": item.frontend_id,
                 "qr_code": item.qr_code,
-                "barcode_id": item.barcode_id,
+                "barcode_id": is_wastage_item and reel_no or item.barcode_id,
                 "width_inches": float(item.width_inches),
                 "weight_kg": float(item.weight_kg),
                 "paper_spec": item.paper_spec,
                 "status": item.status,
                 "dispatched_at": item.dispatched_at.isoformat() if item.dispatched_at else None,
+                "reel_no": reel_no,
+                "is_wastage_item": is_wastage_item,
                 "inventory": {
                     "id": str(inventory.id),
                     "location": inventory.location,

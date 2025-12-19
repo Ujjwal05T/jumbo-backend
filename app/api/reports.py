@@ -4145,25 +4145,27 @@ def get_all_cut_rolls_filtered_report(
             except ValueError:
                 logger.warning(f"Invalid to_production_date format: {to_production_date}")
 
-        # Client name filter (exact match, case-insensitive)
-        if client_name:
+        # Client name and/or Order ID filter
+        # Join order_master and client_master once if either filter is needed
+        if client_name or order_id:
+            # Join order_master if not already joined via eager loading
             base_query = base_query.join(
                 models.OrderMaster,
                 models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id,
                 isouter=True
-            ).join(
-                models.ClientMaster,
-                models.OrderMaster.client_id == models.ClientMaster.id,
-                isouter=True
-            ).filter(func.lower(models.ClientMaster.company_name) == func.lower(client_name))
+            )
 
-        # Order ID filter (exact match)
-        if order_id:
-            base_query = base_query.join(
-                models.OrderMaster,
-                models.InventoryMaster.allocated_to_order_id == models.OrderMaster.id,
-                isouter=True
-            ).filter(models.OrderMaster.frontend_id == order_id)
+            # If client_name filter is applied, also join client_master
+            if client_name:
+                base_query = base_query.join(
+                    models.ClientMaster,
+                    models.OrderMaster.client_id == models.ClientMaster.id,
+                    isouter=True
+                ).filter(func.lower(models.ClientMaster.company_name) == func.lower(client_name))
+
+            # Apply order_id filter if provided
+            if order_id:
+                base_query = base_query.filter(models.OrderMaster.frontend_id == order_id)
 
         # Plan ID filter (exact match)
         if plan_id:
