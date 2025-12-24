@@ -600,7 +600,8 @@ class DispatchRecord(Base):
     client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
     primary_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True, index=True)  # Main order if single
     order_date = Column(DateTime, nullable=True)
-    
+    order_frontend_id = Column(String(100), nullable=True)  # Order frontend ID for reference (no FK constraint)
+
     # Status and tracking
     status = Column(String(50), default="dispatched", nullable=False)  # dispatched, delivered, returned
     total_items = Column(Integer, nullable=False, default=0)
@@ -635,7 +636,8 @@ class DispatchItem(Base):
     width_inches = Column(Numeric(6, 2), nullable=False)
     weight_kg = Column(Numeric(8, 2), nullable=False)
     paper_spec = Column(String(255), nullable=False)  # "90gsm, 18.0bf, white"
-    
+    order_frontend_id = Column(String(100), nullable=True)  # Order frontend ID for reference (no FK constraint)
+
     # Status tracking
     status = Column(String(50), default="dispatched", nullable=False)
     dispatched_at = Column(DateTime, default=datetime.utcnow, nullable=False)

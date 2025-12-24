@@ -33,6 +33,43 @@ async def create_order(request: Request, db: Session = Depends(get_db)):
         logger.error(f"Error creating order: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/orders/list-for-dispatch", tags=["Order Master"])
+def get_orders_for_dispatch(
+    search: str = None,
+    limit: int = 1000,
+    db: Session = Depends(get_db)
+):
+    """Get lightweight list of orders for dispatch dropdown - returns id, frontend_id, client name, status"""
+    try:
+        query = db.query(models.OrderMaster).join(models.ClientMaster)
+
+        # Apply search filter if provided
+        if search and search.strip():
+            search_term = f"%{search.strip()}%"
+            query = query.filter(
+                (models.OrderMaster.frontend_id.ilike(search_term)) |
+                (models.ClientMaster.company_name.ilike(search_term))
+            )
+
+        # Get orders with client info
+        orders = query.order_by(models.OrderMaster.created_at.desc()).limit(limit).all()
+
+        # Return lightweight response
+        return [
+            {
+                "id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "client_name": order.client.company_name if order.client else "Unknown",
+                "status": order.status,
+                "created_at": order.created_at.isoformat() if order.created_at else None,
+                "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None
+            }
+            for order in orders
+        ]
+    except Exception as e:
+        logger.error(f"Error getting orders for dispatch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/orders", response_model=List[schemas.OrderMaster], tags=["Order Master"])
 def get_orders(
     skip: int = 0,
@@ -685,6 +722,15 @@ def create_dispatch_record(
         final_dispatch_number = FrontendIDGenerator.generate_frontend_id("dispatch_record", db)
         logger.info(f"Generated dispatch number: {final_dispatch_number}")
 
+        # Extract primary order frontend ID if primary_order_id is set
+        primary_order_frontend_id = None
+        if dispatch_data.primary_order_id:
+            primary_order = db.query(models.OrderMaster).filter(
+                models.OrderMaster.id == dispatch_data.primary_order_id
+            ).first()
+            if primary_order:
+                primary_order_frontend_id = primary_order.frontend_id
+
         # Create dispatch record
         dispatch_record = models.DispatchRecord(
             vehicle_number=dispatch_data.vehicle_number,
@@ -697,6 +743,7 @@ def create_dispatch_record(
             client_id=dispatch_data.client_id,
             primary_order_id=dispatch_data.primary_order_id,
             order_date=dispatch_data.order_date,
+            order_frontend_id=primary_order_frontend_id,  # Store order frontend ID
             total_items=total_items_count,
             total_weight_kg=total_weight,
             created_by_id=dispatch_data.created_by_id
@@ -711,6 +758,17 @@ def create_dispatch_record(
 
         # Process regular inventory items
         for item in inventory_items:
+            # Get order frontend ID if item is allocated to an order
+            item_order_frontend_id = None
+
+            if item.allocated_to_order_id:
+                order = db.query(models.OrderMaster).filter(
+                    models.OrderMaster.id == item.allocated_to_order_id
+                ).first()
+                if order:
+                    item_order_frontend_id = order.frontend_id
+                    logger.info(f"Inventory item {item.id} allocated to order {order.frontend_id}")
+
             # Create dispatch item record
             dispatch_item = models.DispatchItem(
                 dispatch_record_id=dispatch_record.id,
@@ -719,7 +777,8 @@ def create_dispatch_record(
                 barcode_id=item.barcode_id,
                 width_inches=float(item.width_inches),
                 weight_kg=float(item.weight_kg),
-                paper_spec=f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "Unknown"
+                paper_spec=f"{item.paper.gsm}gsm, {item.paper.bf}bf, {item.paper.shade}" if item.paper else "Unknown",
+                order_frontend_id=item_order_frontend_id  # Store order frontend ID
             )
             db.add(dispatch_item)
 

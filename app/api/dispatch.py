@@ -93,6 +93,7 @@ def get_dispatch_history(
                 "dispatch_number": dispatch.dispatch_number,
                 "reference_number": dispatch.reference_number,
                 "dispatch_date": dispatch.dispatch_date.isoformat() if dispatch.dispatch_date else None,
+                "order_frontend_id": dispatch.order_frontend_id,  # Return order frontend ID
                 "client": {
                     "id": str(dispatch.client.id),
                     "company_name": dispatch.client.company_name,
@@ -200,6 +201,7 @@ def get_dispatch_details(
                 "dispatched_at": item.dispatched_at.isoformat() if item.dispatched_at else None,
                 "reel_no": reel_no,
                 "is_wastage_item": is_wastage_item,
+                "order_frontend_id": item.order_frontend_id,  # Return order frontend ID
                 "inventory": {
                     "id": str(inventory.id),
                     "location": inventory.location,
@@ -214,6 +216,7 @@ def get_dispatch_details(
             "reference_number": dispatch.reference_number,
             "dispatch_date": dispatch.dispatch_date.isoformat() if dispatch.dispatch_date else None,
             "order_date": dispatch.order_date.isoformat() if dispatch.order_date else None,
+            "order_frontend_id": dispatch.order_frontend_id,  # Return order frontend ID
             "client": {
                 "id": str(dispatch.client.id),
                 "company_name": dispatch.client.company_name or "",
@@ -674,6 +677,15 @@ def update_dispatch_record(
                         detail=f"Inventory item {inventory.barcode_id} is not available (status: {inventory.status})"
                     )
 
+                # Get order frontend ID if inventory is allocated to an order
+                item_order_frontend_id = None
+                if inventory.allocated_to_order_id:
+                    order = db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id == inventory.allocated_to_order_id
+                    ).first()
+                    if order:
+                        item_order_frontend_id = order.frontend_id
+
                 # Create dispatch item
                 dispatch_item = models.DispatchItem(
                     dispatch_record_id=dispatch.id,
@@ -682,7 +694,8 @@ def update_dispatch_record(
                     barcode_id=inventory.barcode_id,
                     width_inches=float(inventory.width_inches),
                     weight_kg=float(inventory.weight_kg),
-                    paper_spec=f"{inventory.paper.gsm}gsm, {inventory.paper.bf}bf, {inventory.paper.shade}" if inventory.paper else "Unknown"
+                    paper_spec=f"{inventory.paper.gsm}gsm, {inventory.paper.bf}bf, {inventory.paper.shade}" if inventory.paper else "Unknown",
+                    order_frontend_id=item_order_frontend_id  # Store order frontend ID
                 )
                 db.add(dispatch_item)
                 db.flush()  # Get ID
