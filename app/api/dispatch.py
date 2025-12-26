@@ -263,6 +263,88 @@ def get_dispatch_details(
         logger.error(f"Error fetching dispatch details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/dispatch/{dispatch_id}/items-with-rates", tags=["Dispatch History"])
+def get_dispatch_items_with_rates(
+    dispatch_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get dispatch items grouped by width and paper spec with rates fetched from order items.
+    Uses inventory allocation to find the correct rate from order items.
+    """
+    try:
+        dispatch_uuid = uuid.UUID(dispatch_id)
+
+        # Get dispatch with items and inventory
+        dispatch = db.query(models.DispatchRecord).options(
+            joinedload(models.DispatchRecord.dispatch_items).joinedload(models.DispatchItem.inventory)
+        ).filter(models.DispatchRecord.id == dispatch_uuid).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+        # Process each dispatch item to get rate
+        items_with_rates = []
+        for item in dispatch.dispatch_items:
+            rate = 0.0  # Default rate for items without order allocation
+
+            # Try to get rate from inventory allocation
+            if item.inventory_id:
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == item.inventory_id
+                ).first()
+
+                if inventory and inventory.allocated_to_order_id:
+                    # Find OrderItem by order_id, width_inches, and paper_id
+                    order_item = db.query(models.OrderItem).filter(
+                        models.OrderItem.order_id == inventory.allocated_to_order_id,
+                        models.OrderItem.width_inches == item.width_inches,
+                        models.OrderItem.paper_id == inventory.paper_id
+                    ).first()
+
+                    if order_item and order_item.rate:
+                        rate = float(order_item.rate)
+
+            items_with_rates.append({
+                "width_inches": float(item.width_inches),
+                "paper_spec": item.paper_spec,
+                "weight_kg": float(item.weight_kg),
+                "rate": rate
+            })
+
+        # Group items by width and paper_spec
+        grouped_items = {}
+        for item in items_with_rates:
+            key = f"{item['width_inches']}_{item['paper_spec']}"
+
+            if key not in grouped_items:
+                grouped_items[key] = {
+                    "width_inches": item["width_inches"],
+                    "paper_spec": item["paper_spec"],
+                    "quantity": 0,
+                    "total_weight_kg": 0.0,
+                    "rate": item["rate"]  # Use rate from first item in group
+                }
+
+            grouped_items[key]["quantity"] += 1
+            grouped_items[key]["total_weight_kg"] += item["weight_kg"]
+
+        # Convert to list
+        result = list(grouped_items.values())
+
+        return {
+            "dispatch_id": str(dispatch.id),
+            "items": result
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dispatch ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching dispatch items with rates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/dispatch/stats", tags=["Dispatch History"])
 def get_dispatch_stats(
     from_date: Optional[str] = None,
