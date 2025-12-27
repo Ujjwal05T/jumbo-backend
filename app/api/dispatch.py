@@ -87,6 +87,11 @@ def get_dispatch_history(
         # Format response
         dispatch_list = []
         for dispatch in dispatches:
+            # Check if payment slip exists for this dispatch
+            payment_slip_exists = db.query(models.PaymentSlipMaster).filter(
+                models.PaymentSlipMaster.dispatch_record_id == dispatch.id
+            ).first() is not None
+
             dispatch_list.append({
                 "id": str(dispatch.id),
                 "frontend_id": dispatch.frontend_id,
@@ -116,7 +121,8 @@ def get_dispatch_history(
                 } if dispatch.created_by else None,
                 "created_at": dispatch.created_at.isoformat() if dispatch.created_at else None,
                 "delivered_at": dispatch.delivered_at.isoformat() if dispatch.delivered_at else None,
-                "items_count": len(dispatch.dispatch_items) if dispatch.dispatch_items else 0
+                "items_count": len(dispatch.dispatch_items) if dispatch.dispatch_items else 0,
+                "has_payment_slip": payment_slip_exists  # Flag indicating if payment slip exists
             })
         
         return {
@@ -332,6 +338,36 @@ def get_dispatch_items_with_rates(
         # Convert to list
         result = list(grouped_items.values())
 
+        # Helper function to parse paper_spec for sorting
+        def parse_paper_spec(item):
+            """Parse paper_spec string like '90gsm, 18.0bf, white' and extract values for sorting"""
+            paper_spec = item.get('paper_spec', '')
+
+            # Default values
+            gsm = 0
+            bf = 0.0
+            shade = ''
+
+            try:
+                parts = [p.strip() for p in paper_spec.split(',')]
+                for part in parts:
+                    if 'gsm' in part.lower():
+                        # Extract GSM value (e.g., '90gsm' -> 90)
+                        gsm = int(''.join(filter(str.isdigit, part)))
+                    elif 'bf' in part.lower():
+                        # Extract BF value (e.g., '18.0bf' -> 18.0)
+                        bf = float(''.join(c for c in part if c.isdigit() or c == '.'))
+                    else:
+                        # Assume it's the shade/color
+                        shade = part.lower()
+            except (ValueError, IndexError):
+                pass
+
+            return (gsm, bf, shade, item.get('width_inches', 0))
+
+        # Sort items by GSM, BF, shade, then width
+        result.sort(key=parse_paper_spec)
+
         return {
             "dispatch_id": str(dispatch.id),
             "items": result
@@ -343,6 +379,151 @@ def get_dispatch_items_with_rates(
         raise
     except Exception as e:
         logger.error(f"Error fetching dispatch items with rates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/payment-slip/preview-id", tags=["Payment Slip"])
+def get_payment_slip_preview_id(
+    payment_type: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get the next payment slip ID (BI-00001 or CI-00001) for preview before saving.
+    """
+    try:
+        if payment_type not in ['bill', 'cash']:
+            raise HTTPException(status_code=400, detail="Invalid payment type. Must be 'bill' or 'cash'")
+
+        # Determine prefix based on payment type
+        prefix = "BI-" if payment_type == 'bill' else "CI-"
+
+        # Get the latest payment slip with this prefix
+        latest_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.frontend_id.like(f"{prefix}%")
+        ).order_by(desc(models.PaymentSlipMaster.frontend_id)).first()
+
+        if latest_slip and latest_slip.frontend_id:
+            # Extract the number part and increment
+            try:
+                last_num = int(latest_slip.frontend_id.split('-')[1])
+                next_num = last_num + 1
+            except (IndexError, ValueError):
+                next_num = 1
+        else:
+            next_num = 1
+
+        # Format the new ID
+        next_id = f"{prefix}{next_num:05d}"
+
+        return {
+            "preview_id": next_id,
+            "payment_type": payment_type
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating payment slip preview ID: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/payment-slip/create", tags=["Payment Slip"])
+def create_payment_slip(
+    payment_slip_data: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new payment slip with auto-generated frontend_id (BI-00001 or CI-00001).
+    Saves the payment slip master record and all item records.
+    """
+    try:
+        # Extract data from request
+        dispatch_record_id = payment_slip_data.get('dispatch_record_id')
+        payment_type = payment_slip_data.get('payment_type')
+        slip_date = payment_slip_data.get('slip_date')
+        bill_no = payment_slip_data.get('bill_no')
+        ebay_no = payment_slip_data.get('ebay_no')
+        total_amount = payment_slip_data.get('total_amount')
+        items = payment_slip_data.get('items', [])
+        created_by_id = payment_slip_data.get('created_by_id')
+
+        # Validation
+        if not dispatch_record_id or not payment_type or not created_by_id:
+            raise HTTPException(status_code=400, detail="Missing required fields")
+
+        if payment_type not in ['bill', 'cash']:
+            raise HTTPException(status_code=400, detail="Invalid payment type")
+
+        # Generate frontend_id using the same logic as preview
+        prefix = "BI-" if payment_type == 'bill' else "CI-"
+
+        latest_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.frontend_id.like(f"{prefix}%")
+        ).order_by(desc(models.PaymentSlipMaster.frontend_id)).first()
+
+        if latest_slip and latest_slip.frontend_id:
+            try:
+                last_num = int(latest_slip.frontend_id.split('-')[1])
+                next_num = last_num + 1
+            except (IndexError, ValueError):
+                next_num = 1
+        else:
+            next_num = 1
+
+        frontend_id = f"{prefix}{next_num:05d}"
+
+        # Parse slip_date if provided
+        slip_date_obj = None
+        if slip_date:
+            try:
+                slip_date_obj = datetime.fromisoformat(slip_date.replace('Z', '+00:00'))
+            except:
+                slip_date_obj = None
+
+        # Create PaymentSlipMaster
+        payment_slip = models.PaymentSlipMaster(
+            frontend_id=frontend_id,
+            dispatch_record_id=uuid.UUID(dispatch_record_id),
+            payment_type=payment_type,
+            slip_date=slip_date_obj,
+            bill_no=bill_no if payment_type == 'bill' else None,
+            ebay_no=ebay_no if payment_type == 'bill' else None,
+            total_amount=total_amount,
+            created_by_id=uuid.UUID(created_by_id)
+        )
+
+        db.add(payment_slip)
+        db.flush()  # Get the ID without committing
+
+        # Create PaymentSlipItem records
+        for item in items:
+            payment_slip_item = models.PaymentSlipItem(
+                payment_slip_id=payment_slip.id,
+                width_inches=item.get('width_inches'),
+                paper_spec=item.get('paper_spec'),
+                quantity=item.get('quantity'),
+                total_weight_kg=item.get('total_weight_kg'),
+                rate=item.get('rate'),
+                amount=item.get('amount')
+            )
+            db.add(payment_slip_item)
+
+        db.commit()
+        db.refresh(payment_slip)
+
+        logger.info(f"Payment slip created: {frontend_id}")
+
+        return {
+            "message": "Payment slip created successfully",
+            "payment_slip_id": str(payment_slip.id),
+            "frontend_id": frontend_id,
+            "payment_type": payment_type,
+            "total_amount": float(total_amount) if total_amount else 0
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating payment slip: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/dispatch/stats", tags=["Dispatch History"])

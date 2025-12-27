@@ -647,6 +647,63 @@ class DispatchItem(Base):
     inventory = relationship("InventoryMaster")
 
 
+class PaymentSlipMaster(Base):
+    """
+    Payment slips generated from dispatch records with custom rates.
+    Stores bill and cash invoices with separate ID sequences (BI-00001, CI-00001).
+    """
+    __tablename__ = "payment_slip_master"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # BI-00001 or CI-00001
+    dispatch_record_id = Column(UNIQUEIDENTIFIER, ForeignKey("dispatch_record.id"), nullable=False, index=True)
+
+    # Payment details
+    payment_type = Column(String(20), nullable=False, index=True)  # bill, cash
+    slip_date = Column(DateTime, nullable=True)  # Custom date entered by user
+
+    # Reference numbers (only for bill type)
+    bill_no = Column(String(100), nullable=True)
+    ebay_no = Column(String(100), nullable=True)
+
+    # Amount
+    total_amount = Column(Numeric(12, 2), nullable=False)  # Total calculated from items
+
+    # Audit fields
+    created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    dispatch_record = relationship("DispatchRecord")
+    created_by = relationship("UserMaster")
+    payment_slip_items = relationship("PaymentSlipItem", back_populates="payment_slip", cascade="all, delete-orphan")
+
+
+class PaymentSlipItem(Base):
+    """
+    Individual line items in a payment slip with custom rates.
+    Grouped by width and paper spec from dispatch items.
+    """
+    __tablename__ = "payment_slip_item"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    payment_slip_id = Column(UNIQUEIDENTIFIER, ForeignKey("payment_slip_master.id"), nullable=False, index=True)
+
+    # Item details (from grouped dispatch items)
+    width_inches = Column(Numeric(6, 2), nullable=False)
+    paper_spec = Column(String(255), nullable=False)  # "90gsm, 18.0bf, white"
+    quantity = Column(Integer, nullable=False)  # Number of rolls
+    total_weight_kg = Column(Numeric(10, 2), nullable=False)  # Total weight
+
+    # Pricing
+    rate = Column(Numeric(10, 2), nullable=False)  # Custom rate per kg entered by user
+    amount = Column(Numeric(12, 2), nullable=False)  # rate × total_weight_kg
+
+    # Relationships
+    payment_slip = relationship("PaymentSlipMaster", back_populates="payment_slip_items")
+
+
 class PastDispatchRecord(Base):
     """
     Historical dispatch records for viewing purposes only.
