@@ -291,25 +291,50 @@ def get_dispatch_items_with_rates(
 
         # Process each dispatch item to get rate
         items_with_rates = []
-        for item in dispatch.dispatch_items:
+        logger.info(f"Processing {len(dispatch.dispatch_items)} dispatch items for dispatch {dispatch_id}")
+
+        for idx, item in enumerate(dispatch.dispatch_items):
             rate = 0.0  # Default rate for items without order allocation
+
+            logger.info(f"[Item {idx + 1}] Width: {item.width_inches}\", Paper: {item.paper_spec}, Weight: {item.weight_kg}kg")
 
             # Try to get rate from inventory allocation
             if item.inventory_id:
+                logger.info(f"[Item {idx + 1}] Has inventory_id: {item.inventory_id}")
                 inventory = db.query(models.InventoryMaster).filter(
                     models.InventoryMaster.id == item.inventory_id
                 ).first()
 
-                if inventory and inventory.allocated_to_order_id:
-                    # Find OrderItem by order_id, width_inches, and paper_id
-                    order_item = db.query(models.OrderItem).filter(
-                        models.OrderItem.order_id == inventory.allocated_to_order_id,
-                        models.OrderItem.width_inches == item.width_inches,
-                        models.OrderItem.paper_id == inventory.paper_id
-                    ).first()
+                if inventory:
+                    logger.info(f"[Item {idx + 1}] Inventory found - paper_id: {inventory.paper_id}, allocated_to_order_id: {inventory.allocated_to_order_id}")
 
-                    if order_item and order_item.rate:
-                        rate = float(order_item.rate)
+                    if inventory.allocated_to_order_id:
+                        # Find OrderItem by order_id, width_inches, and paper_id
+                        logger.info(f"[Item {idx + 1}] Searching OrderItem with: order_id={inventory.allocated_to_order_id}, width={item.width_inches}, paper_id={inventory.paper_id}")
+
+                        order_item = db.query(models.OrderItem).filter(
+                            models.OrderItem.order_id == inventory.allocated_to_order_id,
+                            models.OrderItem.width_inches == item.width_inches,
+                            models.OrderItem.paper_id == inventory.paper_id
+                        ).first()
+
+                        if order_item:
+                            logger.info(f"[Item {idx + 1}] OrderItem found - rate: {order_item.rate}")
+                            if order_item.rate:
+                                rate = float(order_item.rate)
+                                logger.info(f"[Item {idx + 1}] Rate set to: {rate}")
+                            else:
+                                logger.warning(f"[Item {idx + 1}] OrderItem exists but rate is NULL/0")
+                        else:
+                            logger.warning(f"[Item {idx + 1}] No OrderItem found matching the criteria")
+                    else:
+                        logger.warning(f"[Item {idx + 1}] Inventory exists but not allocated to any order (allocated_to_order_id is NULL)")
+                else:
+                    logger.warning(f"[Item {idx + 1}] Inventory not found for inventory_id: {item.inventory_id}")
+            else:
+                logger.warning(f"[Item {idx + 1}] No inventory_id (likely manual cut roll or wastage)")
+
+            logger.info(f"[Item {idx + 1}] Final rate used: {rate}")
 
             items_with_rates.append({
                 "width_inches": float(item.width_inches),
@@ -319,11 +344,13 @@ def get_dispatch_items_with_rates(
             })
 
         # Group items by width and paper_spec
+        logger.info(f"Grouping {len(items_with_rates)} items by width and paper_spec")
         grouped_items = {}
         for item in items_with_rates:
             key = f"{item['width_inches']}_{item['paper_spec']}"
 
             if key not in grouped_items:
+                logger.info(f"Creating new group '{key}' with rate: {item['rate']}")
                 grouped_items[key] = {
                     "width_inches": item["width_inches"],
                     "paper_spec": item["paper_spec"],
@@ -331,12 +358,15 @@ def get_dispatch_items_with_rates(
                     "total_weight_kg": 0.0,
                     "rate": item["rate"]  # Use rate from first item in group
                 }
+            else:
+                logger.info(f"Adding to existing group '{key}' (keeping rate: {grouped_items[key]['rate']}, new item rate: {item['rate']})")
 
             grouped_items[key]["quantity"] += 1
             grouped_items[key]["total_weight_kg"] += item["weight_kg"]
 
         # Convert to list
         result = list(grouped_items.values())
+        logger.info(f"Final grouped result: {len(result)} groups")
 
         # Helper function to parse paper_spec for sorting
         def parse_paper_spec(item):
@@ -367,6 +397,10 @@ def get_dispatch_items_with_rates(
 
         # Sort items by GSM, BF, shade, then width
         result.sort(key=parse_paper_spec)
+
+        logger.info(f"Returning {len(result)} sorted groups:")
+        for idx, group in enumerate(result):
+            logger.info(f"  Group {idx + 1}: {group['width_inches']}\" {group['paper_spec']}, qty={group['quantity']}, weight={group['total_weight_kg']}kg, rate={group['rate']}")
 
         return {
             "dispatch_id": str(dispatch.id),
@@ -524,6 +558,88 @@ def create_payment_slip(
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating payment slip: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/payment-slip/by-dispatch/{dispatch_id}", tags=["Payment Slip"])
+def get_payment_slip_by_dispatch(
+    dispatch_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get payment slip details with items for a specific dispatch
+    """
+    try:
+        dispatch_uuid = uuid.UUID(dispatch_id)
+
+        # Get payment slip for this dispatch
+        payment_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid
+        ).first()
+
+        if not payment_slip:
+            raise HTTPException(status_code=404, detail="Payment slip not found for this dispatch")
+
+        # Get payment slip items
+        payment_slip_items = db.query(models.PaymentSlipItem).filter(
+            models.PaymentSlipItem.payment_slip_id == payment_slip.id
+        ).all()
+
+        # Get dispatch details for client and vehicle info
+        dispatch = db.query(models.DispatchRecord).options(
+            joinedload(models.DispatchRecord.client)
+        ).filter(models.DispatchRecord.id == dispatch_uuid).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch not found")
+
+        # Format items
+        items = []
+        for item in payment_slip_items:
+            items.append({
+                "width_inches": float(item.width_inches) if item.width_inches else 0,
+                "paper_spec": item.paper_spec,
+                "quantity": item.quantity,
+                "total_weight_kg": float(item.total_weight_kg) if item.total_weight_kg else 0,
+                "rate": float(item.rate) if item.rate else 0,
+                "amount": float(item.amount) if item.amount else 0
+            })
+
+        return {
+            "payment_slip": {
+                "id": str(payment_slip.id),
+                "frontend_id": payment_slip.frontend_id,
+                "payment_type": payment_slip.payment_type,
+                "slip_date": payment_slip.slip_date.isoformat() if payment_slip.slip_date else None,
+                "bill_no": payment_slip.bill_no,
+                "ebay_no": payment_slip.ebay_no,
+                "total_amount": float(payment_slip.total_amount) if payment_slip.total_amount else 0,
+                "items": items
+            },
+            "dispatch": {
+                "id": str(dispatch.id),
+                "dispatch_number": dispatch.dispatch_number,
+                "reference_number": dispatch.reference_number,
+                "dispatch_date": dispatch.dispatch_date.isoformat() if dispatch.dispatch_date else None,
+                "vehicle_number": dispatch.vehicle_number,
+                "driver_name": dispatch.driver_name,
+                "driver_mobile": dispatch.driver_mobile,
+                "client": {
+                    "company_name": dispatch.client.company_name,
+                    "contact_person": dispatch.client.contact_person,
+                    "address": dispatch.client.address,
+                    "phone": dispatch.client.phone,
+                    "email": dispatch.client.email,
+                    "gst_number": dispatch.client.gst_number
+                }
+            }
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dispatch ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching payment slip: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/dispatch/stats", tags=["Dispatch History"])
