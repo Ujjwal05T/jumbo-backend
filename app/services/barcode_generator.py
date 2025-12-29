@@ -1,62 +1,89 @@
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from datetime import datetime, timedelta
 from .. import models
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# TEMPORARY TEST CODE - REMOVE AFTER TESTING!
+# Global test offset: adds days to current date to test year change
+# ============================================================
+TEST_DAYS_OFFSET = 3  # Change to 0 to disable, or 3-4 to test year change
+
+def _get_test_year():
+    """Helper to get year with test offset applied."""
+    if TEST_DAYS_OFFSET > 0:
+        test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
+        logger.warning(f"TEST MODE: +{TEST_DAYS_OFFSET} days → {test_date.strftime('%Y-%m-%d')} (year: {test_date.strftime('%y')})")
+        return test_date.strftime("%y")
+    return datetime.now().strftime("%y")
+# ============================================================
+
 class BarcodeGenerator:
     """
-    Service for generating unique barcode IDs in CR_00001 format for cut rolls
-    and other barcode IDs for inventory items.
+    Service for generating unique barcode IDs with year suffix and annual counter reset.
+
+    Format: CR_00001-25 (where 25 is the year)
+    Counter resets to 00001 on January 1st of each year.
+    Year suffix updates automatically based on current date.
     """
     
     @staticmethod
     def generate_cut_roll_barcode(db: Session) -> str:
         """
-        Generate next sequential cut roll barcode in CR_00001 format.
-        Range: CR_00001 to CR_07999, then skips to CR_09001+
-        (CR_08000 to CR_09000 reserved for manual cut rolls)
+        Generate next sequential cut roll barcode in CR_00001-25 format.
+        Range: CR_00001-25 to CR_07999-25, then skips to CR_09001-25+
+        (CR_08000-25 to CR_09000-25 reserved for manual cut rolls)
+        Counter resets to 00001 on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next barcode ID like CR_00001, CR_00002, etc.
+            str: Next barcode ID like CR_00001-25, CR_00002-25, etc.
         """
         try:
-            # Get the highest existing barcode number from inventory (where cut rolls are stored)
-            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
-                models.InventoryMaster.barcode_id.like('CR_%')
-            ).scalar()
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
 
-            if result is None:
-                # No barcodes exist yet, start with 1
-                next_number = 1
-            else:
-                # Extract number from CR_00123 format
-                try:
-                    if result and result.startswith('CR_'):
-                        current_number = int(result[3:])  # Remove 'CR_' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid barcode format found: {result}, starting from 1")
-                    next_number = 1
+            # Get all barcodes for the current year
+            pattern = f"CR_%-{current_year}"
+            result = db.query(models.InventoryMaster.barcode_id).filter(
+                models.InventoryMaster.barcode_id.like(pattern)
+            ).all()
+
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from CR_00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 2 and parts[0].startswith('CR_'):
+                            current_number = int(parts[0][3:])  # Remove 'CR_' prefix
+                            # Skip manual cut roll range (8000-9000) when finding max
+                            if current_number < 8000 or current_number > 9000:
+                                max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            # Increment counter
+            next_number = max_number + 1
 
             # Skip the reserved range for manual cut rolls (8000-9000)
             if next_number == 8000:
-                logger.info(f"Reached CR_08000, skipping to CR_09001 (manual cut roll range)")
+                logger.info(f"Reached CR_08000-{current_year}, skipping to CR_09001-{current_year} (manual cut roll range)")
                 next_number = 9001
             elif 8000 < next_number <= 9000:
                 # Should not happen, but safety check
                 logger.warning(f"Next number {next_number} in reserved manual range, jumping to 9001")
                 next_number = 9001
 
-            # Format as CR_00001 (5 digits with leading zeros)
-            barcode_id = f"CR_{next_number:05d}"
+            # Format as CR_00001-25 (5 digits with leading zeros and year)
+            barcode_id = f"CR_{next_number:05d}-{current_year}"
 
             logger.info(f"Generated cut roll barcode: {barcode_id}")
             return barcode_id
@@ -65,138 +92,161 @@ class BarcodeGenerator:
             logger.error(f"Error generating cut roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            fallback_id = f"CR_{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"CR_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback barcode: {fallback_id}")
             return fallback_id
     
     @staticmethod
     def generate_inventory_barcode(db: Session, roll_type: str = "INV") -> str:
         """
-        Generate barcode for inventory items in INV_00001 or JMB_00001 format.
-        
+        Generate barcode for inventory items in INV_00001-25 or JMB_00001-25 format.
+        Counter resets to 00001 on January 1st each year.
+
         Args:
             db: Database session
             roll_type: Type of roll ("INV" for general, "JMB" for jumbo)
-            
+
         Returns:
-            str: Next barcode ID
+            str: Next barcode ID like INV_00001-25
         """
         try:
             prefix = "JMB" if roll_type.lower() == "jumbo" else "INV"
-            
-            # Get the highest existing barcode number for this prefix
-            pattern = f"{prefix}_%"
-            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
+
+            # Get all barcodes for this prefix and current year
+            pattern = f"{prefix}_%-{current_year}"
+            result = db.query(models.InventoryMaster.barcode_id).filter(
                 models.InventoryMaster.barcode_id.like(pattern)
-            ).scalar()
-            
-            if result is None:
-                next_number = 1
-            else:
-                try:
-                    if result and result.startswith(f'{prefix}_'):
-                        current_number = int(result[4:])  # Remove prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid inventory barcode format: {result}")
-                    next_number = 1
-            
-            barcode_id = f"{prefix}_{next_number:05d}"
+            ).all()
+
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from INV_00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 2 and parts[0].startswith(f'{prefix}_'):
+                            current_number = int(parts[0][4:])  # Remove prefix
+                            max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            next_number = max_number + 1
+
+            barcode_id = f"{prefix}_{next_number:05d}-{current_year}"
             logger.info(f"Generated inventory barcode: {barcode_id}")
             return barcode_id
-            
+
         except Exception as e:
             logger.error(f"Error generating inventory barcode: {e}")
             import time
-            fallback_id = f"{roll_type.upper()}_{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"{roll_type.upper()}_{int(time.time()) % 100000:05d}-{current_year}"
             return fallback_id
     
     @staticmethod
     def generate_wastage_barcode(db: Session) -> str:
         """
-        Generate barcode for wastage inventory in WSB-00001 format.
-        
+        Generate barcode for wastage inventory in WSB-00001-25 format.
+        Counter resets to 00001 on January 1st each year.
+
         Args:
             db: Database session
-            
+
         Returns:
-            str: Next wastage barcode ID like WSB-00001, WSB-00002, etc.
+            str: Next wastage barcode ID like WSB-00001-25, WSB-00002-25, etc.
         """
         try:
-            # Get the highest existing wastage barcode number
-            result = db.query(func.max(models.WastageInventory.barcode_id)).filter(
-                models.WastageInventory.barcode_id.like('WSB-%')
-            ).scalar()
-            
-            if result is None:
-                next_number = 1
-            else:
-                try:
-                    if result and result.startswith('WSB-'):
-                        current_number = int(result[4:])  # Remove 'WSB-' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid wastage barcode format: {result}")
-                    next_number = 1
-            
-            # Format as WSB-00001 (5 digits with leading zeros)
-            barcode_id = f"WSB-{next_number:05d}"
-            
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
+
+            # Get all wastage barcodes for the current year
+            pattern = f"WSB-%-{current_year}"
+            result = db.query(models.WastageInventory.barcode_id).filter(
+                models.WastageInventory.barcode_id.like(pattern)
+            ).all()
+
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from WSB-00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 3 and parts[0] == 'WSB':
+                            current_number = int(parts[1])
+                            max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            next_number = max_number + 1
+
+            # Format as WSB-00001-25 (5 digits with leading zeros and year)
+            barcode_id = f"WSB-{next_number:05d}-{current_year}"
+
             logger.info(f"Generated wastage barcode: {barcode_id}")
             return barcode_id
-            
+
         except Exception as e:
             logger.error(f"Error generating wastage barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            fallback_id = f"WSB-{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"WSB-{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback wastage barcode: {fallback_id}")
             return fallback_id
 
     @staticmethod
     def generate_manual_cut_roll_barcode(db: Session) -> str:
         """
-        Generate barcode for manual cut rolls in CR_08000 to CR_09000 format.
+        Generate barcode for manual cut rolls in CR_08000-25 to CR_09000-25 format.
         This is a reserved range within the CR_ series for manually entered rolls.
+        Counter resets to 08000 on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next barcode ID like CR_08000, CR_08001, etc.
+            str: Next barcode ID like CR_08000-25, CR_08001-25, etc.
         """
         try:
-            # Get the highest existing manual cut roll barcode number
-            result = db.query(func.max(models.ManualCutRoll.barcode_id)).filter(
-                models.ManualCutRoll.barcode_id.like('CR_%')
-            ).scalar()
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
 
-            if result is None:
-                # No manual cut roll barcodes exist yet, start with 8000
-                next_number = 8000
-            else:
-                # Extract number from CR_08000 format
-                try:
-                    if result and result.startswith('CR_'):
-                        current_number = int(result[3:])  # Remove 'CR_' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 8000
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid manual cut roll barcode format found: {result}, starting from 8000")
-                    next_number = 8000
+            # Get all manual cut roll barcodes for the current year
+            pattern = f"CR_%-{current_year}"
+            result = db.query(models.ManualCutRoll.barcode_id).filter(
+                models.ManualCutRoll.barcode_id.like(pattern)
+            ).all()
+
+            # Extract counter values in the 8000-9000 range and find max
+            max_number = 7999  # Start before the manual range
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from CR_08000-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 2 and parts[0].startswith('CR_'):
+                            current_number = int(parts[0][3:])  # Remove 'CR_' prefix
+                            # Only consider numbers in the manual range
+                            if 8000 <= current_number <= 9000:
+                                max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            # If no manual rolls exist this year, start at 8000
+            next_number = 8000 if max_number == 7999 else max_number + 1
 
             # Check if we've exceeded the reserved range
             if next_number > 9000:
-                logger.error(f"Manual cut roll range exhausted! Attempted to generate CR_{next_number:05d}")
-                raise ValueError("Manual cut roll barcode range (CR_08000 to CR_09000) is exhausted. Maximum 1001 manual rolls reached.")
+                logger.error(f"Manual cut roll range exhausted for year {current_year}! Attempted to generate CR_{next_number:05d}-{current_year}")
+                raise ValueError(f"Manual cut roll barcode range (CR_08000-{current_year} to CR_09000-{current_year}) is exhausted. Maximum 1001 manual rolls reached for this year.")
 
-            # Format as CR_08000 (5 digits with leading zeros)
-            barcode_id = f"CR_{next_number:05d}"
+            # Format as CR_08000-25 (5 digits with leading zeros and year)
+            barcode_id = f"CR_{next_number:05d}-{current_year}"
 
             logger.info(f"Generated manual cut roll barcode: {barcode_id}")
             return barcode_id
@@ -208,44 +258,50 @@ class BarcodeGenerator:
             logger.error(f"Error generating manual cut roll barcode: {e}")
             # Fallback to timestamp-based ID (still in format but with timestamp)
             import time
-            fallback_id = f"CR_{int(time.time()) % 1000 + 8000:05d}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"CR_{int(time.time()) % 1000 + 8000:05d}-{current_year}"
             logger.warning(f"Using fallback manual cut roll barcode: {fallback_id}")
             return fallback_id
 
     @staticmethod
     def generate_scrap_cut_roll_barcode(db: Session) -> str:
         """
-        Generate barcode for scrap cut rolls (from wastage) in SCR-00001 format.
+        Generate barcode for scrap cut rolls (from wastage) in SCR-00001-25 format.
+        Counter resets to 00001 on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next SCR barcode ID like SCR-00001, SCR-00002, etc.
+            str: Next SCR barcode ID like SCR-00001-25, SCR-00002-25, etc.
         """
         try:
-            # Get the highest existing SCR barcode number from inventory
-            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
-                models.InventoryMaster.barcode_id.like('SCR-%')
-            ).scalar()
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
 
-            if result is None:
-                # No SCR barcodes exist yet, start with 1
-                next_number = 1
-            else:
-                # Extract number from SCR-00123 format
-                try:
-                    if result and result.startswith('SCR-'):
-                        current_number = int(result[4:])  # Remove 'SCR-' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid SCR barcode format found: {result}, starting from 1")
-                    next_number = 1
+            # Get all SCR barcodes for the current year
+            pattern = f"SCR-%-{current_year}"
+            result = db.query(models.InventoryMaster.barcode_id).filter(
+                models.InventoryMaster.barcode_id.like(pattern)
+            ).all()
 
-            # Format as SCR-00001 (5 digits with leading zeros)
-            barcode_id = f"SCR-{next_number:05d}"
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from SCR-00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 3 and parts[0] == 'SCR':
+                            current_number = int(parts[1])
+                            max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            next_number = max_number + 1
+
+            # Format as SCR-00001-25 (5 digits with leading zeros and year)
+            barcode_id = f"SCR-{next_number:05d}-{current_year}"
 
             logger.info(f"Generated scrap cut roll barcode: {barcode_id}")
             return barcode_id
@@ -254,17 +310,18 @@ class BarcodeGenerator:
             logger.error(f"Error generating scrap cut roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            fallback_id = f"SCR-{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"SCR-{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback SCR barcode: {fallback_id}")
             return fallback_id
 
     @staticmethod
     def validate_barcode_format(barcode_id: str, barcode_type: str = "cut_roll") -> bool:
         """
-        Validate barcode format.
+        Validate barcode format with year suffix.
 
         Args:
-            barcode_id: Barcode to validate
+            barcode_id: Barcode to validate (e.g., "CR_00001-25")
             barcode_type: Type - "cut_roll", "manual_cut_roll", "inventory", "jumbo", "118_roll", "wastage", or "scrap_cut_roll"
 
         Returns:
@@ -275,30 +332,71 @@ class BarcodeGenerator:
 
         try:
             if barcode_type == "cut_roll":
-                # Validates CR_XXXXX format (both production and manual use same format)
-                if not (barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()):
+                # Validates CR_XXXXX-YY format (e.g., CR_00001-25)
+                parts = barcode_id.split("-")
+                if len(parts) != 2:
                     return False
-                # Optional: Check range - production (1-7999, 9001+), manual (8000-9000)
+                if not parts[0].startswith("CR_") or len(parts[0]) != 8 or not parts[0][3:].isdigit():
+                    return False
+                # Check year is 2 digits
+                if len(parts[1]) != 2 or not parts[1].isdigit():
+                    return False
                 return True
             elif barcode_type == "manual_cut_roll":
-                # Validates CR_08000 to CR_09000 range specifically
-                if not (barcode_id.startswith("CR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()):
+                # Validates CR_08000-25 to CR_09000-25 range specifically
+                parts = barcode_id.split("-")
+                if len(parts) != 2:
+                    return False
+                if not parts[0].startswith("CR_") or len(parts[0]) != 8 or not parts[0][3:].isdigit():
+                    return False
+                # Check year is 2 digits
+                if len(parts[1]) != 2 or not parts[1].isdigit():
                     return False
                 try:
-                    barcode_num = int(barcode_id[3:])
+                    barcode_num = int(parts[0][3:])
                     return 8000 <= barcode_num <= 9000
                 except ValueError:
                     return False
             elif barcode_type == "inventory":
-                return barcode_id.startswith("INV_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+                # Format: INV_00001-25
+                parts = barcode_id.split("-")
+                if len(parts) != 2:
+                    return False
+                if not parts[0].startswith("INV_") or len(parts[0]) != 9 or not parts[0][4:].isdigit():
+                    return False
+                return len(parts[1]) == 2 and parts[1].isdigit()
             elif barcode_type == "jumbo":
-                return barcode_id.startswith("JR_") and len(barcode_id) == 8 and barcode_id[3:].isdigit()
+                # Format: JR_00001-25
+                parts = barcode_id.split("-")
+                if len(parts) != 2:
+                    return False
+                if not parts[0].startswith("JR_") or len(parts[0]) != 8 or not parts[0][3:].isdigit():
+                    return False
+                return len(parts[1]) == 2 and parts[1].isdigit()
             elif barcode_type == "118_roll":
-                return barcode_id.startswith("SET_") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+                # Format: SET_00001-25
+                parts = barcode_id.split("-")
+                if len(parts) != 2:
+                    return False
+                if not parts[0].startswith("SET_") or len(parts[0]) != 9 or not parts[0][4:].isdigit():
+                    return False
+                return len(parts[1]) == 2 and parts[1].isdigit()
             elif barcode_type == "wastage":
-                return barcode_id.startswith("WSB-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+                # Format: WSB-00001-25
+                parts = barcode_id.split("-")
+                if len(parts) != 3:
+                    return False
+                if parts[0] != "WSB" or len(parts[1]) != 5 or not parts[1].isdigit():
+                    return False
+                return len(parts[2]) == 2 and parts[2].isdigit()
             elif barcode_type == "scrap_cut_roll":
-                return barcode_id.startswith("SCR-") and len(barcode_id) == 9 and barcode_id[4:].isdigit()
+                # Format: SCR-00001-25
+                parts = barcode_id.split("-")
+                if len(parts) != 3:
+                    return False
+                if parts[0] != "SCR" or len(parts[1]) != 5 or not parts[1].isdigit():
+                    return False
+                return len(parts[2]) == 2 and parts[2].isdigit()
             else:
                 return False
         except:
@@ -307,37 +405,42 @@ class BarcodeGenerator:
     @staticmethod
     def generate_118_roll_barcode(db: Session) -> str:
         """
-        Generate barcode for 118" rolls in SET_00001 format.
+        Generate barcode for 118" rolls in SET_00001-25 format.
+        Counter resets to 00001 on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next barcode ID like SET_00001, SET_00002, etc.
+            str: Next barcode ID like SET_00001-25, SET_00002-25, etc.
         """
         try:
-            # Get the highest existing barcode number from inventory
-            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
-                models.InventoryMaster.barcode_id.like('SET_%')
-            ).scalar()
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
 
-            if result is None:
-                # No barcodes exist yet, start with 1
-                next_number = 1
-            else:
-                # Extract number from SET_00123 format
-                try:
-                    if result and result.startswith('SET_'):
-                        current_number = int(result[4:])  # Remove 'SET_' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid 118 roll barcode format found: {result}, starting from 1")
-                    next_number = 1
+            # Get all SET barcodes for the current year
+            pattern = f"SET_%-{current_year}"
+            result = db.query(models.InventoryMaster.barcode_id).filter(
+                models.InventoryMaster.barcode_id.like(pattern)
+            ).all()
 
-            # Format as SET_00001 (5 digits with leading zeros)
-            barcode_id = f"SET_{next_number:05d}"
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from SET_00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 2 and parts[0].startswith('SET_'):
+                            current_number = int(parts[0][4:])  # Remove 'SET_' prefix
+                            max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            next_number = max_number + 1
+
+            # Format as SET_00001-25 (5 digits with leading zeros and year)
+            barcode_id = f"SET_{next_number:05d}-{current_year}"
 
             logger.info(f"Generated 118 roll barcode: {barcode_id}")
             return barcode_id
@@ -346,44 +449,50 @@ class BarcodeGenerator:
             logger.error(f"Error generating 118 roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            fallback_id = f"SET_{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"SET_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback 118 roll barcode: {fallback_id}")
             return fallback_id
 
     @staticmethod
     def generate_jumbo_roll_barcode(db: Session) -> str:
         """
-        Generate barcode for jumbo rolls in JR_00001 format.
+        Generate barcode for jumbo rolls in JR_00001-25 format.
+        Counter resets to 00001 on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next barcode ID like JR_00001, JR_00002, etc.
+            str: Next barcode ID like JR_00001-25, JR_00002-25, etc.
         """
         try:
-            # Get the highest existing barcode number from inventory
-            result = db.query(func.max(models.InventoryMaster.barcode_id)).filter(
-                models.InventoryMaster.barcode_id.like('JR_%')
-            ).scalar()
+            current_year = _get_test_year()  # TEMPORARY TEST CODE
 
-            if result is None:
-                # No barcodes exist yet, start with 1
-                next_number = 1
-            else:
-                # Extract number from JR_00123 format
-                try:
-                    if result and result.startswith('JR_'):
-                        current_number = int(result[3:])  # Remove 'JR_' prefix
-                        next_number = current_number + 1
-                    else:
-                        next_number = 1
-                except (ValueError, AttributeError):
-                    logger.warning(f"Invalid jumbo roll barcode format found: {result}, starting from 1")
-                    next_number = 1
+            # Get all JR barcodes for the current year
+            pattern = f"JR_%-{current_year}"
+            result = db.query(models.InventoryMaster.barcode_id).filter(
+                models.InventoryMaster.barcode_id.like(pattern)
+            ).all()
 
-            # Format as JR_00001 (5 digits with leading zeros)
-            barcode_id = f"JR_{next_number:05d}"
+            # Extract counter values and find max
+            max_number = 0
+            for row in result:
+                barcode_id = row[0]
+                if barcode_id:
+                    try:
+                        # Extract number from JR_00123-25 format
+                        parts = barcode_id.split("-")
+                        if len(parts) >= 2 and parts[0].startswith('JR_'):
+                            current_number = int(parts[0][3:])  # Remove 'JR_' prefix
+                            max_number = max(max_number, current_number)
+                    except (ValueError, AttributeError, IndexError):
+                        continue
+
+            next_number = max_number + 1
+
+            # Format as JR_00001-25 (5 digits with leading zeros and year)
+            barcode_id = f"JR_{next_number:05d}-{current_year}"
 
             logger.info(f"Generated jumbo roll barcode: {barcode_id}")
             return barcode_id
@@ -392,7 +501,8 @@ class BarcodeGenerator:
             logger.error(f"Error generating jumbo roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            fallback_id = f"JR_{int(time.time())}"
+            current_year = datetime.now().strftime("%y")
+            fallback_id = f"JR_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback jumbo roll barcode: {fallback_id}")
             return fallback_id
 

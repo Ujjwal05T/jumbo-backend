@@ -892,7 +892,7 @@ class InwardChallan(Base):
     __tablename__ = "inward_challan"
 
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001
+    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001-25 (counter-year)
     date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     party_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=False, index=True)
     vehicle_number = Column(String(50), nullable=True)
@@ -919,7 +919,7 @@ class OutwardChallan(Base):
     __tablename__ = "outward_challan"
 
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
-    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001
+    serial_no = Column(String(10), unique=True, nullable=True, index=True)  # Auto-generated serial in format 00001-25 (counter-year)
     date = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     vehicle_number = Column(String(50), nullable=True)
     driver_name = Column(String(255), nullable=True)

@@ -512,92 +512,62 @@ def delete_order_item(item_id: UUID, db: Session = Depends(get_db)):
 def preview_dispatch_number(
     db: Session = Depends(get_db)
 ):
-    """Get next dispatch number preview WITHOUT advancing the sequence"""
+    """Get next dispatch number preview WITHOUT advancing the sequence (year-based format)"""
     try:
-        from sqlalchemy import text
+        from datetime import datetime, timedelta
 
-        # Try multiple approaches to get current sequence value
+        # ============================================================
+        # TEMPORARY TEST CODE - MUST MATCH id_generator.py!
+        # ============================================================
+        TEST_DAYS_OFFSET = 3  # Must match the offset in id_generator.py
 
-        # Method 1: Check if sequence exists using sys.sequences
-        try:
-            check_sequence_query = text("""
-                SELECT COUNT(*) as count
-                FROM sys.sequences
-                WHERE name = 'dispatch_record_seq'
-            """)
-            sequence_exists = db.execute(check_sequence_query).scalar()
-            logger.info(f"Sequence exists check result: {sequence_exists}")
-        except Exception as e:
-            logger.info(f"sys.sequences query failed: {e}")
-            sequence_exists = 0
-
-        if sequence_exists == 0:
-            # Method 2: Try to create sequence if it doesn't exist
-            try:
-                create_sequence_query = text("""
-                    CREATE SEQUENCE dispatch_record_seq
-                        START WITH 1
-                        INCREMENT BY 1
-                        NO MINVALUE
-                        NO MAXVALUE
-                        NO CYCLE
-                        CACHE 1
-                """)
-                db.execute(create_sequence_query)
-                db.commit()
-                logger.info("Created dispatch_record_seq sequence")
-                current_value = 0
-            except Exception as e:
-                logger.info(f"Sequence creation failed: {e}")
-                # If we can't create it, fallback to simple prediction
-                current_value = 0
+        if TEST_DAYS_OFFSET > 0:
+            test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
+            current_year = test_date.strftime("%y")
+            logger.warning(f"TEST MODE (Preview): +{TEST_DAYS_OFFSET} days → {test_date.strftime('%Y-%m-%d')} (year: {current_year})")
         else:
-            # Method 3: Try to get current value with CAST to fix pyodbc data type issue
-            try:
-                get_current_query = text("""
-                    SELECT CAST(current_value AS BIGINT) as current_value
-                    FROM sys.sequences
-                    WHERE name = 'dispatch_record_seq'
-                """)
-                result = db.execute(get_current_query).fetchone()
+            current_year = datetime.now().strftime("%y")
+        # ============================================================
 
-                if result and result.current_value is not None:
-                    current_value = int(result.current_value)
-                    logger.info(f"Current sequence value: {current_value}")
-                else:
-                    current_value = 0
-                    logger.info("Sequence exists but has no current value")
-            except Exception as e:
-                logger.info(f"Getting current value failed: {e}")
-                # If we can't get current value, try a different approach
+        # Get all dispatch frontend IDs for the current year
+        from sqlalchemy import text
+        pattern = f"DSP-%-{current_year}"
+
+        query = text("""
+            SELECT frontend_id
+            FROM dispatch_record
+            WHERE frontend_id LIKE :pattern
+        """)
+
+        result = db.execute(query, {"pattern": pattern}).fetchall()
+
+        # Extract counter values and find max
+        max_counter = 0
+        for row in result:
+            frontend_id = row[0]
+            if frontend_id:
                 try:
-                    # Method 4: Try with CONVERT instead of CAST
-                    alt_query = text("""
-                        SELECT CONVERT(BIGINT, current_value) as current_value
-                        FROM sys.sequences
-                        WHERE name = 'dispatch_record_seq'
-                    """)
-                    result = db.execute(alt_query).fetchone()
-                    if result and result.current_value is not None:
-                        current_value = int(result.current_value)
-                        logger.info(f"Current sequence value (CONVERT): {current_value}")
-                    else:
-                        current_value = 0
-                except Exception as e2:
-                    logger.info(f"Alternative query also failed: {e2}")
-                    current_value = 0
+                    # Extract counter from format: DSP-00123-25
+                    parts = frontend_id.split("-")
+                    if len(parts) >= 3 and parts[0] == "DSP":
+                        counter = int(parts[1])  # Middle part is the counter
+                        max_counter = max(max_counter, counter)
+                except (ValueError, IndexError):
+                    continue
 
-        # Preview will be current_value + 1
-        next_value = current_value + 1
-        preview_number = f"DSP-{next_value:05d}"
+        # Preview will be max_counter + 1
+        next_counter = max_counter + 1
+        preview_number = f"DSP-{next_counter:05d}-{current_year}"
 
-        logger.info(f"Preview result: {preview_number} (current: {current_value}, next: {next_value})")
+        logger.info(f"Preview dispatch number: {preview_number} (year: {current_year}, counter: {next_counter}, found {len(result)} records this year)")
 
         return {
             "preview_number": preview_number,
-            "current_sequence_value": current_value,
-            "next_sequence_value": next_value,
-            "note": "This is just a preview. Actual number will be generated when saving."
+            "current_counter": max_counter,
+            "next_counter": next_counter,
+            "current_year": current_year,
+            "total_this_year": len(result),
+            "note": "This is a preview using year-based format (DSP-XXXXX-YY). Counter resets on January 1st."
         }
 
     except Exception as e:
@@ -733,12 +703,13 @@ def create_dispatch_record(
 
         # Create dispatch record
         dispatch_record = models.DispatchRecord(
+            frontend_id=final_dispatch_number,  # Use year-based frontend ID (DSP-00001-26 format)
+            dispatch_number=final_dispatch_number,  # Also copy to dispatch_number for backward compatibility
             vehicle_number=dispatch_data.vehicle_number,
             driver_name=dispatch_data.driver_name,
             driver_mobile=dispatch_data.driver_mobile,
             payment_type=dispatch_data.payment_type,
             dispatch_date=dispatch_data.dispatch_date,
-            dispatch_number=final_dispatch_number,  # Use atomic number
             reference_number=dispatch_data.reference_number,
             client_id=dispatch_data.client_id,
             primary_order_id=dispatch_data.primary_order_id,

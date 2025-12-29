@@ -143,7 +143,7 @@ def create_manual_cut_roll(
     roll_data: schemas.ManualCutRollCreate,
     db: Session = Depends(get_db)
 ):
-    """Create a manual cut roll entry"""
+    """Create a manual cut roll entry with auto-generated year-based barcode"""
     try:
         # Validate client exists
         client = crud_operations.get_client(db, roll_data.client_id)
@@ -155,34 +155,14 @@ def create_manual_cut_roll(
         if not paper:
             raise HTTPException(status_code=404, detail="Paper not found")
 
-        # Validate reel_number is numeric and in range 8000-9000
-        try:
-            reel_no = int(roll_data.reel_number)
-            if reel_no < 1000 or reel_no > 9000:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Reel number must be between 8000 and 9000"
-                )
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail="Reel number must be a valid number between 8000 and 9000"
-            )
+        # Generate barcode_id using BarcodeGenerator (auto-increments in 8000-9000 range with year suffix)
+        from ..services.barcode_generator import BarcodeGenerator
+        barcode_id = BarcodeGenerator.generate_manual_cut_roll_barcode(db)
 
-        # Generate barcode_id from reel_number: CR_0{reel_no}
-        barcode_id = f"CR_0{roll_data.reel_number}"
+        # Extract reel_number from generated barcode (e.g., CR_08001-25 -> 8001)
+        reel_number = barcode_id.split("-")[0][3:]  # Remove "CR_" prefix and year suffix
 
-        # Check if barcode_id already exists
-        existing_roll = db.query(models.ManualCutRoll).filter(
-            models.ManualCutRoll.barcode_id == barcode_id
-        ).first()
-        if existing_roll:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Reel number {roll_data.reel_number} already exists. Please use a different number."
-            )
-
-        # Generate frontend_id (MCR format for internal tracking)
+        # Generate frontend_id (CLR format for internal tracking)
         frontend_id = FrontendIDGenerator.generate_frontend_id("manual_cut_roll", db)
 
         # Create manual cut roll record
@@ -191,7 +171,7 @@ def create_manual_cut_roll(
             barcode_id=barcode_id,
             client_id=roll_data.client_id,
             paper_id=roll_data.paper_id,
-            reel_number=roll_data.reel_number,
+            reel_number=reel_number,
             width_inches=float(roll_data.width_inches),
             weight_kg=float(roll_data.weight_kg),
             status="available",

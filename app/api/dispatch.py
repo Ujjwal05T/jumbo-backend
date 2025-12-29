@@ -421,35 +421,23 @@ def get_payment_slip_preview_id(
     db: Session = Depends(get_db)
 ):
     """
-    Get the next payment slip ID (BI-00001 or CI-00001) for preview before saving.
+    Get the next payment slip ID with year suffix (BI-00001-25 or CI-00001-25) for preview before saving.
     """
     try:
         if payment_type not in ['bill', 'cash']:
             raise HTTPException(status_code=400, detail="Invalid payment type. Must be 'bill' or 'cash'")
 
-        # Determine prefix based on payment type
-        prefix = "BI-" if payment_type == 'bill' else "CI-"
+        # Use FrontendIDGenerator with year suffix
+        from ..services.id_generator import FrontendIDGenerator
 
-        # Get the latest payment slip with this prefix
-        latest_slip = db.query(models.PaymentSlipMaster).filter(
-            models.PaymentSlipMaster.frontend_id.like(f"{prefix}%")
-        ).order_by(desc(models.PaymentSlipMaster.frontend_id)).first()
+        # Determine table key based on payment type
+        table_key = "payment_slip_bill" if payment_type == 'bill' else "payment_slip_cash"
 
-        if latest_slip and latest_slip.frontend_id:
-            # Extract the number part and increment
-            try:
-                last_num = int(latest_slip.frontend_id.split('-')[1])
-                next_num = last_num + 1
-            except (IndexError, ValueError):
-                next_num = 1
-        else:
-            next_num = 1
-
-        # Format the new ID
-        next_id = f"{prefix}{next_num:05d}"
+        # Generate preview ID using FrontendIDGenerator (BI-00001-25 or CI-00001-25)
+        preview_id = FrontendIDGenerator.generate_frontend_id(table_key, db)
 
         return {
-            "preview_id": next_id,
+            "preview_id": preview_id,
             "payment_type": payment_type
         }
 
@@ -465,7 +453,7 @@ def create_payment_slip(
     db: Session = Depends(get_db)
 ):
     """
-    Create a new payment slip with auto-generated frontend_id (BI-00001 or CI-00001).
+    Create a new payment slip with auto-generated frontend_id with year suffix (BI-00001-25 or CI-00001-25).
     Saves the payment slip master record and all item records.
     """
     try:
@@ -486,23 +474,14 @@ def create_payment_slip(
         if payment_type not in ['bill', 'cash']:
             raise HTTPException(status_code=400, detail="Invalid payment type")
 
-        # Generate frontend_id using the same logic as preview
-        prefix = "BI-" if payment_type == 'bill' else "CI-"
+        # Generate frontend_id with year suffix using FrontendIDGenerator (BI-00001-25 or CI-00001-25)
+        from ..services.id_generator import FrontendIDGenerator
 
-        latest_slip = db.query(models.PaymentSlipMaster).filter(
-            models.PaymentSlipMaster.frontend_id.like(f"{prefix}%")
-        ).order_by(desc(models.PaymentSlipMaster.frontend_id)).first()
+        # Determine table key based on payment type
+        table_key = "payment_slip_bill" if payment_type == 'bill' else "payment_slip_cash"
 
-        if latest_slip and latest_slip.frontend_id:
-            try:
-                last_num = int(latest_slip.frontend_id.split('-')[1])
-                next_num = last_num + 1
-            except (IndexError, ValueError):
-                next_num = 1
-        else:
-            next_num = 1
-
-        frontend_id = f"{prefix}{next_num:05d}"
+        # Generate frontend_id
+        frontend_id = FrontendIDGenerator.generate_frontend_id(table_key, db)
 
         # Parse slip_date if provided
         slip_date_obj = None
@@ -558,6 +537,141 @@ def create_payment_slip(
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating payment slip: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/payment-slip/list", tags=["Payment Slip"])
+def get_payment_slip_list(
+    skip: int = 0,
+    limit: int = 50,
+    client_id: Optional[str] = None,
+    payment_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Get list of all payment slips with filtering and pagination.
+    Returns payment slip data joined with dispatch record information.
+    """
+    try:
+        # Base query with relationships
+        query = db.query(models.PaymentSlipMaster).options(
+            joinedload(models.PaymentSlipMaster.dispatch_record).joinedload(models.DispatchRecord.client),
+            joinedload(models.PaymentSlipMaster.dispatch_record).joinedload(models.DispatchRecord.created_by),
+            joinedload(models.PaymentSlipMaster.created_by),
+            joinedload(models.PaymentSlipMaster.payment_slip_items)
+        )
+
+        # Apply filters
+        if payment_type and payment_type.strip() and payment_type != "all":
+            query = query.filter(models.PaymentSlipMaster.payment_type == payment_type)
+
+        if client_id and client_id.strip() and client_id != "all":
+            try:
+                client_uuid = uuid.UUID(client_id)
+                query = query.join(models.DispatchRecord).filter(
+                    models.DispatchRecord.client_id == client_uuid
+                )
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid client ID format")
+
+        # Date range filters on slip_date
+        if from_date and from_date.strip():
+            try:
+                from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                query = query.filter(models.PaymentSlipMaster.slip_date >= from_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid from_date format. Use YYYY-MM-DD")
+
+        if to_date and to_date.strip():
+            try:
+                to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+                # Include the entire day
+                to_dt = to_dt.replace(hour=23, minute=59, second=59)
+                query = query.filter(models.PaymentSlipMaster.slip_date <= to_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid to_date format. Use YYYY-MM-DD")
+
+        # Search filter (search in payment slip ID, bill number, dispatch number)
+        if search and search.strip():
+            search_term = f"%{search.strip()}%"
+            query = query.join(models.DispatchRecord).filter(
+                or_(
+                    models.PaymentSlipMaster.frontend_id.like(search_term),
+                    models.PaymentSlipMaster.bill_no.like(search_term),
+                    models.PaymentSlipMaster.ebay_no.like(search_term),
+                    models.DispatchRecord.dispatch_number.like(search_term),
+                    models.DispatchRecord.reference_number.like(search_term),
+                    models.DispatchRecord.vehicle_number.like(search_term)
+                )
+            )
+
+        # Get total count before pagination
+        total_count = query.count()
+
+        # Calculate total pages
+        total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
+
+        # Apply pagination and ordering (newest first)
+        payment_slips = query.order_by(desc(models.PaymentSlipMaster.created_at)).offset(skip).limit(limit).all()
+
+        # Format response
+        payment_slip_list = []
+        for slip in payment_slips:
+            dispatch = slip.dispatch_record
+
+            # Calculate total items and weight from payment slip items
+            total_items = sum(item.quantity for item in slip.payment_slip_items)
+            total_weight_kg = sum(float(item.total_weight_kg) for item in slip.payment_slip_items)
+
+            payment_slip_list.append({
+                "id": str(slip.id),
+                "payment_slip_id": slip.frontend_id,  # BI-00001 or CI-00001
+                "slip_date": slip.slip_date.isoformat() if slip.slip_date else None,
+                "payment_type": slip.payment_type,
+                "bill_no": slip.bill_no,
+                "ebay_no": slip.ebay_no,
+                "total_amount": float(slip.total_amount) if slip.total_amount else 0,
+                "dispatch": {
+                    "id": str(dispatch.id),
+                    "dispatch_number": dispatch.dispatch_number,
+                    "reference_number": dispatch.reference_number,
+                    "dispatch_date": dispatch.dispatch_date.isoformat() if dispatch.dispatch_date else None,
+                    "vehicle_number": dispatch.vehicle_number,
+                    "driver_name": dispatch.driver_name,
+                    "driver_mobile": dispatch.driver_mobile,
+                    "status": dispatch.status,
+                    "client": {
+                        "id": str(dispatch.client.id),
+                        "company_name": dispatch.client.company_name,
+                        "contact_person": dispatch.client.contact_person,
+                        "phone": dispatch.client.phone,
+                        "email": dispatch.client.email,
+                        "address": dispatch.client.address,
+                        "gst_number": dispatch.client.gst_number
+                    } if dispatch.client else None
+                },
+                "total_items": total_items,
+                "total_weight_kg": total_weight_kg,
+                "created_at": slip.created_at.isoformat() if slip.created_at else None,
+                "created_by": {
+                    "id": str(slip.created_by.id),
+                    "name": slip.created_by.name
+                } if slip.created_by else None
+            })
+
+        return {
+            "payment_slips": payment_slip_list,
+            "total_count": total_count,
+            "total_pages": total_pages,
+            "current_page": (skip // limit) + 1 if limit > 0 else 1
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching payment slip list: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/payment-slip/by-dispatch/{dispatch_id}", tags=["Payment Slip"])
