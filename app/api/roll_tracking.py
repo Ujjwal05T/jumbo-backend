@@ -588,11 +588,54 @@ def track_roll_hierarchy(
     db: Session = Depends(get_db)
 ):
     """
-    Get complete production hierarchy for any barcode (Jumbo, SET/118", or Cut Roll)
+    Get complete production hierarchy for any barcode (Jumbo, SET/118", Cut Roll, or Manual Cut Roll)
     Returns the full hierarchical structure with parent and child relationships
+    Priority: Manual Cut Rolls first, then regular Inventory
     """
     try:
-        # Find the inventory item by barcode
+        # First, check if this is a manual cut roll (priority)
+        manual_roll = db.query(models.ManualCutRoll).options(
+            joinedload(models.ManualCutRoll.paper),
+            joinedload(models.ManualCutRoll.client)
+        ).filter(
+            models.ManualCutRoll.barcode_id == barcode
+        ).first()
+
+        if manual_roll:
+            # Return manual cut roll response
+            return {
+                "searched_barcode": barcode,
+                "roll_type": "manual_cut",
+                "is_manual_roll": True,
+                "manual_roll_info": {
+                    "id": str(manual_roll.id),
+                    "barcode_id": manual_roll.barcode_id,
+                    "frontend_id": manual_roll.frontend_id,
+                    "reel_number": manual_roll.reel_number,
+                    "width_inches": float(manual_roll.width_inches),
+                    "weight_kg": float(manual_roll.weight_kg),
+                    "status": manual_roll.status,
+                    "location": manual_roll.location,
+                    "created_at": manual_roll.created_at.isoformat(),
+                    "client": {
+                        "id": str(manual_roll.client.id),
+                        "company_name": manual_roll.client.company_name,
+                        "contact_person": manual_roll.client.contact_person,
+                        "phone": manual_roll.client.phone
+                    } if manual_roll.client else None,
+                    "paper": {
+                        "id": str(manual_roll.paper.id),
+                        "name": manual_roll.paper.name,
+                        "gsm": manual_roll.paper.gsm,
+                        "bf": float(manual_roll.paper.bf),
+                        "shade": manual_roll.paper.shade,
+                        "type": manual_roll.paper.type
+                    } if manual_roll.paper else None
+                },
+                "hierarchy": None
+            }
+
+        # If not a manual roll, find the inventory item by barcode
         inventory_item = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper)
         ).filter(

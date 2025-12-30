@@ -4,26 +4,12 @@ from sqlalchemy import desc, text
 from uuid import UUID
 import logging
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .. import models, schemas
 
 logger = logging.getLogger(__name__)
-
-# ============================================================
-# TEMPORARY TEST CODE - REMOVE AFTER TESTING!
-# Global test offset: adds days to current date to test year change
-# ============================================================
-TEST_DAYS_OFFSET = 3  # Change to 0 to disable, or 3-4 to test year change
-
-def _get_test_year():
-    """Helper to get year with test offset applied."""
-    if TEST_DAYS_OFFSET > 0:
-        test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
-        logger.warning(f"TEST MODE (Challan): +{TEST_DAYS_OFFSET} days → {test_date.strftime('%Y-%m-%d')} (year: {test_date.strftime('%y')})")
-        return test_date.strftime("%y")
-    return datetime.now().strftime("%y")
-# ============================================================
 
 # ============================================================================
 # MATERIAL MASTER CRUD
@@ -90,7 +76,7 @@ def create_inward_challan(db: Session, challan: schemas.InwardChallanCreate) -> 
 
     # Generate serial number with year suffix
     try:
-        current_year = _get_test_year()  # TEMPORARY TEST CODE
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         # Get all serial numbers for the current year
         pattern = f"%-{current_year}"
@@ -122,7 +108,7 @@ def create_inward_challan(db: Session, challan: schemas.InwardChallanCreate) -> 
     except Exception as e:
         logger.error(f"Error generating inward challan serial number: {e}")
         # Fallback: use current year with counter 1
-        current_year = datetime.now().strftime("%y")
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
         challan_data['serial_no'] = f"00001-{current_year}"
 
     # Calculate final_weight if not provided but net_weight and report are available
@@ -224,7 +210,7 @@ def create_outward_challan(db: Session, challan: schemas.OutwardChallanCreate) -
 
     # Generate serial number with year suffix
     try:
-        current_year = _get_test_year()  # TEMPORARY TEST CODE
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         # Get all serial numbers for the current year
         pattern = f"%-{current_year}"
@@ -256,7 +242,7 @@ def create_outward_challan(db: Session, challan: schemas.OutwardChallanCreate) -
     except Exception as e:
         logger.error(f"Error generating outward challan serial number: {e}")
         # Fallback: use current year with counter 1
-        current_year = datetime.now().strftime("%y")
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
         challan_data['serial_no'] = f"00001-{current_year}"
 
     db_challan = models.OutwardChallan(**challan_data)
@@ -319,7 +305,7 @@ def get_next_inward_serial(db: Session) -> str:
     """
 
     try:
-        current_year = _get_test_year()  # TEMPORARY TEST CODE
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         # Get all serial numbers for the current year
         pattern = f"%-{current_year}"
@@ -350,7 +336,7 @@ def get_next_inward_serial(db: Session) -> str:
     except Exception as e:
         logger.error(f"Error getting next inward serial preview: {e}")
         # Fallback: use current year with counter 1
-        current_year = datetime.now().strftime("%y")
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
         return f"00001-{current_year}"
 
 def get_next_outward_serial(db: Session) -> str:
@@ -360,7 +346,7 @@ def get_next_outward_serial(db: Session) -> str:
     """
 
     try:
-        current_year = _get_test_year()  # TEMPORARY TEST CODE
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         # Get all serial numbers for the current year
         pattern = f"%-{current_year}"
@@ -391,6 +377,6 @@ def get_next_outward_serial(db: Session) -> str:
     except Exception as e:
         logger.error(f"Error getting next outward serial preview: {e}")
         # Fallback: use current year with counter 1
-        current_year = datetime.now().strftime("%y")
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
         return f"00001-{current_year}"
         

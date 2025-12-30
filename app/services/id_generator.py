@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from typing import Dict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import logging
 
 
@@ -209,23 +210,7 @@ class FrontendIDGenerator:
         # ============================================================
         # For tables WITH year suffix (orders, dispatch, etc.)
         # ============================================================
-        # TEMPORARY TEST CODE - REMOVE AFTER TESTING!
-        # Adds days to current date to simulate future and test year reset
-        # ============================================================
-        from datetime import timedelta
-
-        TEST_DAYS_OFFSET = 3  # Change to 0 to disable, or 3-4 to test year change
-
-        if TEST_DAYS_OFFSET > 0:
-            test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
-            current_year = test_date.strftime("%y")
-            logger.warning(f"TEST MODE: Adding {TEST_DAYS_OFFSET} days. Simulated date: {test_date.strftime('%Y-%m-%d')}, Using year: {current_year}")
-        else:
-            # Normal production code
-            current_year = datetime.now().strftime("%y")
-        # ============================================================
-        # END TEMPORARY TEST CODE
-        # ============================================================
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         try:
             # ============================================================
@@ -391,16 +376,7 @@ class FrontendIDGenerator:
             Dictionary with table names and their current counter values for this year
         """
         status = {}
-
-        # TEMPORARY TEST CODE - matches generate_frontend_id logic
-        from datetime import timedelta
-        TEST_DAYS_OFFSET = 3  # Must match the offset in generate_frontend_id
-
-        if TEST_DAYS_OFFSET > 0:
-            test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
-            current_year = test_date.strftime("%y")
-        else:
-            current_year = datetime.now().strftime("%y")
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         for table_name, config in cls.ID_PATTERNS.items():
             try:

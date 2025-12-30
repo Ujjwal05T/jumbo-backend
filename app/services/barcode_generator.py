@@ -1,26 +1,12 @@
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from .. import models
 import logging
 
 logger = logging.getLogger(__name__)
-
-# ============================================================
-# TEMPORARY TEST CODE - REMOVE AFTER TESTING!
-# Global test offset: adds days to current date to test year change
-# ============================================================
-TEST_DAYS_OFFSET = 3  # Change to 0 to disable, or 3-4 to test year change
-
-def _get_test_year():
-    """Helper to get year with test offset applied."""
-    if TEST_DAYS_OFFSET > 0:
-        test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
-        logger.warning(f"TEST MODE: +{TEST_DAYS_OFFSET} days → {test_date.strftime('%Y-%m-%d')} (year: {test_date.strftime('%y')})")
-        return test_date.strftime("%y")
-    return datetime.now().strftime("%y")
-# ============================================================
 
 class BarcodeGenerator:
     """
@@ -46,7 +32,7 @@ class BarcodeGenerator:
             str: Next barcode ID like CR_00001-25, CR_00002-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all barcodes for the current year
             pattern = f"CR_%-{current_year}"
@@ -92,7 +78,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating cut roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"CR_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback barcode: {fallback_id}")
             return fallback_id
@@ -112,7 +98,7 @@ class BarcodeGenerator:
         """
         try:
             prefix = "JMB" if roll_type.lower() == "jumbo" else "INV"
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all barcodes for this prefix and current year
             pattern = f"{prefix}_%-{current_year}"
@@ -143,7 +129,7 @@ class BarcodeGenerator:
         except Exception as e:
             logger.error(f"Error generating inventory barcode: {e}")
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"{roll_type.upper()}_{int(time.time()) % 100000:05d}-{current_year}"
             return fallback_id
     
@@ -160,7 +146,7 @@ class BarcodeGenerator:
             str: Next wastage barcode ID like WSB-00001-25, WSB-00002-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all wastage barcodes for the current year
             pattern = f"WSB-%-{current_year}"
@@ -194,7 +180,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating wastage barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"WSB-{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback wastage barcode: {fallback_id}")
             return fallback_id
@@ -213,7 +199,7 @@ class BarcodeGenerator:
             str: Next barcode ID like CR_08000-25, CR_08001-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all manual cut roll barcodes for the current year
             pattern = f"CR_%-{current_year}"
@@ -258,7 +244,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating manual cut roll barcode: {e}")
             # Fallback to timestamp-based ID (still in format but with timestamp)
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"CR_{int(time.time()) % 1000 + 8000:05d}-{current_year}"
             logger.warning(f"Using fallback manual cut roll barcode: {fallback_id}")
             return fallback_id
@@ -276,7 +262,7 @@ class BarcodeGenerator:
             str: Next SCR barcode ID like SCR-00001-25, SCR-00002-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all SCR barcodes for the current year
             pattern = f"SCR-%-{current_year}"
@@ -310,7 +296,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating scrap cut roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"SCR-{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback SCR barcode: {fallback_id}")
             return fallback_id
@@ -415,7 +401,7 @@ class BarcodeGenerator:
             str: Next barcode ID like SET_00001-25, SET_00002-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all SET barcodes for the current year
             pattern = f"SET_%-{current_year}"
@@ -449,7 +435,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating 118 roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"SET_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback 118 roll barcode: {fallback_id}")
             return fallback_id
@@ -467,7 +453,7 @@ class BarcodeGenerator:
             str: Next barcode ID like JR_00001-25, JR_00002-25, etc.
         """
         try:
-            current_year = _get_test_year()  # TEMPORARY TEST CODE
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
             # Get all JR barcodes for the current year
             pattern = f"JR_%-{current_year}"
@@ -501,7 +487,7 @@ class BarcodeGenerator:
             logger.error(f"Error generating jumbo roll barcode: {e}")
             # Fallback to timestamp-based ID
             import time
-            current_year = datetime.now().strftime("%y")
+            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
             fallback_id = f"JR_{int(time.time()) % 100000:05d}-{current_year}"
             logger.warning(f"Using fallback jumbo roll barcode: {fallback_id}")
             return fallback_id

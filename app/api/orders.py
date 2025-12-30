@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .base import get_db, validate_status_transition
 from .. import crud_operations, schemas, models
@@ -514,23 +515,9 @@ def preview_dispatch_number(
 ):
     """Get next dispatch number preview WITHOUT advancing the sequence (year-based format)"""
     try:
-        from datetime import datetime, timedelta
-
-        # ============================================================
-        # TEMPORARY TEST CODE - MUST MATCH id_generator.py!
-        # ============================================================
-        TEST_DAYS_OFFSET = 3  # Must match the offset in id_generator.py
-
-        if TEST_DAYS_OFFSET > 0:
-            test_date = datetime.now() + timedelta(days=TEST_DAYS_OFFSET)
-            current_year = test_date.strftime("%y")
-            logger.warning(f"TEST MODE (Preview): +{TEST_DAYS_OFFSET} days → {test_date.strftime('%Y-%m-%d')} (year: {current_year})")
-        else:
-            current_year = datetime.now().strftime("%y")
-        # ============================================================
+        current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
         # Get all dispatch frontend IDs for the current year
-        from sqlalchemy import text
         pattern = f"DSP-%-{current_year}"
 
         query = text("""
