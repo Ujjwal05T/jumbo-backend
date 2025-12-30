@@ -20,16 +20,21 @@ class BarcodeGenerator:
     @staticmethod
     def generate_cut_roll_barcode(db: Session) -> str:
         """
-        Generate next sequential cut roll barcode in CR_00001-25 format.
-        Range: CR_00001-25 to CR_07999-25, then skips to CR_09001-25+
-        (CR_08000-25 to CR_09000-25 reserved for manual cut rolls)
-        Counter resets to 00001 on January 1st each year.
+        Generate next sequential cut roll barcode in CR_XXXXX-YY format.
+
+        Year-based reserved ranges for manual cut rolls:
+        - Year 25: CR_08000-25 to CR_09000-25 (8000-9000 reserved)
+          Regular rolls: 1-7999, then 9001+
+        - Year 26+: CR_00000-26 to CR_01000-26 (0-1000 reserved)
+          Regular rolls: Start from 1001+
+
+        Counter resets on January 1st each year.
 
         Args:
             db: Database session
 
         Returns:
-            str: Next barcode ID like CR_00001-25, CR_00002-25, etc.
+            str: Next barcode ID like CR_00001-25, CR_01001-26, etc.
         """
         try:
             current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
@@ -40,7 +45,7 @@ class BarcodeGenerator:
                 models.InventoryMaster.barcode_id.like(pattern)
             ).all()
 
-            # Extract counter values and find max
+            # Extract counter values and find max (excluding manual ranges)
             max_number = 0
             for row in result:
                 barcode_id = row[0]
@@ -50,23 +55,45 @@ class BarcodeGenerator:
                         parts = barcode_id.split("-")
                         if len(parts) >= 2 and parts[0].startswith('CR_'):
                             current_number = int(parts[0][3:])  # Remove 'CR_' prefix
-                            # Skip manual cut roll range (8000-9000) when finding max
-                            if current_number < 8000 or current_number > 9000:
-                                max_number = max(max_number, current_number)
+
+                            # Skip manual cut roll ranges based on year
+                            if current_year == "25":
+                                # Year 25: Skip 8000-9000 range
+                                if current_number < 8000 or current_number > 9000:
+                                    max_number = max(max_number, current_number)
+                            else:
+                                # Year 26+: Skip 0-1000 range
+                                if current_number > 1000:
+                                    max_number = max(max_number, current_number)
                     except (ValueError, AttributeError, IndexError):
                         continue
 
-            # Increment counter
-            next_number = max_number + 1
+            # Determine starting number based on year
+            if current_year == "25":
+                # Year 25: Start from 1 if no existing rolls
+                if max_number == 0:
+                    next_number = 1
+                else:
+                    next_number = max_number + 1
 
-            # Skip the reserved range for manual cut rolls (8000-9000)
-            if next_number == 8000:
-                logger.info(f"Reached CR_08000-{current_year}, skipping to CR_09001-{current_year} (manual cut roll range)")
-                next_number = 9001
-            elif 8000 < next_number <= 9000:
-                # Should not happen, but safety check
-                logger.warning(f"Next number {next_number} in reserved manual range, jumping to 9001")
-                next_number = 9001
+                # Skip the reserved range for manual cut rolls (8000-9000)
+                if next_number == 8000:
+                    logger.info(f"Reached CR_08000-{current_year}, skipping to CR_09001-{current_year} (manual cut roll range)")
+                    next_number = 9001
+                elif 8000 < next_number <= 9000:
+                    logger.warning(f"Next number {next_number} in reserved manual range, jumping to 9001")
+                    next_number = 9001
+            else:
+                # Year 26+: Start from 1001 to skip manual range (0-1000)
+                if max_number == 0 or max_number < 1001:
+                    next_number = 1001
+                else:
+                    next_number = max_number + 1
+
+                # Safety check: ensure we never use the manual range (0-1000)
+                if next_number <= 1000:
+                    logger.warning(f"Next number {next_number} in reserved manual range (0-1000), jumping to 1001")
+                    next_number = 1001
 
             # Format as CR_00001-25 (5 digits with leading zeros and year)
             barcode_id = f"CR_{next_number:05d}-{current_year}"
@@ -79,7 +106,9 @@ class BarcodeGenerator:
             # Fallback to timestamp-based ID
             import time
             current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
-            fallback_id = f"CR_{int(time.time()) % 100000:05d}-{current_year}"
+            # Use timestamp in safe range (avoid reserved ranges)
+            fallback_number = (int(time.time()) % 90000) + 10000  # Range: 10000-99999
+            fallback_id = f"CR_{fallback_number:05d}-{current_year}"
             logger.warning(f"Using fallback barcode: {fallback_id}")
             return fallback_id
     
@@ -186,68 +215,55 @@ class BarcodeGenerator:
             return fallback_id
 
     @staticmethod
-    def generate_manual_cut_roll_barcode(db: Session) -> str:
+    def generate_manual_cut_roll_barcode(db: Session, reel_no: int) -> str:
         """
-        Generate barcode for manual cut rolls in CR_08000-25 to CR_09000-25 format.
-        This is a reserved range within the CR_ series for manually entered rolls.
-        Counter resets to 08000 on January 1st each year.
+        Generate barcode for manual cut rolls using reel number directly.
+        Format: CR_{reel_no:05d}-{year}
+
+        Year-based reel number ranges:
+        - Year 25: reel_no must be 8000-9000 (legacy range)
+        - Year 26+: reel_no must be 0-1000 (new range)
 
         Args:
             db: Database session
+            reel_no: The reel number to use in the barcode
 
         Returns:
-            str: Next barcode ID like CR_08000-25, CR_08001-25, etc.
+            str: Barcode like CR_08001-25 or CR_00500-26, etc.
         """
         try:
             current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
 
-            # Get all manual cut roll barcodes for the current year
-            pattern = f"CR_%-{current_year}"
-            result = db.query(models.ManualCutRoll.barcode_id).filter(
-                models.ManualCutRoll.barcode_id.like(pattern)
-            ).all()
+            # Validate reel_no based on year
+            if current_year == "25":
+                # Year 25: must be in range 8000-9000
+                if not (8000 <= reel_no <= 9000):
+                    raise ValueError(f"For year 25, reel number must be between 8000-9000. Got: {reel_no}")
+            else:
+                # Year 26+: must be in range 0-1000
+                if not (0 <= reel_no <= 1000):
+                    raise ValueError(f"For year {current_year}, reel number must be between 0-1000. Got: {reel_no}")
 
-            # Extract counter values in the 8000-9000 range and find max
-            max_number = 7999  # Start before the manual range
-            for row in result:
-                barcode_id = row[0]
-                if barcode_id:
-                    try:
-                        # Extract number from CR_08000-25 format
-                        parts = barcode_id.split("-")
-                        if len(parts) >= 2 and parts[0].startswith('CR_'):
-                            current_number = int(parts[0][3:])  # Remove 'CR_' prefix
-                            # Only consider numbers in the manual range
-                            if 8000 <= current_number <= 9000:
-                                max_number = max(max_number, current_number)
-                    except (ValueError, AttributeError, IndexError):
-                        continue
+            # Format as CR_{reel_no:05d}-{year}
+            barcode_id = f"CR_{reel_no:05d}-{current_year}"
 
-            # If no manual rolls exist this year, start at 8000
-            next_number = 8000 if max_number == 7999 else max_number + 1
+            # Check if barcode already exists
+            existing = db.query(models.ManualCutRoll).filter(
+                models.ManualCutRoll.barcode_id == barcode_id
+            ).first()
 
-            # Check if we've exceeded the reserved range
-            if next_number > 9000:
-                logger.error(f"Manual cut roll range exhausted for year {current_year}! Attempted to generate CR_{next_number:05d}-{current_year}")
-                raise ValueError(f"Manual cut roll barcode range (CR_08000-{current_year} to CR_09000-{current_year}) is exhausted. Maximum 1001 manual rolls reached for this year.")
+            if existing:
+                raise ValueError(f"Barcode {barcode_id} already exists for reel number {reel_no}")
 
-            # Format as CR_08000-25 (5 digits with leading zeros and year)
-            barcode_id = f"CR_{next_number:05d}-{current_year}"
-
-            logger.info(f"Generated manual cut roll barcode: {barcode_id}")
+            logger.info(f"Generated manual cut roll barcode: {barcode_id} (reel_no: {reel_no})")
             return barcode_id
 
         except ValueError:
-            # Re-raise the exhaustion error
+            # Re-raise validation errors
             raise
         except Exception as e:
             logger.error(f"Error generating manual cut roll barcode: {e}")
-            # Fallback to timestamp-based ID (still in format but with timestamp)
-            import time
-            current_year = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%y")
-            fallback_id = f"CR_{int(time.time()) % 1000 + 8000:05d}-{current_year}"
-            logger.warning(f"Using fallback manual cut roll barcode: {fallback_id}")
-            return fallback_id
+            raise
 
     @staticmethod
     def generate_scrap_cut_roll_barcode(db: Session) -> str:

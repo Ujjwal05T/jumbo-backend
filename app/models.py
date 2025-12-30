@@ -585,10 +585,12 @@ class DispatchRecord(Base):
     frontend_id = Column(String(50), unique=True, nullable=True, index=True)  # DSP-2025-001, etc.
 
     # Dispatch details
+    rst_no = Column(String(50), nullable=True, index=True)  # RST number from OutwardChallan
     vehicle_number = Column(String(50), nullable=False)
     driver_name = Column(String(255), nullable=False)
     driver_mobile = Column(String(20), nullable=False)
     locket_no = Column(String(50), nullable=True)  # Optional locket number
+    gross_weight = Column(Numeric(10, 3), nullable=True)  # Gross weight from OutwardChallan
     
     # Payment and reference
     payment_type = Column(String(20), nullable=True)  # Optional payment type
@@ -931,6 +933,7 @@ class OutwardChallan(Base):
     gross_weight = Column(Numeric(10, 3), nullable=True)
     net_weight = Column(Numeric(10, 3), nullable=True)
     bill_no = Column(String(50), nullable=True)
+    bill_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 # ============================================================================

@@ -155,12 +155,19 @@ def create_manual_cut_roll(
         if not paper:
             raise HTTPException(status_code=404, detail="Paper not found")
 
-        # Generate barcode_id using BarcodeGenerator (auto-increments in 8000-9000 range with year suffix)
-        from ..services.barcode_generator import BarcodeGenerator
-        barcode_id = BarcodeGenerator.generate_manual_cut_roll_barcode(db)
+        # Convert reel_number to int for barcode generation
+        try:
+            reel_no_int = int(roll_data.reel_number)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Reel number must be a valid integer")
 
-        # Extract reel_number from generated barcode (e.g., CR_08001-25 -> 8001)
-        reel_number = barcode_id.split("-")[0][3:]  # Remove "CR_" prefix and year suffix
+        # Generate barcode_id using reel number
+        # Year 25: reel_no 8000-9000, Year 26+: reel_no 0-1000
+        from ..services.barcode_generator import BarcodeGenerator
+        try:
+            barcode_id = BarcodeGenerator.generate_manual_cut_roll_barcode(db, reel_no_int)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         # Generate frontend_id (CLR format for internal tracking)
         frontend_id = FrontendIDGenerator.generate_frontend_id("manual_cut_roll", db)
@@ -171,7 +178,7 @@ def create_manual_cut_roll(
             barcode_id=barcode_id,
             client_id=roll_data.client_id,
             paper_id=roll_data.paper_id,
-            reel_number=reel_number,
+            reel_number=roll_data.reel_number,
             width_inches=float(roll_data.width_inches),
             weight_kg=float(roll_data.weight_kg),
             status="available",

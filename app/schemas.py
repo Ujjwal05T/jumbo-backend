@@ -290,6 +290,7 @@ class OutwardChallanBase(BaseModel):
     gross_weight: Optional[float] = Field(None, ge=0)
     net_weight: Optional[float] = Field(None, ge=0)
     bill_no: Optional[str] = Field(None, max_length=50)
+    bill_date: Optional[str] = None
 
 class OutwardChallanCreate(OutwardChallanBase):
     pass
@@ -305,11 +306,13 @@ class OutwardChallanUpdate(BaseModel):
     gross_weight: Optional[float] = Field(None, ge=0)
     net_weight: Optional[float] = Field(None, ge=0)
     bill_no: Optional[str] = Field(None, max_length=50)
+    bill_date: Optional[str] = None
 
 class OutwardChallan(OutwardChallanBase):
     id: UUID
     serial_no: Optional[str] = Field(None, description="Auto-generated serial number in format 00001")
     date: datetime
+    bill_date: Optional[datetime] = None  # Override to accept datetime from database
     created_at: datetime
 
     class Config:

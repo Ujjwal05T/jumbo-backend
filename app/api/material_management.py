@@ -320,6 +320,24 @@ def delete_outward_challan(challan_id: UUID, db: Session = Depends(get_db)):
         logger.error(f"Error deleting outward challan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/outward-challans/by-rst/{rst_no}", response_model=schemas.OutwardChallan, tags=["Outward Challan"])
+def get_outward_challan_by_rst(rst_no: str, db: Session = Depends(get_db)):
+    """Get outward challan by RST number for auto-filling dispatch form"""
+    try:
+        challan = db.query(models.OutwardChallan).filter(
+            models.OutwardChallan.rst_no == rst_no
+        ).first()
+
+        if not challan:
+            raise HTTPException(status_code=404, detail=f"Outward challan with RST number '{rst_no}' not found")
+
+        return challan
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching outward challan by RST number: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # SERIAL NUMBER ENDPOINTS (moved above parameterized routes to avoid conflicts)
 # ============================================================================
