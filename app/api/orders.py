@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, text, desc
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
@@ -695,6 +695,9 @@ def create_dispatch_record(
             vehicle_number=dispatch_data.vehicle_number,
             driver_name=dispatch_data.driver_name,
             driver_mobile=dispatch_data.driver_mobile,
+            locket_no=dispatch_data.locket_no,
+            rst_no=dispatch_data.rst_no,
+            gross_weight=float(dispatch_data.gross_weight) if dispatch_data.gross_weight and dispatch_data.gross_weight.strip() else None,
             payment_type=dispatch_data.payment_type,
             dispatch_date=dispatch_data.dispatch_date,
             reference_number=dispatch_data.reference_number,
@@ -704,6 +707,7 @@ def create_dispatch_record(
             order_frontend_id=primary_order_frontend_id,  # Store order frontend ID
             total_items=total_items_count,
             total_weight_kg=total_weight,
+            is_draft=dispatch_data.is_draft,  # NEW: Draft status
             created_by_id=dispatch_data.created_by_id
         )
 
@@ -811,10 +815,15 @@ def create_dispatch_record(
         db.commit()
         db.refresh(dispatch_record)
 
+        # Update message based on draft status
+        status_msg = "Draft saved successfully" if dispatch_record.is_draft else "Dispatch record created successfully"
+        message = f"{status_msg} with {total_items_count} items ({len(inventory_items)} regular, {len(wastage_items)} wastage, {len(manual_cut_rolls)} manual)"
+
         return {
-            "message": f"Dispatch record created successfully with {total_items_count} items ({len(inventory_items)} regular, {len(wastage_items)} wastage, {len(manual_cut_rolls)} manual)",
+            "message": message,
             "dispatch_id": str(dispatch_record.id),
             "dispatch_number": dispatch_record.dispatch_number,
+            "is_draft": dispatch_record.is_draft,  # NEW: Include draft status
             "client_name": client.company_name,
             "vehicle_number": dispatch_record.vehicle_number,
             "driver_name": dispatch_record.driver_name,
@@ -835,6 +844,111 @@ def create_dispatch_record(
         raise
     except Exception as e:
         logger.error(f"Error creating dispatch record: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/dispatch/my-drafts", tags=["Dispatch"])
+def get_my_drafts(db: Session = Depends(get_db)):
+    """Get all draft dispatches for the current user"""
+    try:
+        drafts = db.query(models.DispatchRecord).options(
+            joinedload(models.DispatchRecord.client),
+            joinedload(models.DispatchRecord.dispatch_items)
+        ).filter(
+            models.DispatchRecord.is_draft == True
+        ).order_by(desc(models.DispatchRecord.created_at)).all()
+
+        result = []
+        for draft in drafts:
+            inventory_ids = []
+            wastage_ids = []
+            manual_ids = []
+
+            for item in draft.dispatch_items:
+                if item.inventory_id:
+                    inventory_ids.append(str(item.inventory_id))
+                elif "WAS" in (item.barcode_id or ""):
+                    wastage_ids.append(str(item.id))
+                elif item.barcode_id and item.barcode_id.startswith("CR_"):
+                    manual_ids.append(str(item.id))
+
+            result.append({
+                "id": str(draft.id),
+                "dispatch_number": draft.dispatch_number,
+                "client_id": str(draft.client_id),
+                "primary_order_id": str(draft.primary_order_id) if draft.primary_order_id else None,
+                "vehicle_number": draft.vehicle_number,
+                "driver_name": draft.driver_name,
+                "driver_mobile": draft.driver_mobile,
+                "locket_no": draft.locket_no,
+                "reference_number": draft.reference_number,
+                "rst_no": draft.rst_no,
+                "gross_weight": str(draft.gross_weight) if draft.gross_weight else None,
+                "inventory_ids": inventory_ids,
+                "wastage_ids": wastage_ids,
+                "manual_cut_roll_ids": manual_ids,
+                "total_items": draft.total_items,
+                "total_weight_kg": float(draft.total_weight_kg),
+                "created_at": draft.created_at.isoformat(),
+                "client": {
+                    "id": str(draft.client.id),
+                    "company_name": draft.client.company_name
+                } if draft.client else None
+            })
+
+        return {"drafts": result}
+
+    except Exception as e:
+        logger.error(f"Error fetching draft dispatches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/dispatch/drafts/{draft_id}", tags=["Dispatch"])
+def delete_draft(draft_id: str, db: Session = Depends(get_db)):
+    """Delete a draft dispatch and release all items"""
+    try:
+        import uuid as uuid_lib
+
+        try:
+            draft_uuid = uuid_lib.UUID(draft_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid draft ID format")
+
+        draft = db.query(models.DispatchRecord).filter(
+            models.DispatchRecord.id == draft_uuid,
+            models.DispatchRecord.is_draft == True
+        ).first()
+
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft dispatch not found")
+
+        dispatch_items = db.query(models.DispatchItem).filter(
+            models.DispatchItem.dispatch_record_id == draft_uuid
+        ).all()
+
+        for dispatch_item in dispatch_items:
+            if dispatch_item.inventory_id:
+                inventory_item = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == dispatch_item.inventory_id
+                ).first()
+                if inventory_item and inventory_item.status == "used":
+                    inventory_item.status = "available"
+                    inventory_item.location = "warehouse"
+
+        for dispatch_item in dispatch_items:
+            db.delete(dispatch_item)
+
+        db.delete(draft)
+        db.commit()
+
+        return {
+            "message": "Draft dispatch deleted successfully",
+            "draft_id": draft_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting draft dispatch: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/dispatch/clients", tags=["Dispatch"])

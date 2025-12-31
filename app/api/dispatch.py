@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, and_, or_
+from sqlalchemy import desc, and_, or_, update
 from typing import List, Optional
 import logging
 from datetime import datetime, date
@@ -113,6 +113,7 @@ def get_dispatch_history(
                 "driver_mobile": dispatch.driver_mobile,
                 "payment_type": dispatch.payment_type,
                 "status": dispatch.status,
+                "is_draft": dispatch.is_draft,  # Include draft status
                 "total_items": dispatch.total_items,
                 "total_weight_kg": float(dispatch.total_weight_kg) if dispatch.total_weight_kg else 0.0,
                 "created_by": {
@@ -195,6 +196,19 @@ def get_dispatch_details(
                 except Exception as e:
                     logger.error(f"Error parsing QR code or fetching wastage reel_no: {e}")
 
+            # Fetch actual client name if inventory exists and is allocated to an order
+            client_name = None
+            if inventory and inventory.allocated_to_order_id:
+                try:
+                    order = db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id == inventory.allocated_to_order_id
+                    ).first()
+                    if order and order.client:
+                        client_name = order.client.company_name
+                        logger.debug(f"Found client '{client_name}' for item {item.barcode_id}")
+                except Exception as e:
+                    logger.error(f"Error fetching client for item {item.barcode_id}: {e}")
+
             items.append({
                 "id": str(item.id),
                 "frontend_id": item.frontend_id,
@@ -208,6 +222,7 @@ def get_dispatch_details(
                 "reel_no": reel_no,
                 "is_wastage_item": is_wastage_item,
                 "order_frontend_id": item.order_frontend_id,  # Return order frontend ID
+                "client_name": client_name,  # Return actual client name from inventory → order → client
                 "inventory": {
                     "id": str(inventory.id),
                     "location": inventory.location,
@@ -903,6 +918,9 @@ def update_dispatch_record(
         logger.info("=" * 80)
         logger.info(f"DISPATCH UPDATE REQUEST for {dispatch_id}")
         logger.info(f"Update data: {update_data}")
+        logger.info(f"is_draft field in update_data: {update_data.is_draft}")
+        logger.info(f"is_draft is None: {update_data.is_draft is None}")
+        logger.info(f"is_draft value type: {type(update_data.is_draft)}")
         logger.info("=" * 80)
 
         dispatch_uuid = uuid.UUID(dispatch_id)
@@ -943,6 +961,17 @@ def update_dispatch_record(
             dispatch.payment_type = update_data.payment_type
         if update_data.reference_number is not None:
             dispatch.reference_number = update_data.reference_number
+        if update_data.is_draft is not None:
+            # Use direct SQL UPDATE to bypass ORM change tracking issues with BIT fields
+            stmt = update(models.DispatchRecord).where(
+                models.DispatchRecord.id == dispatch_uuid
+            ).values(is_draft=update_data.is_draft)
+            db.execute(stmt)
+            db.flush()  # Ensure the UPDATE is executed before continuing
+            logger.info(f"Executed direct SQL UPDATE for is_draft to: {update_data.is_draft}")
+
+            # Update the in-memory object to match
+            dispatch.is_draft = update_data.is_draft
 
         # Dispatch date validation (±7 days from original)
         if update_data.dispatch_date is not None:
@@ -1318,15 +1347,45 @@ def update_dispatch_record(
         db.commit()
         db.refresh(dispatch)
 
+        # Log final is_draft status after commit and refresh
+        logger.info(f"AFTER COMMIT - dispatch.is_draft value: {dispatch.is_draft}")
+        logger.info(f"AFTER COMMIT - dispatch.is_draft type: {type(dispatch.is_draft)}")
+
+        # Fetch client info
+        client = db.query(models.ClientMaster).filter(models.ClientMaster.id == dispatch.client_id).first()
+        client_name = client.company_name if client else "Unknown Client"
+
+        # Count completed orders if items changed
+        completed_orders = []
+        if items_changed:
+            # Find orders that were completed as a result of this dispatch
+            completed_order_ids = db.query(models.OrderMaster.id).filter(
+                models.OrderMaster.status == "completed"
+            ).all()
+            completed_orders = [str(order.id) for order in completed_order_ids]
+
+        # Customize message based on whether draft was finalized
+        # Note: is_draft is stored as BIT in SQL Server (0/1), but comes as bool in Python
+        if update_data.is_draft is not None and not update_data.is_draft:
+            message = "Draft dispatch finalized successfully"
+        else:
+            message = "Dispatch record updated successfully"
+
         return {
-            "message": "Dispatch record updated successfully",
+            "message": message,
             "dispatch_id": str(dispatch.id),
             "dispatch_number": dispatch.dispatch_number,
+            "is_draft": dispatch.is_draft,
+            "client_name": client_name,
+            "vehicle_number": dispatch.vehicle_number,
+            "driver_name": dispatch.driver_name,
             "total_items": dispatch.total_items,
             "total_weight_kg": float(dispatch.total_weight_kg) if dispatch.total_weight_kg else 0.0,
-            "updated_fields": {
-                "vehicle_details": update_data.vehicle_number is not None or update_data.driver_name is not None or update_data.driver_mobile is not None,
-                "items_changed": items_changed
+            "completed_orders": completed_orders,
+            "summary": {
+                "dispatched_items": dispatch.total_items,
+                "orders_completed": len(completed_orders),
+                "total_weight": float(dispatch.total_weight_kg) if dispatch.total_weight_kg else 0.0
             }
         }
 

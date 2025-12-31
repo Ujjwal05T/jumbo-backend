@@ -841,12 +841,15 @@ class DispatchFormData(BaseModel):
     dispatch_date: datetime = Field(default_factory=datetime.utcnow)
     dispatch_number: str = Field(..., max_length=100)
     reference_number: Optional[str] = Field(None, max_length=100)
+    rst_no: Optional[str] = Field(None, max_length=50, description="Optional RST number")
+    gross_weight: Optional[str] = Field(None, description="Optional gross weight")
     client_id: UUID
     primary_order_id: Optional[UUID] = None
     order_date: Optional[datetime] = None
     inventory_ids: List[UUID] = Field(default_factory=list)  # Regular inventory items
     wastage_ids: List[UUID] = Field(default_factory=list)  # Wastage inventory items
     manual_cut_roll_ids: List[UUID] = Field(default_factory=list)  # Manual cut roll items
+    is_draft: bool = Field(default=False, description="Whether this is a draft dispatch")  # NEW: Draft status
     created_by_id: UUID
 
 class DispatchUpdateData(BaseModel):
@@ -858,9 +861,14 @@ class DispatchUpdateData(BaseModel):
     payment_type: Optional[str] = Field(None, description="Payment type (bill/cash)")
     dispatch_date: Optional[datetime] = None
     reference_number: Optional[str] = Field(None, max_length=100)
+    rst_no: Optional[str] = Field(None, max_length=50)
+    gross_weight: Optional[str] = None
+    client_id: Optional[UUID] = None
+    primary_order_id: Optional[UUID] = None
     inventory_ids: Optional[List[UUID]] = None  # Regular inventory items
     wastage_ids: Optional[List[UUID]] = None  # Wastage inventory items
     manual_cut_roll_ids: Optional[List[UUID]] = None  # Manual cut roll items
+    is_draft: Optional[bool] = None  # NEW: Update draft status
     updated_by_id: UUID  # Track who made the changes
 
 class DispatchRecordCreate(BaseModel):

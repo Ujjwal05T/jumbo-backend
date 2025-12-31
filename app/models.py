@@ -608,7 +608,8 @@ class DispatchRecord(Base):
     status = Column(String(50), default="dispatched", nullable=False)  # dispatched, delivered, returned
     total_items = Column(Integer, nullable=False, default=0)
     total_weight_kg = Column(Numeric(10, 2), nullable=False, default=0)
-    
+    is_draft = Column(Boolean, default=False, nullable=False, index=True)  # NEW: Draft status for unsaved dispatches
+
     # User tracking
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
