@@ -521,9 +521,9 @@ def preview_dispatch_number(
         pattern = f"DSP-%-{current_year}"
 
         query = text("""
-            SELECT frontend_id
+            SELECT dispatch_number
             FROM dispatch_record
-            WHERE frontend_id LIKE :pattern
+            WHERE dispatch_number LIKE :pattern
         """)
 
         result = db.execute(query, {"pattern": pattern}).fetchall()
