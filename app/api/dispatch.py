@@ -209,6 +209,21 @@ def get_dispatch_details(
                 except Exception as e:
                     logger.error(f"Error fetching client for item {item.barcode_id}: {e}")
 
+            # Fetch manual cut roll ID if this is a manual cut roll item
+            manual_cut_roll_id = None
+            if not inventory and item.barcode_id and item.barcode_id.startswith('CR_'):
+                try:
+                    manual_roll = db.query(models.ManualCutRoll).filter(
+                        models.ManualCutRoll.barcode_id == item.barcode_id
+                    ).first()
+                    if manual_roll:
+                        manual_cut_roll_id = str(manual_roll.id)
+                        logger.debug(f"Found manual_cut_roll ID '{manual_cut_roll_id}' for barcode {item.barcode_id}")
+                    else:
+                        logger.warning(f"Manual cut roll not found for barcode: {item.barcode_id}")
+                except Exception as e:
+                    logger.error(f"Error fetching manual cut roll for barcode {item.barcode_id}: {e}")
+
             items.append({
                 "id": str(item.id),
                 "frontend_id": item.frontend_id,
@@ -223,6 +238,7 @@ def get_dispatch_details(
                 "is_wastage_item": is_wastage_item,
                 "order_frontend_id": item.order_frontend_id,  # Return order frontend ID
                 "client_name": client_name,  # Return actual client name from inventory → order → client
+                "manual_cut_roll_id": manual_cut_roll_id,  # Return manual cut roll ID
                 "inventory": {
                     "id": str(inventory.id),
                     "location": inventory.location,

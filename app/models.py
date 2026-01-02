@@ -99,7 +99,7 @@ class UserMaster(Base):
     name = Column(String(255), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)  # For simple registration
-    role = Column(String(50), nullable=False)  # admin, order_puncher, security, co_admin, weight_update, poduction, accountant, system
+    role = Column(String(50), nullable=False)  # admin, order_puncher, security, co_admin, weight_update, poduction, accountant, accountant2, system
     contact = Column(String(255), nullable=True)
     department = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
