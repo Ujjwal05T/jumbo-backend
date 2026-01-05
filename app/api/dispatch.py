@@ -141,6 +141,75 @@ def get_dispatch_history(
         logger.error(f"Error fetching dispatch history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/dispatch/today-vehicles", tags=["Dispatch History"])
+def get_todays_vehicles(
+    date: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Get list of unique vehicles from outward challans for a specific date (defaults to today).
+    Returns vehicle details from the most recent outward challan for each vehicle.
+    """
+    try:
+        # Parse the date or use today
+        if date and date.strip():
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        else:
+            target_date = datetime.now().date()
+
+        # Query all outward challans for the target date
+        start_of_day = datetime.combine(target_date, datetime.min.time())
+        end_of_day = datetime.combine(target_date, datetime.max.time())
+
+        outward_challans = db.query(models.OutwardChallan).filter(
+            and_(
+                models.OutwardChallan.date >= start_of_day,
+                models.OutwardChallan.date <= end_of_day,
+                models.OutwardChallan.vehicle_number.isnot(None),
+                models.OutwardChallan.vehicle_number != ""
+            )
+        ).order_by(desc(models.OutwardChallan.created_at)).all()
+
+        # Group by vehicle_number and get the most recent outward challan for each
+        vehicles_map = {}
+        for challan in outward_challans:
+            vehicle_num = challan.vehicle_number.strip()
+            if vehicle_num and vehicle_num not in vehicles_map:
+                # Convert gross_weight to string if it's a Decimal
+                gross_weight_str = str(challan.gross_weight) if challan.gross_weight else ""
+
+                vehicles_map[vehicle_num] = {
+                    "vehicle_number": vehicle_num,
+                    "rst_no": challan.rst_no or "",
+                    "driver_name": challan.driver_name or "",
+                    "driver_mobile": "",  # Not available in OutwardChallan
+                    "gross_weight": gross_weight_str,
+                    "locket_no": "",  # Not available in OutwardChallan
+                    "dispatch_number": "",  # Not available in OutwardChallan
+                    "reference_number": "",  # Not available in OutwardChallan
+                    "party_name": challan.party_name or "",
+                    "purpose": challan.purpose or "",
+                    "last_challan_time": challan.created_at.isoformat() if challan.created_at else None
+                }
+
+        # Convert to list and sort by vehicle number
+        vehicles_list = sorted(vehicles_map.values(), key=lambda x: x["vehicle_number"])
+
+        return {
+            "date": target_date.isoformat(),
+            "vehicles": vehicles_list,
+            "total_vehicles": len(vehicles_list)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching today's vehicles from outward challan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/dispatch/{dispatch_id}/details", tags=["Dispatch History"])
 def get_dispatch_details(
     dispatch_id: str,
@@ -505,6 +574,30 @@ def create_payment_slip(
         if payment_type not in ['bill', 'cash']:
             raise HTTPException(status_code=400, detail="Invalid payment type")
 
+        # Validate dispatch record exists
+        try:
+            dispatch_uuid = uuid.UUID(dispatch_record_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid dispatch_record_id format")
+
+        dispatch = db.query(models.DispatchRecord).filter(
+            models.DispatchRecord.id == dispatch_uuid
+        ).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+        # Check if payment slip already exists for this dispatch
+        existing_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid
+        ).first()
+
+        if existing_slip:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Payment slip already exists for this dispatch (ID: {existing_slip.frontend_id})"
+            )
+
         # Generate frontend_id with year suffix using FrontendIDGenerator (BI-00001-25 or CI-00001-25)
         from ..services.id_generator import FrontendIDGenerator
 
@@ -525,7 +618,7 @@ def create_payment_slip(
         # Create PaymentSlipMaster
         payment_slip = models.PaymentSlipMaster(
             frontend_id=frontend_id,
-            dispatch_record_id=uuid.UUID(dispatch_record_id),
+            dispatch_record_id=dispatch_uuid,
             payment_type=payment_type,
             slip_date=slip_date_obj,
             bill_no=bill_no if payment_type == 'bill' else None,
@@ -549,6 +642,46 @@ def create_payment_slip(
                 amount=item.get('amount')
             )
             db.add(payment_slip_item)
+
+        # Mark all dispatch items as "billed"
+        # Get all dispatch items for this dispatch
+        dispatch_items = db.query(models.DispatchItem).filter(
+            models.DispatchItem.dispatch_record_id == dispatch_uuid
+        ).all()
+
+        logger.info(f"Marking {len(dispatch_items)} dispatch items as 'billed'")
+
+        inventory_updated = 0
+        manual_roll_updated = 0
+
+        for dispatch_item in dispatch_items:
+            # Update InventoryMaster status if linked
+            if dispatch_item.inventory_id:
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == dispatch_item.inventory_id
+                ).first()
+
+                if inventory:
+                    inventory.status = "billed"
+                    inventory_updated += 1
+                    logger.info(f"Marked inventory {inventory.barcode_id} as billed")
+
+            # Update ManualCutRoll status if linked via barcode_id
+            elif dispatch_item.barcode_id and dispatch_item.barcode_id.startswith('CR_'):
+                manual_roll = db.query(models.ManualCutRoll).filter(
+                    models.ManualCutRoll.barcode_id == dispatch_item.barcode_id
+                ).first()
+
+                if manual_roll:
+                    manual_roll.status = "billed"
+                    manual_roll_updated += 1
+                    logger.info(f"Marked manual cut roll {manual_roll.barcode_id} as billed")
+
+        logger.info(f"Updated status: {inventory_updated} inventory items, {manual_roll_updated} manual cut rolls")
+
+        # Mark dispatch record as billed
+        dispatch.status = "billed"
+        logger.info(f"Marked dispatch record {dispatch.dispatch_number} as billed")
 
         db.commit()
         db.refresh(payment_slip)
