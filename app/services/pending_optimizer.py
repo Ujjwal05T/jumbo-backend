@@ -30,8 +30,8 @@ class PendingOptimizer:
         Direct approach: Specs → Jumbo Rolls → Sets → Cuts (with order info).
         """
         try:
-            # Calculate target width for each 118" roll
-            target_width = 119 - wastage
+            # Calculate target width for each 123" roll
+            target_width = 124 - wastage
 
             # Get pending orders with available quantity and use eager loading for relationships
             from sqlalchemy.orm import joinedload

@@ -73,7 +73,7 @@ def get_roll_suggestions(
 ):
     """
     Generate roll suggestions for completing target width rolls based on pending orders.
-    Takes wastage parameter to calculate dynamic target width (119 - wastage).
+    Takes wastage parameter to calculate dynamic target width (124 - wastage).
     Returns suggestions showing existing width + needed width = target width.
     """
     try:
