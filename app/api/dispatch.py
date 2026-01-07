@@ -143,33 +143,25 @@ def get_dispatch_history(
 
 @router.get("/dispatch/today-vehicles", tags=["Dispatch History"])
 def get_todays_vehicles(
-    date: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Get list of unique vehicles from outward challans for a specific date (defaults to today).
+    Get list of unique vehicles from outward challans where time_out is not filled and rst_no is filled.
     Returns vehicle details from the most recent outward challan for each vehicle.
+    These are vehicles that have arrived but not yet departed.
     """
     try:
-        # Parse the date or use today
-        if date and date.strip():
-            try:
-                target_date = datetime.strptime(date, "%Y-%m-%d").date()
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-        else:
-            target_date = datetime.now().date()
-
-        # Query all outward challans for the target date
-        start_of_day = datetime.combine(target_date, datetime.min.time())
-        end_of_day = datetime.combine(target_date, datetime.max.time())
-
+        # Query outward challans where time_out is empty and rst_no is filled
         outward_challans = db.query(models.OutwardChallan).filter(
             and_(
-                models.OutwardChallan.date >= start_of_day,
-                models.OutwardChallan.date <= end_of_day,
                 models.OutwardChallan.vehicle_number.isnot(None),
-                models.OutwardChallan.vehicle_number != ""
+                models.OutwardChallan.vehicle_number != "",
+                models.OutwardChallan.rst_no.isnot(None),
+                models.OutwardChallan.rst_no != "",
+                or_(
+                    models.OutwardChallan.time_out.is_(None),
+                    models.OutwardChallan.time_out == ""
+                )
             )
         ).order_by(desc(models.OutwardChallan.created_at)).all()
 
@@ -199,7 +191,6 @@ def get_todays_vehicles(
         vehicles_list = sorted(vehicles_map.values(), key=lambda x: x["vehicle_number"])
 
         return {
-            "date": target_date.isoformat(),
             "vehicles": vehicles_list,
             "total_vehicles": len(vehicles_list)
         }
@@ -207,7 +198,7 @@ def get_todays_vehicles(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching today's vehicles from outward challan: {e}")
+        logger.error(f"Error fetching vehicles from outward challan: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/dispatch/{dispatch_id}/details", tags=["Dispatch History"])
