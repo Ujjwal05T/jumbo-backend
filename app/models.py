@@ -388,7 +388,8 @@ class InventoryMaster(Base):
     barcode_id = Column(String(50), unique=True, nullable=True, index=True)  # Human-readable barcode ID
     production_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     allocated_to_order_id = Column(UNIQUEIDENTIFIER, ForeignKey("order_master.id"), nullable=True)
-    
+    manual_client_id = Column(UNIQUEIDENTIFIER, ForeignKey("client_master.id"), nullable=True)  # For manual planning
+
     # Source tracking fields for pending order resolution
     source_type = Column(String(50), nullable=True, index=True)  # 'regular_order' or 'pending_order'
     source_pending_id = Column(UNIQUEIDENTIFIER, ForeignKey("pending_order_item.id"), nullable=True, index=True)
@@ -412,6 +413,7 @@ class InventoryMaster(Base):
     paper = relationship("PaperMaster", back_populates="inventory_items")
     created_by = relationship("UserMaster", back_populates="inventory_created")
     allocated_order = relationship("OrderMaster", foreign_keys=[allocated_to_order_id])
+    manual_client = relationship("ClientMaster", foreign_keys=[manual_client_id])
     source_pending_order = relationship("PendingOrderItem", foreign_keys=[source_pending_id])
     plan_inventory = relationship("PlanInventoryLink", back_populates="inventory")
     

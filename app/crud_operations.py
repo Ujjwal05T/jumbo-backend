@@ -147,6 +147,9 @@ def complete_plan(db, plan_id):
 def start_production_for_plan(db, plan_id, request_data):
     return plan.start_production_for_plan(db=db, plan_id=plan_id, request_data=request_data)
 
+def create_manual_plan_with_inventory(db, manual_plan_data):
+    return plan.create_manual_plan_with_inventory(db=db, manual_plan_data=manual_plan_data)
+
 def start_production_from_pending_orders(db, request_data):
     from .crud.pending_orders import start_production_from_pending_orders_impl  # ✅ RENAMED FUNCTION
     return start_production_from_pending_orders_impl(db=db, request_data=request_data)

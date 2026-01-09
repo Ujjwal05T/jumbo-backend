@@ -1552,5 +1552,331 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             }
         }]
 
+    def create_manual_plan_with_inventory(
+        self,
+        db: Session,
+        *,
+        manual_plan_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Create a manual plan with inventory hierarchy.
+
+        This creates:
+        - PlanMaster record with type="manual"
+        - InventoryMaster hierarchy: Jumbo → 118" Rolls → Cut Rolls
+        - PlanInventoryLink entries
+        - Uses proper ID generators and barcode generators
+        """
+        import uuid
+        import json
+        from ..services.id_generator import FrontendIDGenerator
+
+        logger.info("🔧 MANUAL PLAN: Starting manual plan creation")
+
+        # Extract data
+        wastage = manual_plan_data.get("wastage", 1)
+        planning_width = manual_plan_data.get("planning_width", 123)
+        created_by_id = manual_plan_data.get("created_by_id")
+        paper_specs = manual_plan_data.get("paper_specs", [])
+
+        # Create PlanMaster record with temporary cut_pattern
+        plan_name = f"Manual Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        db_plan = models.PlanMaster(
+            name=plan_name,
+            cut_pattern=json.dumps([]),  # Temporary, will be updated
+            expected_waste_percentage=0.0,
+            status="in_progress",  # Manual plans are immediately in progress
+            created_by_id=uuid.UUID(created_by_id) if isinstance(created_by_id, str) else created_by_id
+        )
+        db.add(db_plan)
+        db.flush()
+
+        logger.info(f"✅ MANUAL PLAN: Created plan {db_plan.frontend_id}")
+
+        # Track created inventory and cut pattern data
+        created_jumbo_rolls = []
+        created_118_rolls = []
+        created_cut_rolls = []
+        cut_rolls_generated = []  # For cut_pattern
+        jumbo_roll_details = []  # For cut_pattern
+        total_wastage_inches = 0  # Track total wastage
+
+        # Process each paper specification
+        for paper_spec in paper_specs:
+            gsm = paper_spec.get("gsm")
+            bf = paper_spec.get("bf")
+            shade = paper_spec.get("shade")
+
+            # Find paper record
+            paper_record = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == gsm,
+                models.PaperMaster.bf == bf,
+                models.PaperMaster.shade == shade
+            ).first()
+
+            if not paper_record:
+                logger.warning(f"❌ MANUAL PLAN: Paper not found - GSM={gsm}, BF={bf}, Shade={shade}")
+                continue
+
+            # Process each jumbo roll
+            for jumbo_data in paper_spec.get("jumbo_rolls", []):
+                jumbo_number = jumbo_data.get("jumbo_number")
+
+                # Create Jumbo Roll in InventoryMaster
+                jumbo_qr = f"MANUAL_JUMBO_{uuid.uuid4().hex[:8].upper()}"
+                jumbo_barcode = BarcodeGenerator.generate_jumbo_roll_barcode(db)
+
+                jumbo_roll = models.InventoryMaster(
+                    paper_id=paper_record.id,
+                    width_inches=planning_width,
+                    weight_kg=0,
+                    roll_type="jumbo",
+                    status="consumed",
+                    qr_code=jumbo_qr,
+                    barcode_id=jumbo_barcode,
+                    location="MANUAL",
+                    created_by_id=uuid.UUID(created_by_id) if isinstance(created_by_id, str) else created_by_id
+                )
+                db.add(jumbo_roll)
+                db.flush()
+                created_jumbo_rolls.append(jumbo_roll)
+
+                logger.info(f"📦 MANUAL PLAN: Created Jumbo {jumbo_roll.frontend_id} - {gsm}gsm {shade}")
+
+                # Track jumbo details for cut_pattern
+                jumbo_detail = {
+                    "jumbo_id": str(jumbo_roll.id),
+                    "jumbo_barcode": jumbo_barcode,
+                    "paper_spec": f"{gsm}gsm, {bf}bf, {shade}",
+                    "width_inches": planning_width,
+                    "sets": [],
+                    "total_wastage": 0
+                }
+
+                # Process each roll set (118" rolls)
+                for roll_set_data in jumbo_data.get("roll_sets", []):
+                    set_number = roll_set_data.get("set_number")
+
+                    # Create 118" Roll in InventoryMaster
+                    roll_118_qr = f"MANUAL_118_{uuid.uuid4().hex[:8].upper()}"
+                    roll_118_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
+
+                    roll_118 = models.InventoryMaster(
+                        paper_id=paper_record.id,
+                        width_inches=planning_width,
+                        weight_kg=0,
+                        roll_type="118",
+                        status="consumed",
+                        qr_code=roll_118_qr,
+                        barcode_id=roll_118_barcode,
+                        location="MANUAL",
+                        parent_jumbo_id=jumbo_roll.id,
+                        roll_sequence=set_number,
+                        created_by_id=uuid.UUID(created_by_id) if isinstance(created_by_id, str) else created_by_id
+                    )
+                    db.add(roll_118)
+                    db.flush()
+                    created_118_rolls.append(roll_118)
+
+                    logger.info(f"  📦 MANUAL PLAN: Created 118\" Roll {roll_118.frontend_id} (Set #{set_number})")
+
+                    # Track set data for cut_pattern
+                    set_detail = {
+                        "set_number": set_number,
+                        "roll_118_id": str(roll_118.id),
+                        "roll_118_barcode": roll_118_barcode,
+                        "cuts": [],
+                        "total_width_used": 0,
+                        "wastage_inches": 0
+                    }
+
+                    # Process each cut roll
+                    for cut_roll_data in roll_set_data.get("cut_rolls", []):
+                        width_inches = cut_roll_data.get("width_inches")
+                        quantity = cut_roll_data.get("quantity", 1)
+                        client_name = cut_roll_data.get("client_name")
+                        order_source = cut_roll_data.get("order_source", "Manual")
+
+                        # Find or create client
+                        manual_client_id = None
+                        if client_name:
+                            client = db.query(models.ClientMaster).filter(
+                                models.ClientMaster.company_name == client_name
+                            ).first()
+
+                            if not client:
+                                # Create new client
+                                client_frontend_id = FrontendIDGenerator.generate_frontend_id("client_master", db)
+                                client = models.ClientMaster(
+                                    id=uuid.uuid4(),
+                                    frontend_id=client_frontend_id,
+                                    company_name=client_name,
+                                    email=f"{client_name.lower().replace(' ', '_')}@manual.com",
+                                    contact_person="Manual Entry",
+                                    phone="0000000000",
+                                    status="active",
+                                    created_by_id=uuid.UUID(created_by_id) if isinstance(created_by_id, str) else created_by_id
+                                )
+                                db.add(client)
+                                db.flush()
+                                logger.info(f"  ✅ MANUAL PLAN: Created client {client.frontend_id} - {client_name}")
+
+                            manual_client_id = client.id
+
+                        # Track width used in this set
+                        set_detail["total_width_used"] += width_inches * quantity
+
+                        # Create cut rolls based on quantity
+                        for q in range(quantity):
+                            cut_roll_qr = f"MANUAL_CUT_{uuid.uuid4().hex[:8].upper()}"
+                            cut_roll_barcode = BarcodeGenerator.generate_cut_roll_barcode(db)
+
+                            cut_roll = models.InventoryMaster(
+                                paper_id=paper_record.id,
+                                width_inches=width_inches,
+                                weight_kg=0,
+                                roll_type="cut",
+                                status="cutting",
+                                qr_code=cut_roll_qr,
+                                barcode_id=cut_roll_barcode,
+                                location="PRODUCTION",
+                                parent_118_roll_id=roll_118.id,
+                                allocated_to_order_id=None,  # Manual plans don't have orders
+                                manual_client_id=manual_client_id,  # Store client directly
+                                created_by_id=uuid.UUID(created_by_id) if isinstance(created_by_id, str) else created_by_id
+                            )
+                            db.add(cut_roll)
+                            db.flush()
+                            created_cut_rolls.append(cut_roll)
+
+                            # Create plan-inventory link
+                            plan_inventory_link = models.PlanInventoryLink(
+                                plan_id=db_plan.id,
+                                inventory_id=cut_roll.id,
+                                quantity_used=1.0
+                            )
+                            db.add(plan_inventory_link)
+
+                            logger.info(f"    📦 MANUAL PLAN: Created Cut Roll {cut_roll.frontend_id} - {width_inches}\" for {client_name}")
+
+                            # Add to cut_rolls_generated for cut_pattern
+                            cut_rolls_generated.append({
+                                "cut_roll_id": str(cut_roll.id),
+                                "barcode": cut_roll_barcode,
+                                "width_inches": width_inches,
+                                "client_name": client_name,
+                                "order_source": order_source,
+                                "paper_spec": f"{gsm}gsm, {bf}bf, {shade}",
+                                "parent_jumbo_barcode": jumbo_barcode,
+                                "parent_118_barcode": roll_118_barcode,
+                                "status": "cutting"
+                            })
+
+                        # Add cut detail to set
+                        set_detail["cuts"].append({
+                            "width_inches": width_inches,
+                            "quantity": quantity,
+                            "client_name": client_name,
+                            "order_source": order_source
+                        })
+
+                    # Calculate wastage for this set
+                    set_detail["wastage_inches"] = planning_width - set_detail["total_width_used"]
+                    jumbo_detail["total_wastage"] += set_detail["wastage_inches"]
+                    total_wastage_inches += set_detail["wastage_inches"]
+
+                    # Add set to jumbo
+                    jumbo_detail["sets"].append(set_detail)
+
+                # Add jumbo to jumbo_roll_details
+                jumbo_roll_details.append(jumbo_detail)
+
+        # Calculate summary metrics
+        total_cut_rolls = len(created_cut_rolls)
+        total_width_used = sum(detail["total_width_used"] for detail in jumbo_roll_details for detail in detail["sets"])
+        overall_waste_percentage = (total_wastage_inches / (total_width_used + total_wastage_inches) * 100) if (total_width_used + total_wastage_inches) > 0 else 0
+
+        # Update plan with complete cut_pattern matching regular planning structure
+        db_plan.cut_pattern = json.dumps(cut_rolls_generated)
+        db_plan.expected_waste_percentage = round(overall_waste_percentage, 2)
+
+        # Commit all changes
+        db.commit()
+        db.refresh(db_plan)
+
+        # Build response hierarchy
+        production_hierarchy = []
+
+        for jumbo in created_jumbo_rolls:
+            # Find 118" rolls for this jumbo
+            rolls_118_for_jumbo = [r for r in created_118_rolls if r.parent_jumbo_id == jumbo.id]
+
+            intermediate_rolls = []
+            all_cuts_for_jumbo = []
+
+            for roll_118 in rolls_118_for_jumbo:
+                # Find cut rolls for this 118" roll
+                cuts_for_118 = [c for c in created_cut_rolls if c.parent_118_roll_id == roll_118.id]
+
+                intermediate_rolls.append({
+                    "id": str(roll_118.id),
+                    "frontend_id": roll_118.frontend_id,
+                    "barcode_id": roll_118.barcode_id,
+                    "width_inches": float(roll_118.width_inches),
+                    "roll_sequence": roll_118.roll_sequence,
+                    "paper_spec": f"{roll_118.paper.gsm}gsm, {roll_118.paper.bf}bf, {roll_118.paper.shade}"
+                })
+
+                for cut in cuts_for_118:
+                    client_name = "Unknown"
+                    if cut.manual_client_id:
+                        client = db.query(models.ClientMaster).filter(
+                            models.ClientMaster.id == cut.manual_client_id
+                        ).first()
+                        if client:
+                            client_name = client.company_name
+
+                    all_cuts_for_jumbo.append({
+                        "id": str(cut.id),
+                        "frontend_id": cut.frontend_id,
+                        "barcode_id": cut.barcode_id,
+                        "width_inches": float(cut.width_inches),
+                        "client_name": client_name,
+                        "parent_118_barcode": roll_118.barcode_id,
+                        "paper_spec": f"{cut.paper.gsm}gsm, {cut.paper.bf}bf, {cut.paper.shade}",
+                        "status": cut.status
+                    })
+
+            production_hierarchy.append({
+                "jumbo_roll": {
+                    "id": str(jumbo.id),
+                    "frontend_id": jumbo.frontend_id,
+                    "barcode_id": jumbo.barcode_id,
+                    "width_inches": float(jumbo.width_inches),
+                    "paper_spec": f"{jumbo.paper.gsm}gsm, {jumbo.paper.bf}bf, {jumbo.paper.shade}",
+                    "status": jumbo.status,
+                    "location": jumbo.location
+                },
+                "intermediate_rolls": intermediate_rolls,
+                "cut_rolls": all_cuts_for_jumbo
+            })
+
+        logger.info(f"✅ MANUAL PLAN: Complete - {len(created_jumbo_rolls)} jumbos, {len(created_118_rolls)} 118\" rolls, {len(created_cut_rolls)} cut rolls")
+
+        return {
+            "plan_id": str(db_plan.id),
+            "plan_frontend_id": db_plan.frontend_id,
+            "status": db_plan.status,
+            "summary": {
+                "jumbo_rolls_created": len(created_jumbo_rolls),
+                "intermediate_118_rolls_created": len(created_118_rolls),
+                "cut_rolls_created": len(created_cut_rolls),
+                "wastage": wastage,
+                "planning_width": planning_width
+            },
+            "production_hierarchy": production_hierarchy,
+            "message": f"Manual plan created successfully - {len(created_jumbo_rolls)} jumbo rolls with {len(created_cut_rolls)} cut rolls"
+        }
+
 
 plan = CRUDPlan(models.PlanMaster)

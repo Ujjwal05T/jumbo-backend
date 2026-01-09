@@ -50,6 +50,7 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
             matching_item = db.query(models.InventoryMaster).options(
                 joinedload(models.InventoryMaster.paper),
                 joinedload(models.InventoryMaster.created_by),
+                joinedload(models.InventoryMaster.manual_client),
                 joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client),
                 joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo)
             ).filter(
@@ -116,6 +117,10 @@ def scan_qr_code(qr_code: str, db: Session = Depends(get_db)):
         # Method 1: Check allocated order
         if matching_item.allocated_order and matching_item.allocated_order.client:
             client_name = matching_item.allocated_order.client.company_name
+
+        # Additional Method: Check manual client
+        if matching_item.manual_client:
+            client_name = matching_item.manual_client.company_name
         
         # Method 2: Check if there are any related orders through same paper and width
         if not client_name:

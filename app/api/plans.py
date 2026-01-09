@@ -492,3 +492,66 @@ def cleanup_expired_snapshots_endpoint(
     except Exception as e:
         logger.error(f"Error cleaning up snapshots: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# MANUAL PLANNING ENDPOINTS
+# ============================================================================
+
+@router.post("/plans/manual/create", tags=["Manual Planning"])
+def create_manual_plan(
+    request_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """
+    Create a manual plan with inventory hierarchy.
+
+    Expected request_data structure:
+    {
+        "wastage": 1,
+        "planning_width": 123,
+        "created_by_id": "uuid",
+        "paper_specs": [
+            {
+                "gsm": 120,
+                "bf": 90,
+                "shade": "White",
+                "jumbo_rolls": [
+                    {
+                        "jumbo_number": 1,
+                        "roll_sets": [
+                            {
+                                "set_number": 1,
+                                "cut_rolls": [
+                                    {
+                                        "width_inches": 72,
+                                        "quantity": 2,
+                                        "client_name": "Client A",
+                                        "order_source": "Manual"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        logger.info("🔧 MANUAL PLAN API: Received manual plan creation request")
+        logger.info(f"   - Wastage: {request_data.get('wastage')}")
+        logger.info(f"   - Paper specs count: {len(request_data.get('paper_specs', []))}")
+
+        result = crud_operations.create_manual_plan_with_inventory(
+            db=db,
+            manual_plan_data=request_data
+        )
+
+        logger.info(f"✅ MANUAL PLAN API: Successfully created manual plan {result.get('plan_frontend_id')}")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ MANUAL PLAN API: Error creating manual plan: {e}")
+        import traceback
+        logger.error(f"   - Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))

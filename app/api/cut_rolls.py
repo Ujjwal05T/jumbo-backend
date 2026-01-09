@@ -184,6 +184,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
         ).options(
             joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.manual_client),
             joinedload(models.InventoryMaster.allocated_order)
                 .joinedload(models.OrderMaster.client),
             joinedload(models.InventoryMaster.parent_118_roll)
@@ -277,6 +278,9 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
                         client_name = item.allocated_order.client.company_name
                     order_date = item.allocated_order.created_at.isoformat()
 
+                # Check manual client as well
+                if item.manual_client:
+                    client_name = item.manual_client.company_name
                 jumbo_groups[parent_jumbo_id]["cut_rolls"].append({
                     "id": str(item.id),
                     "barcode_id": item.barcode_id or f"CR_{str(item.id)[:5].upper()}",

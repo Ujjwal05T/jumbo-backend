@@ -993,6 +993,7 @@ def get_warehouse_items(
             models.ClientMaster.company_name.label('client_company_name')
         ).options(
             joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.manual_client),
             joinedload(models.InventoryMaster.created_by)
         ).outerjoin(
             models.OrderMaster,
@@ -1022,6 +1023,8 @@ def get_warehouse_items(
 
             # Use the joined data directly
             client_name = client_company_name if client_company_name else "N/A"
+            if client_name == "N/A" and item.manual_client:
+                client_name = item.manual_client.company_name
             order_id = order_frontend_id if order_frontend_id else (str(item.allocated_to_order_id)[:8] + "..." if item.allocated_to_order_id else "N/A")
 
             # Check if item is a wastage roll and fetch reel_no if it is

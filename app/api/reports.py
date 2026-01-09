@@ -4091,6 +4091,7 @@ def get_all_cut_rolls_filtered_report(
         # Base query to get all cut rolls with eager loading
         base_query = db.query(models.InventoryMaster).options(
             joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.manual_client),
             joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
             joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan),
             joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
@@ -4320,6 +4321,15 @@ def get_all_cut_rolls_filtered_report(
                     "frontend_id": allocated_order.frontend_id or "N/A",
                     "client_company_name": allocated_order.client.company_name if allocated_order.client else "N/A"
                 }
+            
+            # New : cut roll can have client without order through manual client id
+            if cut_roll.manual_client:
+                if not order_info:
+                    order_info = {
+                        "id": None,
+                        "frontend_id": None,
+                        "client_company_name": cut_roll.manual_client.company_name
+                    }
             wastage_details = None
             if cut_roll.is_wastage_roll and cut_roll.qr_code:
             # QR code format: WCR_{wastage_frontend_id}_{plan_id}
