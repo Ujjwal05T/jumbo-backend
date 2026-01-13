@@ -4531,3 +4531,259 @@ def get_pending_orders_filtered_report(
     except Exception as e:
         logger.error(f"Error in pending orders filtered report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/cut-rolls-with-stats", tags=["Cut Rolls Report"])
+def get_cut_rolls_with_stats(
+    # Production date filter parameters
+    from_production_date: Optional[str] = Query(None, description="Production date from (ISO format UTC)"),
+    to_production_date: Optional[str] = Query(None, description="Production date to (ISO format UTC)"),
+
+    db: Session = Depends(get_db)
+):
+    """
+    Cut Rolls Report with Statistics - Production Date Filter Only
+
+    This endpoint filters cut rolls by production date and returns:
+    - All matching cut rolls with complete details
+    - Statistics: total number, total weight, breakdown by status
+
+    Filters:
+    - from_production_date: Filter by production date from (UTC)
+    - to_production_date: Filter by production date to (UTC)
+
+    Note: At least one date filter is required to get results.
+
+    Returns:
+    - ALL filtered cut rolls with related data (no pagination)
+    - Total count of results
+    - Statistics (total_rolls, total_weight_kg, status_breakdown)
+    """
+    try:
+        # Check if at least one filter is applied
+        has_filters = any([
+            from_production_date,
+            to_production_date
+        ])
+
+        if not has_filters:
+            return {
+                "success": True,
+                "data": {
+                    "cut_rolls": [],
+                    "total_items": 0,
+                    "stats": {
+                        "total_rolls": 0,
+                        "total_weight_kg": 0,
+                        "status_breakdown": {}
+                    },
+                    "message": "Please apply at least one date filter to view results",
+                    "filters_applied": {
+                        "from_production_date": from_production_date,
+                        "to_production_date": to_production_date
+                    }
+                }
+            }
+
+        # Base query to get all cut rolls with eager loading
+        base_query = db.query(models.InventoryMaster).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.manual_client),
+            joinedload(models.InventoryMaster.parent_118_roll).joinedload(models.InventoryMaster.parent_jumbo),
+            joinedload(models.InventoryMaster.plan_inventory).joinedload(models.PlanInventoryLink.plan),
+            joinedload(models.InventoryMaster.allocated_order).joinedload(models.OrderMaster.client)
+        ).filter(
+            models.InventoryMaster.roll_type == 'cut'
+        )
+
+        # Apply production date range filter (using updated_at as production date)
+        if from_production_date:
+            try:
+                from_date = datetime.fromisoformat(from_production_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.InventoryMaster.updated_at >= from_date)
+            except ValueError:
+                logger.warning(f"Invalid from_production_date format: {from_production_date}")
+
+        if to_production_date:
+            try:
+                to_date = datetime.fromisoformat(to_production_date.replace('Z', '+00:00'))
+                base_query = base_query.filter(models.InventoryMaster.updated_at <= to_date)
+            except ValueError:
+                logger.warning(f"Invalid to_production_date format: {to_production_date}")
+
+        # Get total count
+        total_count = base_query.count()
+
+        # Get ALL filtered results ordered by creation date (newest first)
+        cut_rolls = base_query.order_by(
+            models.InventoryMaster.created_at.desc()
+        ).all()
+
+        # Calculate statistics
+        total_weight = 0
+        status_counts = {}
+
+        for roll in cut_rolls:
+            # Sum weights
+            if roll.weight_kg:
+                total_weight += float(roll.weight_kg)
+
+            # Count by status (dynamically handle all statuses)
+            status = roll.status or "unknown"
+            if status not in status_counts:
+                status_counts[status] = 0
+            status_counts[status] += 1
+
+        # Process cut rolls data (same as original endpoint)
+        cut_rolls_data = []
+        for cut_roll in cut_rolls:
+            # Get paper specifications
+            paper = cut_roll.paper
+            paper_specs = {
+                "paper_name": paper.name if paper else "Unknown",
+                "gsm": paper.gsm if paper else 0,
+                "bf": float(paper.bf) if paper and paper.bf else 0,
+                "shade": paper.shade if paper else "Unknown",
+                "type": paper.type if paper else "Unknown"
+            }
+
+            # Get parent 11-inch roll information
+            parent_118_roll = cut_roll.parent_118_roll
+            parent_118_info = None
+            parent_jumbo_info = None
+
+            if parent_118_roll:
+                parent_118_info = {
+                    "id": str(parent_118_roll.id),
+                    "frontend_id": parent_118_roll.frontend_id or "N/A",
+                    "barcode_id": parent_118_roll.barcode_id or "N/A",
+                    "width_inches": float(parent_118_roll.width_inches),
+                    "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0,
+                    "roll_sequence": parent_118_roll.roll_sequence
+                }
+
+                # Get parent jumbo roll information
+                parent_jumbo = parent_118_roll.parent_jumbo
+                if parent_jumbo:
+                    parent_jumbo_info = {
+                        "id": str(parent_jumbo.id),
+                        "frontend_id": parent_jumbo.frontend_id or "N/A",
+                        "barcode_id": parent_jumbo.barcode_id or "N/A",
+                        "width_inches": float(parent_jumbo.width_inches),
+                        "weight_kg": float(parent_jumbo.weight_kg) if parent_jumbo.weight_kg else 0
+                    }
+                else:
+                    # If no jumbo parent, check if 118 roll itself is a jumbo
+                    if parent_118_roll.roll_type == 'jumbo':
+                        parent_jumbo_info = {
+                            "id": str(parent_118_roll.id),
+                            "frontend_id": parent_118_roll.frontend_id or "N/A",
+                            "barcode_id": parent_118_roll.barcode_id or "N/A",
+                            "width_inches": float(parent_118_roll.width_inches),
+                            "weight_kg": float(parent_118_roll.weight_kg) if parent_118_roll.weight_kg else 0
+                        }
+
+            # Get plan information
+            plan_info = None
+            if cut_roll.plan_inventory:
+                for plan_link in cut_roll.plan_inventory:
+                    if plan_link.plan:
+                        plan_info = {
+                            "id": str(plan_link.plan.id),
+                            "frontend_id": plan_link.plan.frontend_id or "N/A",
+                            "name": plan_link.plan.name or "N/A",
+                            "status": plan_link.plan.status,
+                            "created_at": plan_link.plan.created_at.isoformat() if plan_link.plan.created_at else None
+                        }
+                        break  # Take the first plan found
+
+            # Get allocated order and client information
+            order_info = None
+            if cut_roll.allocated_order:
+                allocated_order = cut_roll.allocated_order
+                order_info = {
+                    "id": str(allocated_order.id),
+                    "frontend_id": allocated_order.frontend_id or "N/A",
+                    "client_company_name": allocated_order.client.company_name if allocated_order.client else "N/A"
+                }
+
+            # New : cut roll can have client without order through manual client id
+            if cut_roll.manual_client:
+                if not order_info:
+                    order_info = {
+                        "id": None,
+                        "frontend_id": None,
+                        "client_company_name": cut_roll.manual_client.company_name
+                    }
+
+            wastage_details = None
+            if cut_roll.is_wastage_roll and cut_roll.qr_code:
+                # QR code format: WCR_{wastage_frontend_id}_{plan_id}
+                # Extract wastage frontend_id from QR code
+                parts = cut_roll.qr_code.split('_')
+                if len(parts) >= 2 and parts[0] == 'WCR':
+                    wastage_frontend_id = parts[1]
+
+                    # Query wastage_inventory for this frontend_id
+                    wastage = db.query(models.WastageInventory).filter(
+                        models.WastageInventory.frontend_id == wastage_frontend_id
+                    ).first()
+
+                    if wastage:
+                        wastage_details = {
+                            "source": "Stock",
+                            "reel_no": wastage.reel_no or wastage.barcode_id,
+                            "wastage_barcode": wastage.barcode_id,
+                            "wastage_frontend_id": wastage.frontend_id
+                        }
+
+            # Compile cut roll data
+            cut_roll_data = {
+                "id": str(cut_roll.id),
+                "frontend_id": cut_roll.frontend_id or "N/A",
+                "barcode_id": cut_roll.barcode_id or "N/A",
+                "width_inches": float(cut_roll.width_inches),
+                "weight_kg": float(cut_roll.weight_kg) if cut_roll.weight_kg else 0,
+                "location": cut_roll.location or "N/A",
+                "status": cut_roll.status,
+                "created_at": cut_roll.created_at.isoformat() if cut_roll.created_at else None,
+                "updated_at": cut_roll.updated_at.isoformat() if cut_roll.updated_at else None,
+                "production_date": cut_roll.production_date.isoformat() if cut_roll.production_date else None,
+                "roll_sequence": cut_roll.roll_sequence,
+                "individual_roll_number": cut_roll.individual_roll_number,
+
+                # Related data
+                "paper_specs": paper_specs,
+                "parent_118_roll": parent_118_info,
+                "parent_jumbo_roll": parent_jumbo_info,
+                "plan_info": plan_info,
+                "allocated_order": order_info,
+                "wastage_details": wastage_details,
+
+                # Source tracking
+                "source_type": cut_roll.source_type,
+                "is_wastage_roll": cut_roll.is_wastage_roll
+            }
+
+            cut_rolls_data.append(cut_roll_data)
+
+        return {
+            "success": True,
+            "data": {
+                "cut_rolls": cut_rolls_data,
+                "total_items": total_count,
+                "stats": {
+                    "total_rolls": total_count,
+                    "total_weight_kg": round(total_weight, 2),
+                    "status_breakdown": status_counts
+                },
+                "filters_applied": {
+                    "from_production_date": from_production_date,
+                    "to_production_date": to_production_date
+                }
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error in cut rolls with stats report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

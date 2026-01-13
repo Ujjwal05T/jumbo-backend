@@ -206,7 +206,23 @@ def delete_inward_challan(db: Session, challan_id: UUID) -> bool:
 
 def create_outward_challan(db: Session, challan: schemas.OutwardChallanCreate) -> models.OutwardChallan:
     """Create a new outward challan with year suffix (format: 00001-25)"""
+    from fastapi import HTTPException
+
     challan_data = challan.dict()
+
+    # Check for duplicate rst_no (if rst_no is provided and not empty)
+    rst_no = challan_data.get('rst_no')
+    if rst_no and rst_no.strip():
+        existing_challan = db.query(models.OutwardChallan).filter(
+            models.OutwardChallan.rst_no == rst_no.strip()
+        ).first()
+
+        if existing_challan:
+            logger.warning(f"Duplicate rst_no attempted: {rst_no}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"RST No. '{rst_no}' is already in use. Please use a unique RST number."
+            )
 
     # Generate serial number with year suffix
     try:
@@ -265,19 +281,39 @@ def get_outward_challan(db: Session, challan_id: UUID) -> Optional[models.Outwar
     return db.query(models.OutwardChallan).filter(models.OutwardChallan.id == challan_id).first()
 
 def update_outward_challan(
-    db: Session, 
-    challan_id: UUID, 
+    db: Session,
+    challan_id: UUID,
     challan_update: schemas.OutwardChallanUpdate
 ) -> Optional[models.OutwardChallan]:
     """Update outward challan information"""
+    from fastapi import HTTPException
+
     db_challan = get_outward_challan(db, challan_id)
     if not db_challan:
         return None
-    
+
     update_data = challan_update.dict(exclude_unset=True)
+
+    # Check for duplicate rst_no (if rst_no is being updated and not empty)
+    if 'rst_no' in update_data:
+        rst_no = update_data.get('rst_no')
+        if rst_no and rst_no.strip():
+            # Check if another challan (not this one) is using this rst_no
+            existing_challan = db.query(models.OutwardChallan).filter(
+                models.OutwardChallan.rst_no == rst_no.strip(),
+                models.OutwardChallan.id != challan_id
+            ).first()
+
+            if existing_challan:
+                logger.warning(f"Duplicate rst_no attempted in update: {rst_no}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"RST No. '{rst_no}' is already in use. Please use a unique RST number."
+                )
+
     for field, value in update_data.items():
         setattr(db_challan, field, value)
-    
+
     db.commit()
     db.refresh(db_challan)
     logger.info(f"Updated outward challan: {challan_id}")
