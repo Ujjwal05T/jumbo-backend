@@ -678,6 +678,7 @@ class PaymentSlipMaster(Base):
     created_by_id = Column(UNIQUEIDENTIFIER, ForeignKey("user_master.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_deleted = Column(Boolean, nullable=True, default=False)  # Soft delete flag
 
     # Relationships
     dispatch_record = relationship("DispatchRecord")

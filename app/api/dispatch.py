@@ -87,9 +87,10 @@ def get_dispatch_history(
         # Format response
         dispatch_list = []
         for dispatch in dispatches:
-            # Check if payment slip exists for this dispatch
+            # Check if payment slip exists for this dispatch (exclude soft-deleted)
             payment_slip_exists = db.query(models.PaymentSlipMaster).filter(
-                models.PaymentSlipMaster.dispatch_record_id == dispatch.id
+                models.PaymentSlipMaster.dispatch_record_id == dispatch.id,
+                models.PaymentSlipMaster.is_deleted != True
             ).first() is not None
 
             dispatch_list.append({
@@ -578,9 +579,10 @@ def create_payment_slip(
         if not dispatch:
             raise HTTPException(status_code=404, detail="Dispatch record not found")
 
-        # Check if payment slip already exists for this dispatch
+        # Check if payment slip already exists for this dispatch (exclude soft-deleted)
         existing_slip = db.query(models.PaymentSlipMaster).filter(
-            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid,
+            models.PaymentSlipMaster.is_deleted != True
         ).first()
 
         if existing_slip:
@@ -694,6 +696,224 @@ def create_payment_slip(
         logger.error(f"Error creating payment slip: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.put("/payment-slip/edit/{payment_slip_id}", tags=["Payment Slip"])
+def edit_payment_slip(
+    payment_slip_id: str,
+    payment_slip_data: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Edit an existing payment slip.
+    Can update: slip_date, bill_no, ebay_no, total_amount, and items.
+    Note: Cannot change payment_type or dispatch_record_id.
+    """
+    try:
+        slip_uuid = uuid.UUID(payment_slip_id)
+
+        # Get payment slip (exclude soft-deleted)
+        payment_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.id == slip_uuid,
+            models.PaymentSlipMaster.is_deleted != True
+        ).first()
+
+        if not payment_slip:
+            raise HTTPException(status_code=404, detail="Payment slip not found")
+
+        # Extract data from request
+        slip_date = payment_slip_data.get('slip_date')
+        bill_no = payment_slip_data.get('bill_no')
+        ebay_no = payment_slip_data.get('ebay_no')
+        total_amount = payment_slip_data.get('total_amount')
+        items = payment_slip_data.get('items', [])
+
+        # Update simple fields
+        if slip_date is not None:
+            try:
+                payment_slip.slip_date = datetime.fromisoformat(slip_date.replace('Z', '+00:00'))
+            except:
+                payment_slip.slip_date = None
+
+        if bill_no is not None:
+            payment_slip.bill_no = bill_no
+
+        if ebay_no is not None:
+            payment_slip.ebay_no = ebay_no
+
+        if total_amount is not None:
+            payment_slip.total_amount = total_amount
+
+        # Update items if provided
+        if items:
+            # Delete existing items
+            db.query(models.PaymentSlipItem).filter(
+                models.PaymentSlipItem.payment_slip_id == slip_uuid
+            ).delete()
+
+            # Create new items
+            for item in items:
+                payment_slip_item = models.PaymentSlipItem(
+                    payment_slip_id=slip_uuid,
+                    width_inches=item.get('width_inches'),
+                    paper_spec=item.get('paper_spec'),
+                    quantity=item.get('quantity'),
+                    total_weight_kg=item.get('total_weight_kg'),
+                    rate=item.get('rate'),
+                    amount=item.get('amount')
+                )
+                db.add(payment_slip_item)
+
+        db.commit()
+        db.refresh(payment_slip)
+
+        logger.info(f"Payment slip {payment_slip.frontend_id} updated successfully")
+
+        return {
+            "success": True,
+            "message": "Payment slip updated successfully",
+            "payment_slip_id": str(payment_slip.id),
+            "frontend_id": payment_slip.frontend_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error editing payment slip: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/payment-slip/delete/{payment_slip_id}", tags=["Payment Slip"])
+def delete_payment_slip(
+    payment_slip_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete payment slip and revert all status changes.
+    Business rules:
+    - Inventory/ManualCutRoll: billed → used
+    - DispatchRecord: billed → dispatched
+    """
+    try:
+        slip_uuid = uuid.UUID(payment_slip_id)
+
+        # Get payment slip
+        payment_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.id == slip_uuid
+        ).first()
+
+        if not payment_slip:
+            raise HTTPException(status_code=404, detail="Payment slip not found")
+
+        # Check if already soft deleted
+        if payment_slip.is_deleted:
+            raise HTTPException(status_code=400, detail="Payment slip is already deleted")
+
+        # Get dispatch record
+        dispatch = db.query(models.DispatchRecord).filter(
+            models.DispatchRecord.id == payment_slip.dispatch_record_id
+        ).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+        # Get all dispatch items
+        dispatch_items = db.query(models.DispatchItem).filter(
+            models.DispatchItem.dispatch_record_id == payment_slip.dispatch_record_id
+        ).all()
+
+        logger.info(f"Reverting status for {len(dispatch_items)} dispatch items")
+
+        inventory_reverted = 0
+        manual_roll_reverted = 0
+
+        # Revert status for all linked items
+        for dispatch_item in dispatch_items:
+            # Revert InventoryMaster status if linked
+            if dispatch_item.inventory_id:
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == dispatch_item.inventory_id
+                ).first()
+
+                if inventory and inventory.status == "billed":
+                    inventory.status = "used"
+                    inventory_reverted += 1
+                    logger.info(f"Reverted inventory {inventory.barcode_id} to 'used'")
+
+            # Revert ManualCutRoll status if linked via barcode_id
+            elif dispatch_item.barcode_id and dispatch_item.barcode_id.startswith('CR_'):
+                manual_roll = db.query(models.ManualCutRoll).filter(
+                    models.ManualCutRoll.barcode_id == dispatch_item.barcode_id
+                ).first()
+
+                if manual_roll and manual_roll.status == "billed":
+                    manual_roll.status = "used"
+                    manual_roll_reverted += 1
+                    logger.info(f"Reverted manual cut roll {manual_roll.barcode_id} to 'used'")
+
+        logger.info(f"Status reverted: {inventory_reverted} inventory items, {manual_roll_reverted} manual cut rolls")
+
+        # Revert dispatch record status
+        if dispatch.status == "billed":
+            dispatch.status = "dispatched"
+            logger.info(f"Reverted dispatch record {dispatch.dispatch_number} to 'dispatched'")
+
+        # Soft delete - mark as deleted instead of removing from database
+        payment_slip.is_deleted = True
+
+        db.commit()
+
+        logger.info(f"Payment slip {payment_slip.frontend_id} soft deleted successfully")
+
+        return {
+            "success": True,
+            "message": "Payment slip deleted and statuses reverted successfully",
+            "frontend_id": payment_slip.frontend_id,
+            "items_reverted": {
+                "inventory": inventory_reverted,
+                "manual_cut_rolls": manual_roll_reverted,
+                "dispatch": 1 if dispatch.status == "dispatched" else 0
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting payment slip: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/dispatch/{dispatch_id}/payment-slip-id", tags=["Payment Slip"])
+def get_payment_slip_id_by_dispatch(
+    dispatch_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get payment slip ID for a dispatch record.
+    """
+    try:
+        dispatch_uuid = uuid.UUID(dispatch_id)
+
+        # Find payment slip for this dispatch (exclude soft-deleted)
+        payment_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid,
+            models.PaymentSlipMaster.is_deleted != True
+        ).first()
+
+        if not payment_slip:
+            raise HTTPException(status_code=404, detail="Payment slip not found for this dispatch")
+
+        return {
+            "payment_slip_id": str(payment_slip.id),
+            "frontend_id": payment_slip.frontend_id,
+            "payment_type": payment_slip.payment_type
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dispatch ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching payment slip ID: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/payment-slip/list", tags=["Payment Slip"])
 def get_payment_slip_list(
     skip: int = 0,
@@ -718,16 +938,21 @@ def get_payment_slip_list(
             joinedload(models.PaymentSlipMaster.payment_slip_items)
         )
 
+        # Filter out soft-deleted records
+        query = query.filter(models.PaymentSlipMaster.is_deleted != True)
+
         # Apply filters
         if payment_type and payment_type.strip() and payment_type != "all":
             query = query.filter(models.PaymentSlipMaster.payment_type == payment_type)
 
+        # Add explicit join only once if needed for filtering
+        if (client_id and client_id.strip() and client_id != "all") or (search and search.strip()):
+            query = query.join(models.DispatchRecord)
+
         if client_id and client_id.strip() and client_id != "all":
             try:
                 client_uuid = uuid.UUID(client_id)
-                query = query.join(models.DispatchRecord).filter(
-                    models.DispatchRecord.client_id == client_uuid
-                )
+                query = query.filter(models.DispatchRecord.client_id == client_uuid)
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid client ID format")
 
@@ -751,7 +976,7 @@ def get_payment_slip_list(
         # Search filter (search in payment slip ID, bill number, dispatch number)
         if search and search.strip():
             search_term = f"%{search.strip()}%"
-            query = query.join(models.DispatchRecord).filter(
+            query = query.filter(
                 or_(
                     models.PaymentSlipMaster.frontend_id.like(search_term),
                     models.PaymentSlipMaster.bill_no.like(search_term),
@@ -829,6 +1054,60 @@ def get_payment_slip_list(
         logger.error(f"Error fetching payment slip list: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/payment-slip/{payment_slip_id}", tags=["Payment Slip"])
+def get_payment_slip_details(
+    payment_slip_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get payment slip details including items for editing.
+    """
+    try:
+        slip_uuid = uuid.UUID(payment_slip_id)
+
+        # Fetch payment slip with items (exclude soft-deleted)
+        payment_slip = db.query(models.PaymentSlipMaster).options(
+            joinedload(models.PaymentSlipMaster.payment_slip_items),
+            joinedload(models.PaymentSlipMaster.dispatch_record)
+        ).filter(
+            models.PaymentSlipMaster.id == slip_uuid,
+            models.PaymentSlipMaster.is_deleted != True
+        ).first()
+
+        if not payment_slip:
+            raise HTTPException(status_code=404, detail="Payment slip not found")
+
+        # Format items
+        items = []
+        for item in payment_slip.payment_slip_items:
+            items.append({
+                "width_inches": item.width_inches,
+                "paper_spec": item.paper_spec,
+                "quantity": item.quantity,
+                "total_weight_kg": float(item.total_weight_kg) if item.total_weight_kg else 0,
+                "rate": float(item.rate) if item.rate else 0,
+                "amount": float(item.amount) if item.amount else 0
+            })
+
+        return {
+            "id": str(payment_slip.id),
+            "frontend_id": payment_slip.frontend_id,
+            "payment_type": payment_slip.payment_type,
+            "slip_date": payment_slip.slip_date.strftime("%Y-%m-%d") if payment_slip.slip_date else None,
+            "bill_no": payment_slip.bill_no,
+            "ebay_no": payment_slip.ebay_no,
+            "total_amount": float(payment_slip.total_amount) if payment_slip.total_amount else 0,
+            "items": items,
+            "dispatch_id": str(payment_slip.dispatch_record_id)
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payment slip ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching payment slip details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/payment-slip/by-dispatch/{dispatch_id}", tags=["Payment Slip"])
 def get_payment_slip_by_dispatch(
     dispatch_id: str,
@@ -840,9 +1119,10 @@ def get_payment_slip_by_dispatch(
     try:
         dispatch_uuid = uuid.UUID(dispatch_id)
 
-        # Get payment slip for this dispatch
+        # Get payment slip for this dispatch (exclude soft-deleted)
         payment_slip = db.query(models.PaymentSlipMaster).filter(
-            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid,
+            models.PaymentSlipMaster.is_deleted != True
         ).first()
 
         if not payment_slip:
