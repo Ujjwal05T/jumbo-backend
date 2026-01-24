@@ -83,6 +83,7 @@ class UserRole(str, Enum):
     DISPATCH = "dispatch"
     SYSTEM = "system"
     SALES_PERSON = "sales_person"
+    QC = "qc"
 
 class PaperType(str, Enum):
     STANDARD = "standard"
@@ -135,7 +136,7 @@ class ClientMaster(ClientMasterBase):
 class UserMasterBase(BaseModel):
     name: str = Field(..., max_length=255)
     username: str = Field(..., max_length=50)
-    role: UserRole = Field(..., description="User role: admin, order_puncher, security, co_admin, weight_update, poduction, accountant, accountant2, mou, dispatch, system")
+    role: UserRole = Field(..., description="User role: admin, order_puncher, security, co_admin, weight_update, poduction, accountant, accountant2, mou, dispatch, system, sales_person, qc")
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
     status: UserStatus = Field(default=UserStatus.ACTIVE)
