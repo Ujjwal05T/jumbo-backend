@@ -1272,3 +1272,43 @@ class PendingOrderAllocationResponse(BaseModel):
     updated_order_item: Optional[OrderItem] = None
     allocation_details: Dict[str, Any] = Field(default_factory=dict)
 
+
+# ============================================================================
+# QUALITY CHECK SCHEMAS
+# ============================================================================
+
+class QualityCheckCreate(BaseModel):
+    """Schema for creating a quality check record"""
+    barcode_id: str = Field(..., description="Barcode ID of the item being checked")
+    gsm: Optional[str] = Field(None, description="GSM value")
+    bf: Optional[str] = Field(None, description="BF value")
+    cobb_value: Optional[str] = Field(None, description="Cobb value")
+
+class QualityCheckUpdate(BaseModel):
+    """Schema for updating a quality check record"""
+    barcode_id: Optional[str] = Field(None, description="Barcode ID of the item being checked")
+    gsm: Optional[str] = Field(None, description="GSM value")
+    bf: Optional[str] = Field(None, description="BF value")
+    cobb_value: Optional[str] = Field(None, description="Cobb value")
+
+class QualityCheck(BaseModel):
+    """Schema for quality check record"""
+    id: UUID
+    barcode_id: str = Field(..., description="Barcode ID of the item being checked")
+    gsm: Optional[str] = Field(None, description="GSM value")
+    bf: Optional[str] = Field(None, description="BF value")
+    cobb_value: Optional[str] = Field(None, description="Cobb value")
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class PaginatedQualityCheckResponse(BaseModel):
+    """Paginated response for quality check records"""
+    items: List[QualityCheck]
+    total: int
+    page: int
+    per_page: int
+    total_pages: int
+

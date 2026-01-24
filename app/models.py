@@ -1009,6 +1009,19 @@ def generate_serial_no_on_insert(mapper, connection, target):
             session.close()
 
 
+# Quality Check Model
+class QualityCheck(Base):
+    __tablename__ = "quality_check"
+    
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    barcode_id = Column(String(255), nullable=False, index=True)
+    gsm = Column(String(50), nullable=True)
+    bf = Column(String(50), nullable=True)
+    cobb_value = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # Register event listeners for all models that have frontend_id
 models_with_frontend_id = [
     ClientMaster,
