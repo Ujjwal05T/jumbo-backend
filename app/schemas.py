@@ -1313,3 +1313,79 @@ class PaginatedQualityCheckResponse(BaseModel):
     per_page: int
     total_pages: int
 
+
+# ============================================================================
+# PRODUCTION DATA SCHEMAS
+# ============================================================================
+
+class ProductionDataCreate(BaseModel):
+    """Schema for creating production data"""
+    date: datetime = Field(..., description="Date of production data (unique)")
+    production: Optional[str] = Field(None, description="Production value")
+    electricity: Optional[str] = Field(None, description="Electricity consumption")
+    coal: Optional[str] = Field(None, description="Coal consumption")
+    bhushi: Optional[str] = Field(None, description="Bhushi value")
+    dispatch_ton: Optional[str] = Field(None, description="Dispatch in tons")
+    po_ton: Optional[str] = Field(None, description="PO in tons")
+    waste: Optional[str] = Field(None, description="Waste value")
+    starch: Optional[str] = Field(None, description="Starch consumption")
+    guar_gum: Optional[str] = Field(None, description="Guar gum consumption")
+    pac: Optional[str] = Field(None, description="PAC consumption")
+    rct: Optional[str] = Field(None, description="RCT value")
+    s_seizing: Optional[str] = Field(None, description="S.Seizing value")
+    d_former: Optional[str] = Field(None, description="D.Former value")
+    sodium_silicate: Optional[str] = Field(None, description="Sodium silicate consumption")
+    enzyme: Optional[str] = Field(None, description="Enzyme consumption")
+    dsr: Optional[str] = Field(None, description="D.S.R. value")
+    ret_aid: Optional[str] = Field(None, description="Ret.Aid value")
+    colour_dye: Optional[str] = Field(None, description="Colour dye consumption")
+
+class ProductionDataUpdate(BaseModel):
+    """Schema for updating production data"""
+    production: Optional[str] = Field(None, description="Production value")
+    electricity: Optional[str] = Field(None, description="Electricity consumption")
+    coal: Optional[str] = Field(None, description="Coal consumption")
+    bhushi: Optional[str] = Field(None, description="Bhushi value")
+    dispatch_ton: Optional[str] = Field(None, description="Dispatch in tons")
+    po_ton: Optional[str] = Field(None, description="PO in tons")
+    waste: Optional[str] = Field(None, description="Waste value")
+    starch: Optional[str] = Field(None, description="Starch consumption")
+    guar_gum: Optional[str] = Field(None, description="Guar gum consumption")
+    pac: Optional[str] = Field(None, description="PAC consumption")
+    rct: Optional[str] = Field(None, description="RCT value")
+    s_seizing: Optional[str] = Field(None, description="S.Seizing value")
+    d_former: Optional[str] = Field(None, description="D.Former value")
+    sodium_silicate: Optional[str] = Field(None, description="Sodium silicate consumption")
+    enzyme: Optional[str] = Field(None, description="Enzyme consumption")
+    dsr: Optional[str] = Field(None, description="D.S.R. value")
+    ret_aid: Optional[str] = Field(None, description="Ret.Aid value")
+    colour_dye: Optional[str] = Field(None, description="Colour dye consumption")
+
+class ProductionData(BaseModel):
+    """Schema for production data response"""
+    id: UUID
+    date: datetime
+    production: Optional[str]
+    electricity: Optional[str]
+    coal: Optional[str]
+    bhushi: Optional[str]
+    dispatch_ton: Optional[str]
+    po_ton: Optional[str]
+    waste: Optional[str]
+    starch: Optional[str]
+    guar_gum: Optional[str]
+    pac: Optional[str]
+    rct: Optional[str]
+    s_seizing: Optional[str]
+    d_former: Optional[str]
+    sodium_silicate: Optional[str]
+    enzyme: Optional[str]
+    dsr: Optional[str]
+    ret_aid: Optional[str]
+    colour_dye: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+

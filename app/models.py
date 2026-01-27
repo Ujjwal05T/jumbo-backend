@@ -1009,10 +1009,38 @@ def generate_serial_no_on_insert(mapper, connection, target):
             session.close()
 
 
+# Production Data Model
+class ProductionData(Base):
+    __tablename__ = "production_data"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    date = Column(DateTime, nullable=False, unique=True, index=True)  # Unique constraint - only one record per date
+    production = Column(String(255), nullable=True)
+    electricity = Column(String(255), nullable=True)
+    coal = Column(String(255), nullable=True)
+    bhushi = Column(String(255), nullable=True)
+    dispatch_ton = Column(String(255), nullable=True)
+    po_ton = Column(String(255), nullable=True)
+    waste = Column(String(255), nullable=True)
+    starch = Column(String(255), nullable=True)
+    guar_gum = Column(String(255), nullable=True)
+    pac = Column(String(255), nullable=True)
+    rct = Column(String(255), nullable=True)
+    s_seizing = Column(String(255), nullable=True)
+    d_former = Column(String(255), nullable=True)
+    sodium_silicate = Column(String(255), nullable=True)
+    enzyme = Column(String(255), nullable=True)
+    dsr = Column(String(255), nullable=True)
+    ret_aid = Column(String(255), nullable=True)
+    colour_dye = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # Quality Check Model
 class QualityCheck(Base):
     __tablename__ = "quality_check"
-    
+
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     barcode_id = Column(String(255), nullable=False, index=True)
     gsm = Column(String(50), nullable=True)
