@@ -86,8 +86,29 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
         """Create new cutting plan with order links and pending orders"""
         import logging
         logger = logging.getLogger(__name__)
-        
+
         try:
+            # VALIDATION: Check if all orders have "created" status
+            if plan.order_ids:
+                non_created_orders = db.query(models.OrderMaster).filter(
+                    models.OrderMaster.id.in_(plan.order_ids),
+                    models.OrderMaster.status != "created"
+                ).all()
+
+                if non_created_orders:
+                    order_details = [
+                        f"{order.frontend_id or str(order.id)} (status: {order.status})"
+                        for order in non_created_orders
+                    ]
+                    error_msg = (
+                        f"Cannot create plan. Only orders with 'created' status can be planned. "
+                        f"The following orders have different status: {', '.join(order_details)}."
+                    )
+                    logger.error(f"❌ PLAN VALIDATION: {error_msg}")
+                    raise ValueError(error_msg)
+
+                logger.info(f"✅ PLAN VALIDATION: All {len(plan.order_ids)} orders have 'created' status")
+
             # Create the plan record
             import json
             db_plan = models.PlanMaster(

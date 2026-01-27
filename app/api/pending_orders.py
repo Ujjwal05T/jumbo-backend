@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from uuid import UUID
 import logging
 
 from .base import get_db
 from .. import crud_operations, schemas
+from ..idempotency import check_idempotency, store_idempotency_response
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -69,7 +70,8 @@ def get_consolidation_opportunities(db: Session = Depends(get_db)):
 @router.post("/pending-order-items/roll-suggestions", tags=["Pending Order Items"])
 def get_roll_suggestions(
     request_data: Dict[str, Any],
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key")
 ):
     """
     Generate roll suggestions for completing target width rolls based on pending orders.
@@ -77,17 +79,45 @@ def get_roll_suggestions(
     Returns suggestions showing existing width + needed width = target width.
     """
     try:
+        # Check for idempotency key
+        if x_idempotency_key:
+            logger.info(f"🔑 IDEMPOTENCY: Checking key for roll suggestions: {x_idempotency_key}")
+
+            # Check if we've seen this key before
+            cached_response = check_idempotency(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/pending-order-items/roll-suggestions",
+                request_body=request_data
+            )
+
+            if cached_response:
+                logger.info(f"✅ IDEMPOTENCY: Returning cached suggestions for key: {x_idempotency_key}")
+                return cached_response
+
         wastage = request_data.get('wastage', 0)
-        
+
         if not isinstance(wastage, (int, float)) or wastage < 0:
             raise HTTPException(
                 status_code=400,
                 detail="Wastage must be a non-negative number"
             )
-        
+
         from ..services.pending_optimizer import PendingOptimizer
         optimizer = PendingOptimizer(db=db)
-        return optimizer.get_roll_suggestions(wastage)
+        result = optimizer.get_roll_suggestions(wastage)
+
+        # Store idempotency key with response if provided
+        if x_idempotency_key:
+            store_idempotency_response(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/pending-order-items/roll-suggestions",
+                response_body=result,
+                request_body=request_data
+            )
+
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -97,10 +127,27 @@ def get_roll_suggestions(
 @router.post("/pending-orders/start-production", response_model=schemas.StartProductionResponse, tags=["Pending Order Items"])
 def start_production_from_pending_orders(
     request_data: Dict[str, Any],  # Accept raw data to debug validation issues
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key")
 ):
     """Start production from selected pending orders - same format as main planning"""
     try:
+        # Check for idempotency key
+        if x_idempotency_key:
+            logger.info(f"🔑 IDEMPOTENCY: Checking key for start production: {x_idempotency_key}")
+
+            # Check if we've seen this key before
+            cached_response = check_idempotency(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/pending-orders/start-production",
+                request_body=request_data
+            )
+
+            if cached_response:
+                logger.info(f"✅ IDEMPOTENCY: Returning cached production start for key: {x_idempotency_key}")
+                return cached_response
+
         # Debug: Log the incoming request data structure
         logger.info(f"🔍 RAW REQUEST DATA KEYS: {list(request_data.keys())}")
         logger.info(f"🔍 SELECTED CUT ROLLS COUNT: {len(request_data.get('selected_cut_rolls', []))}")
@@ -119,7 +166,19 @@ def start_production_from_pending_orders(
             raise HTTPException(status_code=422, detail=f"Validation error: {str(validation_error)}")
 
         from .. import crud_operations
-        return crud_operations.start_production_from_pending_orders(db=db, request_data=validated_data)
+        result = crud_operations.start_production_from_pending_orders(db=db, request_data=validated_data)
+
+        # Store idempotency key with response if provided
+        if x_idempotency_key:
+            store_idempotency_response(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/pending-orders/start-production",
+                response_body=result,
+                request_body=request_data
+            )
+
+        return result
     except HTTPException:
         raise
     except Exception as e:

@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from uuid import UUID
 import logging
 import json
 
 from .base import get_db
 from .. import crud_operations, schemas
+from ..idempotency import check_idempotency, store_idempotency_response
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,11 +18,47 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 @router.post("/plans", response_model=schemas.PlanMaster, tags=["Plan Master"])
-def create_plan(request: Request, plan: schemas.PlanMasterCreate, db: Session = Depends(get_db)):
-    """Create a new cutting plan"""
+def create_plan(
+    request: Request,
+    plan: schemas.PlanMasterCreate,
+    db: Session = Depends(get_db),
+    x_idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key")
+):
+    """Create a new cutting plan with idempotency support"""
     try:
         logger.info(f"API DEBUG: Plan creation request received for plan '{plan.name}' with {len(plan.pending_orders) if hasattr(plan, 'pending_orders') and plan.pending_orders else 0} pending orders")
-        return crud_operations.create_plan(db=db, plan_data=plan)
+
+        # Check for idempotency key
+        if x_idempotency_key:
+            logger.info(f"🔑 IDEMPOTENCY: Checking key: {x_idempotency_key}")
+
+            # Check if we've seen this key before
+            cached_response = check_idempotency(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/plans",
+                request_body=plan.model_dump() if hasattr(plan, 'model_dump') else plan.dict()
+            )
+
+            if cached_response:
+                logger.info(f"✅ IDEMPOTENCY: Returning cached response for key: {x_idempotency_key}")
+                return cached_response
+
+        # Create the plan
+        result = crud_operations.create_plan(db=db, plan_data=plan)
+
+        # Store idempotency key with response if provided
+        if x_idempotency_key:
+            store_idempotency_response(
+                db=db,
+                idempotency_key=x_idempotency_key,
+                request_path="/plans",
+                response_body=result,
+                request_body=plan.model_dump() if hasattr(plan, 'model_dump') else plan.dict()
+            )
+
+        return result
+
     except RequestValidationError as e:
         logger.error(f"❌ PLAN CREATE: Validation error: {e}")
         raise HTTPException(status_code=422, detail=f"Validation error: {e}")

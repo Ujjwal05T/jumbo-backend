@@ -62,9 +62,26 @@ class RollType(str, PyEnum):
 
 class InventoryItemStatus(str, PyEnum):
     AVAILABLE = "available"
-    IN_DISPATCH = "in_dispatch" 
+    IN_DISPATCH = "in_dispatch"
     DISPATCHED = "dispatched"
     DAMAGED = "damaged"
+
+# ============================================================================
+# SYSTEM TABLES - Infrastructure and utility tables
+# ============================================================================
+
+# Idempotency Keys - Prevents duplicate requests from network retries
+class IdempotencyKey(Base):
+    __tablename__ = "idempotency_keys"
+
+    id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
+    key = Column(String(255), unique=True, nullable=False, index=True)
+    request_path = Column(String(500), nullable=False)
+    request_body_hash = Column(String(64), nullable=True)  # SHA256 hash of request body
+    response_body = Column(JSON, nullable=True)
+    response_status = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)  # Auto-expire after 24 hours
 
 # ============================================================================
 # MASTER TABLES - Core reference data
