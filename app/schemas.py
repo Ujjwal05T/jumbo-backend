@@ -1321,7 +1321,8 @@ class PaginatedQualityCheckResponse(BaseModel):
 class ProductionDataCreate(BaseModel):
     """Schema for creating production data"""
     date: datetime = Field(..., description="Date of production data (unique)")
-    production: Optional[str] = Field(None, description="Production value")
+    production_day: Optional[str] = Field(None, description="Production day value")
+    production_night: Optional[str] = Field(None, description="Production night value")
     electricity: Optional[str] = Field(None, description="Electricity consumption")
     coal: Optional[str] = Field(None, description="Coal consumption")
     bhushi: Optional[str] = Field(None, description="Bhushi value")
@@ -1342,7 +1343,8 @@ class ProductionDataCreate(BaseModel):
 
 class ProductionDataUpdate(BaseModel):
     """Schema for updating production data"""
-    production: Optional[str] = Field(None, description="Production value")
+    production_day: Optional[str] = Field(None, description="Production day value")
+    production_night: Optional[str] = Field(None, description="Production night value")
     electricity: Optional[str] = Field(None, description="Electricity consumption")
     coal: Optional[str] = Field(None, description="Coal consumption")
     bhushi: Optional[str] = Field(None, description="Bhushi value")
@@ -1365,7 +1367,8 @@ class ProductionData(BaseModel):
     """Schema for production data response"""
     id: UUID
     date: datetime
-    production: Optional[str]
+    production_day: Optional[str]
+    production_night: Optional[str]
     electricity: Optional[str]
     coal: Optional[str]
     bhushi: Optional[str]

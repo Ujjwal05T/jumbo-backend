@@ -73,7 +73,7 @@ def get_production_data_report(
 
         # Define all available columns
         all_columns = [
-            "date", "production", "electricity", "coal", "bhushi", "dispatch_ton",
+            "date", "production_day", "production_night", "electricity", "coal", "bhushi", "dispatch_ton",
             "po_ton", "waste", "starch", "guar_gum", "pac", "rct", "s_seizing",
             "d_former", "sodium_silicate", "enzyme", "dsr", "ret_aid", "colour_dye"
         ]

@@ -1032,7 +1032,8 @@ class ProductionData(Base):
 
     id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4, index=True)
     date = Column(DateTime, nullable=False, unique=True, index=True)  # Unique constraint - only one record per date
-    production = Column(String(255), nullable=True)
+    production_day = Column(String(255), nullable=True)
+    production_night = Column(String(255), nullable=True)
     electricity = Column(String(255), nullable=True)
     coal = Column(String(255), nullable=True)
     bhushi = Column(String(255), nullable=True)
