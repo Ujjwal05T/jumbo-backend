@@ -1340,6 +1340,12 @@ class ProductionDataCreate(BaseModel):
     dsr: Optional[str] = Field(None, description="D.S.R. value")
     ret_aid: Optional[str] = Field(None, description="Ret.Aid value")
     colour_dye: Optional[str] = Field(None, description="Colour dye consumption")
+    # New fields for party tracking and shutdown
+    po_party: Optional[str] = Field(None, description="Number of parties for PO")
+    wastage_party: Optional[str] = Field(None, description="Number of parties for Waste")
+    dispatch_party: Optional[str] = Field(None, description="Number of parties for Dispatch")
+    is_shutdown: Optional[str] = Field(None, description="Shutdown status (Yes/No)")
+    shutdown_hours: Optional[str] = Field(None, description="Hours of shutdown")
 
 class ProductionDataUpdate(BaseModel):
     """Schema for updating production data"""
@@ -1362,6 +1368,12 @@ class ProductionDataUpdate(BaseModel):
     dsr: Optional[str] = Field(None, description="D.S.R. value")
     ret_aid: Optional[str] = Field(None, description="Ret.Aid value")
     colour_dye: Optional[str] = Field(None, description="Colour dye consumption")
+    # New fields for party tracking and shutdown
+    po_party: Optional[str] = Field(None, description="Number of parties for PO")
+    wastage_party: Optional[str] = Field(None, description="Number of parties for Waste")
+    dispatch_party: Optional[str] = Field(None, description="Number of parties for Dispatch")
+    is_shutdown: Optional[str] = Field(None, description="Shutdown status (Yes/No)")
+    shutdown_hours: Optional[str] = Field(None, description="Hours of shutdown")
 
 class ProductionData(BaseModel):
     """Schema for production data response"""
@@ -1386,6 +1398,12 @@ class ProductionData(BaseModel):
     dsr: Optional[str]
     ret_aid: Optional[str]
     colour_dye: Optional[str]
+    # New fields for party tracking and shutdown
+    po_party: Optional[str]
+    wastage_party: Optional[str]
+    dispatch_party: Optional[str]
+    is_shutdown: Optional[str]
+    shutdown_hours: Optional[str]
     created_at: datetime
     updated_at: datetime
 

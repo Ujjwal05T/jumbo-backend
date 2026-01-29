@@ -75,7 +75,8 @@ def get_production_data_report(
         all_columns = [
             "date", "production_day", "production_night", "electricity", "coal", "bhushi", "dispatch_ton",
             "po_ton", "waste", "starch", "guar_gum", "pac", "rct", "s_seizing",
-            "d_former", "sodium_silicate", "enzyme", "dsr", "ret_aid", "colour_dye"
+            "d_former", "sodium_silicate", "enzyme", "dsr", "ret_aid", "colour_dye",
+            "po_party", "wastage_party", "dispatch_party", "is_shutdown", "shutdown_hours"
         ]
 
         # Parse selected columns
