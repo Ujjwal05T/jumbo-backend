@@ -4108,7 +4108,8 @@ def get_all_cut_rolls_filtered_report(
                 base_query = base_query.filter(
                     or_(
                         models.InventoryMaster.status == 'available',
-                        models.InventoryMaster.status == 'used'
+                        models.InventoryMaster.status == 'used',
+                        models.InventoryMaster.status == 'billed'
                     )
                 )
             else:
