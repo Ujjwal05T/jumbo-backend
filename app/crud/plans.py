@@ -1899,5 +1899,314 @@ class CRUDPlan(CRUDBase[models.PlanMaster, schemas.PlanMasterCreate, schemas.Pla
             "message": f"Manual plan created successfully - {len(created_jumbo_rolls)} jumbo rolls with {len(created_cut_rolls)} cut rolls"
         }
 
+# ============================================================================
+# HYBRID PLANNING - Combines auto-generated and manual planning
+# ============================================================================
+
+def create_hybrid_production(db: Session, hybrid_data: dict):
+    """
+    Create production from hybrid planning (algorithm + manual rolls).
+
+    Combines algorithm-generated and manual rolls with set-level selection.
+    """
+    import uuid
+    from datetime import datetime
+    from .. import models
+
+    logger.info("🏭 HYBRID PRODUCTION: Starting")
+
+    try:
+        wastage = hybrid_data.get('wastage')
+        planning_width = hybrid_data.get('planning_width')
+        created_by_id = uuid.UUID(hybrid_data.get('created_by_id'))
+        order_ids = [uuid.UUID(oid) for oid in hybrid_data.get('order_ids', [])]
+        paper_specs = hybrid_data.get('paper_specs', [])
+        orphaned_rolls = hybrid_data.get('orphaned_rolls', [])
+
+        # Count selected cuts
+        total_cuts = sum(
+            len(roll_set['cuts'])
+            for spec in paper_specs
+            for jumbo in spec['jumbos']
+            for roll_set in jumbo['sets']
+            if roll_set.get('is_selected', True)
+        )
+
+        logger.info(f"   - Width: {planning_width}\", Cuts: {total_cuts}, Orphans: {len(orphaned_rolls)}")
+
+        # Create plan
+        plan_name = f"Hybrid Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        plan = models.PlanMaster(
+            name=plan_name,
+            cut_pattern=[],
+            wastage_allocations=hybrid_data.get('wastage_allocations', []),
+            expected_waste_percentage=0,
+            created_by_id=created_by_id,
+            status="in_progress"
+        )
+        db.add(plan)
+        db.flush()
+
+        # Counters
+        jumbos_created = 0
+        cut_rolls_created = 0
+        orders_updated = set()
+        production_hierarchy = []
+        roll_counter = 0
+
+        # Process paper specs
+        for spec in paper_specs:
+            gsm, bf, shade = spec['gsm'], spec['bf'], spec['shade']
+
+            # Get paper master record
+            paper = db.query(models.PaperMaster).filter(
+                models.PaperMaster.gsm == gsm,
+                models.PaperMaster.bf == bf,
+                models.PaperMaster.shade == shade
+            ).first()
+
+            if not paper:
+                raise ValueError(f"Paper not found: GSM={gsm}, BF={bf}, Shade={shade}")
+
+            for jumbo in spec['jumbos']:
+                # Skip if no selected sets
+                selected_sets = [s for s in jumbo['sets'] if s.get('is_selected', True)]
+                if not selected_sets:
+                    continue
+
+                # Create jumbo (124")
+                jumbo_barcode = BarcodeGenerator.generate_jumbo_roll_barcode(db)
+                jumbo_roll = models.InventoryMaster(
+                    width_inches=124,
+                    paper_id=paper.id,
+                    weight_kg=0,  # Will be updated during production
+                    roll_type="jumbo",
+                    status="cutting",
+                    barcode_id=jumbo_barcode,
+                    qr_code=jumbo_barcode,  # Use same as barcode_id
+                    created_by_id=created_by_id
+                )
+                db.add(jumbo_roll)
+                db.flush()
+
+                # Link jumbo to plan
+                db.add(models.PlanInventoryLink(
+                    plan_id=plan.id,
+                    inventory_id=jumbo_roll.id,
+                    quantity_used=1.0
+                ))
+
+                jumbos_created += 1
+
+                jumbo_details = {
+                    'jumbo_roll': {
+                        'barcode_id': jumbo_roll.barcode_id,
+                        'gsm': gsm,
+                        'bf': bf,
+                        'shade': shade,
+                        'paper_id': str(paper.id)
+                    },
+                    'cut_rolls': []
+                }
+
+                # Create 3 intermediate rolls
+                for set_num in range(1, 4):
+                    set_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
+                    inter = models.InventoryMaster(
+                        width_inches=planning_width,
+                        paper_id=paper.id,
+                        weight_kg=0,
+                        roll_type="118",
+                        status="cutting",
+                        barcode_id=set_barcode,
+                        qr_code=set_barcode,  # Use same as barcode_id
+                        parent_jumbo_id=jumbo_roll.id,
+                        roll_sequence=set_num,
+                        created_by_id=created_by_id
+                    )
+                    db.add(inter)
+                    db.flush()
+
+                    # Link 118" roll to plan
+                    db.add(models.PlanInventoryLink(
+                        plan_id=plan.id,
+                        inventory_id=inter.id,
+                        quantity_used=1.0
+                    ))
+
+                    # Find set
+                    roll_set = next((s for s in jumbo['sets'] if s['set_number'] == set_num), None)
+                    if not roll_set or not roll_set.get('is_selected', True):
+                        continue
+
+                    # Create cut rolls
+                    for cut in roll_set['cuts']:
+                        cut_barcode = BarcodeGenerator.generate_cut_roll_barcode(db)
+
+                        # Determine status: "available" for wastage, "cutting" otherwise
+                        is_wastage = cut.get('is_wastage', False)
+                        cut_status = "available" if is_wastage else "cutting"
+
+                        # Determine allocated_to_order_id and manual_client_id
+                        allocated_order_id = None
+                        manual_client_id = None
+
+                        if cut['source'] == 'manual':
+                            # Manual rolls: find or create client
+                            client_name = cut.get('client_name') or cut.get('clientName')
+                            if client_name:
+                                client = db.query(models.ClientMaster).filter(
+                                    models.ClientMaster.company_name == client_name
+                                ).first()
+                                if client:
+                                    manual_client_id = client.id
+                        else:
+                            # Algorithm rolls: allocate to order
+                            if cut.get('order_id'):
+                                try:
+                                    allocated_order_id = uuid.UUID(cut['order_id'])
+                                except:
+                                    pass
+
+                        # Validate source_pending_id
+                        source_pending_id_val = None
+                        if cut.get('source_pending_id'):
+                            try:
+                                pending_uuid = uuid.UUID(cut['source_pending_id'])
+                                # Check if the pending order item actually exists
+                                pending_exists = db.query(models.PendingOrderItem).filter(
+                                    models.PendingOrderItem.id == pending_uuid
+                                ).first()
+                                if pending_exists:
+                                    source_pending_id_val = pending_uuid
+                                else:
+                                    logger.warning(f"⚠️ PENDING VALIDATION: Pending order {pending_uuid} not found, setting to None")
+                            except (ValueError, AttributeError):
+                                logger.warning(f"⚠️ PENDING VALIDATION: Invalid UUID format for pending_id: {cut.get('source_pending_id')}")
+
+                        cut_roll = models.InventoryMaster(
+                            width_inches=cut['width_inches'],
+                            paper_id=paper.id,
+                            weight_kg=0,
+                            roll_type="cut",
+                            status=cut_status,
+                            barcode_id=cut_barcode,
+                            qr_code=cut_barcode,  # Use same as barcode_id
+                            parent_118_roll_id=inter.id,
+                            parent_jumbo_id=jumbo_roll.id,
+                            created_by_id=created_by_id,
+                            allocated_to_order_id=allocated_order_id,
+                            manual_client_id=manual_client_id,
+                            source_type=cut.get('source_type') or ('manual' if cut['source'] == 'manual' else 'regular_order'),
+                            source_pending_id=source_pending_id_val,
+                            is_wastage_roll=is_wastage
+                        )
+                        db.add(cut_roll)
+                        db.flush()
+
+                        # Link cut roll to plan
+                        db.add(models.PlanInventoryLink(
+                            plan_id=plan.id,
+                            inventory_id=cut_roll.id,
+                            quantity_used=cut.get('quantity', 1)
+                        ))
+
+                        cut_rolls_created += 1
+                        roll_counter += 1
+
+                        jumbo_details['cut_rolls'].append({
+                            'barcode_id': cut_roll.barcode_id,
+                            'width_inches': cut['width_inches'],
+                            'client_name': cut.get('client_name') or cut.get('clientName', 'N/A'),
+                            'status': cut_roll.status,
+                            'gsm': gsm,
+                            'bf': bf,
+                            'shade': shade,
+                            'paper_id': str(paper.id),
+                            'source_type': cut_roll.source_type
+                        })
+
+                        # Link to order if from algorithm
+                        if cut['source'] == 'algorithm' and cut.get('order_id'):
+                            try:
+                                oid = uuid.UUID(cut['order_id'])
+                                orders_updated.add(str(oid))
+
+                                items = db.query(models.OrderItem).filter(
+                                    models.OrderItem.order_id == oid,
+                                    models.OrderItem.width_inches == cut['width_inches']
+                                ).all()
+
+                                if items:
+                                    order_item = items[0]
+                                    order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + cut['quantity']
+                                    order_item.item_status = 'in_warehouse'
+
+                                    # Create plan-order link with order_item_id
+                                    existing_link = db.query(models.PlanOrderLink).filter(
+                                        models.PlanOrderLink.plan_id == plan.id,
+                                        models.PlanOrderLink.order_id == oid,
+                                        models.PlanOrderLink.order_item_id == order_item.id
+                                    ).first()
+
+                                    if not existing_link:
+                                        db.add(models.PlanOrderLink(
+                                            plan_id=plan.id,
+                                            order_id=oid,
+                                            order_item_id=order_item.id,
+                                            quantity_allocated=cut['quantity']
+                                        ))
+
+                                    order = db.query(models.OrderMaster).get(oid)
+                                    if order:
+                                        order.status = 'in_process'
+                            except Exception as e:
+                                logger.warning(f"Failed to link order {cut.get('order_id')}: {e}")
+                                pass
+
+                production_hierarchy.append(jumbo_details)
+
+        # Create pending from orphans (only for those with order_id)
+        pending_created = 0
+        for orphan in orphaned_rolls:
+            # Only create pending items for orphaned rolls that came from orders
+            if orphan.get('order_id'):
+                try:
+                    db.add(models.PendingOrderItem(
+                        original_order_id=uuid.UUID(orphan['order_id']),
+                        width_inches=orphan['width_inches'],
+                        quantity_pending=orphan.get('quantity', 1),
+                        gsm=orphan['gsm'],
+                        bf=orphan['bf'],
+                        shade=orphan['shade'],
+                        reason='Orphaned from hybrid plan'
+                    ))
+                    pending_created += 1
+                except Exception as e:
+                    logger.warning(f"Failed to create pending item for orphaned roll: {e}")
+            else:
+                # Orphaned manual rolls (no order_id) are just discarded
+                logger.info(f"Discarding orphaned manual roll: {orphan['width_inches']}\" (no order_id)")
+
+        db.commit()
+
+        logger.info(f"✅ Created: J={jumbos_created}, CR={cut_rolls_created}, Orders={len(orders_updated)}, Pending={pending_created}")
+
+        return {
+            'plan_id': str(plan.id),
+            'plan_frontend_id': plan.frontend_id,
+            'production_hierarchy': production_hierarchy,
+            'summary': {
+                'jumbos_created': jumbos_created,
+                'cut_rolls_created': cut_rolls_created,
+                'orders_updated': len(orders_updated),
+                'pending_items_created': pending_created
+            }
+        }
+    except Exception as e:
+        logger.error(f"❌ HYBRID: {e}")
+        db.rollback()
+        raise
+
 
 plan = CRUDPlan(models.PlanMaster)

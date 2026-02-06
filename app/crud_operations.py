@@ -18,7 +18,7 @@ from .crud.users import user as user_crud
 from .crud.papers import paper
 from .crud.orders import order, order_item
 from .crud.inventory import inventory
-from .crud.plans import plan
+from .crud.plans import plan, create_hybrid_production as _create_hybrid_production
 from .crud.pending_orders import pending_order
 from .crud import material_management
 from .crud.snapshots import snapshot
@@ -149,6 +149,9 @@ def start_production_for_plan(db, plan_id, request_data):
 
 def create_manual_plan_with_inventory(db, manual_plan_data):
     return plan.create_manual_plan_with_inventory(db=db, manual_plan_data=manual_plan_data)
+
+def create_hybrid_production(db, hybrid_data):
+    return _create_hybrid_production(db=db, hybrid_data=hybrid_data)
 
 def start_production_from_pending_orders(db, request_data):
     from .crud.pending_orders import start_production_from_pending_orders_impl  # ✅ RENAMED FUNCTION

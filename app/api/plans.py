@@ -300,6 +300,54 @@ def start_production_with_backup(
         logger.error(f"   - Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================================
+# HYBRID PLANNING ENDPOINTS (MUST BE BEFORE PARAMETERIZED ROUTES)
+# ============================================================================
+
+@router.post("/plans/hybrid/start-production", tags=["Hybrid Planning"])
+def start_hybrid_production(
+    request_data: schemas.HybridStartProductionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Start production from hybrid planning (combines auto-generated and manual rolls).
+
+    This endpoint:
+    1. Creates a plan with the hybrid structure
+    2. Creates inventory hierarchy (jumbo -> 118" intermediate -> cut rolls)
+    3. Links algorithm rolls to original orders
+    4. Creates manual rolls without order linkage
+    5. Creates pending items from orphaned rolls
+    6. Updates order statuses and fulfillment
+
+    Returns production hierarchy and summary.
+    """
+    try:
+        logger.info("🎯 HYBRID PLAN API: Received hybrid start production request")
+        logger.info(f"   - Planning width: {request_data.planning_width}")
+        logger.info(f"   - Wastage: {request_data.wastage}")
+        logger.info(f"   - Paper specs: {len(request_data.paper_specs)}")
+        logger.info(f"   - Order IDs: {len(request_data.order_ids)}")
+        logger.info(f"   - Orphaned rolls: {len(request_data.orphaned_rolls)}")
+
+        result = crud_operations.create_hybrid_production(
+            db=db,
+            hybrid_data=request_data.model_dump()
+        )
+
+        logger.info(f"✅ HYBRID PLAN API: Successfully created hybrid production")
+        logger.info(f"   - Plan ID: {result.get('plan_frontend_id')}")
+        logger.info(f"   - Jumbos created: {result.get('summary', {}).get('jumbos_created', 0)}")
+        logger.info(f"   - Cut rolls created: {result.get('summary', {}).get('cut_rolls_created', 0)}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ HYBRID PLAN API: Error starting hybrid production: {e}")
+        import traceback
+        logger.error(f"   - Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/plans/{plan_id}/start-production", response_model=schemas.StartProductionResponse, tags=["Plan Management"])
 def start_production(
     plan_id: str,

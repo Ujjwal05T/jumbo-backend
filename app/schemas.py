@@ -1410,3 +1410,62 @@ class ProductionData(BaseModel):
     class Config:
         from_attributes = True
 
+# ============================================================================
+# HYBRID PLANNING SCHEMAS
+# ============================================================================
+
+class HybridCutRoll(BaseModel):
+    """Single cut roll in hybrid planning (can be from algorithm or manual)"""
+    width_inches: float = Field(..., gt=0, description="Width in inches")
+    quantity: int = Field(default=1, ge=1, description="Quantity of this cut roll")
+    client_name: Optional[str] = Field(None, description="Client name")
+    client_id: Optional[str] = Field(None, description="Client ID")
+    source: str = Field(..., description="Source: 'algorithm' or 'manual'")
+    order_id: Optional[str] = Field(None, description="Linked order ID for algorithm rolls")
+    source_pending_id: Optional[str] = Field(None, description="Pending order ID if from pending")
+    source_type: Optional[str] = Field(None, description="'regular_order' or 'pending_order'")
+    paper_id: Optional[str] = Field(None, description="Paper specification ID")
+    trim_left: Optional[float] = Field(0, description="Trim on left side")
+
+class HybridRollSet(BaseModel):
+    """Set of cut rolls (3 sets per jumbo roll)"""
+    set_number: int = Field(..., ge=1, le=3, description="Set number (1-3)")
+    cuts: List[HybridCutRoll] = Field(..., description="Cut rolls in this set")
+    is_selected: bool = Field(True, description="Whether this set is selected for production")
+
+class HybridJumboRoll(BaseModel):
+    """Jumbo roll with 3 sets"""
+    jumbo_number: int = Field(..., ge=1, description="Jumbo roll number")
+    sets: List[HybridRollSet] = Field(..., min_items=3, max_items=3, description="3 sets per jumbo")
+
+class HybridPaperSpec(BaseModel):
+    """Paper specification group with jumbo rolls"""
+    gsm: int = Field(..., gt=0, description="GSM value")
+    bf: float = Field(..., gt=0, description="BF value")
+    shade: str = Field(..., description="Shade/color")
+    jumbos: List[HybridJumboRoll] = Field(..., min_items=1, description="Jumbo rolls for this spec")
+
+class HybridOrphanedRoll(BaseModel):
+    """Orphaned roll that will become a pending item"""
+    width_inches: float = Field(..., gt=0)
+    quantity: int = Field(default=1, ge=1)
+    client_name: Optional[str] = None
+    client_id: Optional[str] = None
+    gsm: int = Field(..., gt=0)
+    bf: float = Field(..., gt=0)
+    shade: str
+    source: str
+    order_id: Optional[str] = None
+    source_pending_id: Optional[str] = None
+    source_type: Optional[str] = None
+
+class HybridStartProductionRequest(BaseModel):
+    """Request to start production from hybrid planning"""
+    wastage: int = Field(..., ge=1, le=20, description="Wastage in inches")
+    planning_width: int = Field(..., ge=50, le=300, description="Planning width (124 - wastage)")
+    created_by_id: str = Field(..., description="User ID starting production")
+    order_ids: List[str] = Field(default=[], description="Original order IDs used in plan")
+    paper_specs: List[HybridPaperSpec] = Field(..., min_items=1, description="Paper specs with jumbo/set hierarchy")
+    orphaned_rolls: List[HybridOrphanedRoll] = Field(default=[], description="Orphaned rolls to create as pending")
+    pending_orders: List[Dict[str, Any]] = Field(default=[], description="Pending orders from algorithm")
+    wastage_allocations: List[Dict[str, Any]] = Field(default=[], description="Wastage/stock allocations")
