@@ -1434,9 +1434,9 @@ class HybridRollSet(BaseModel):
     is_selected: bool = Field(True, description="Whether this set is selected for production")
 
 class HybridJumboRoll(BaseModel):
-    """Jumbo roll with 3 sets"""
+    """Jumbo roll with up to 3 sets"""
     jumbo_number: int = Field(..., ge=1, description="Jumbo roll number")
-    sets: List[HybridRollSet] = Field(..., min_items=3, max_items=3, description="3 sets per jumbo")
+    sets: List[HybridRollSet] = Field(..., min_items=1, max_items=3, description="1-3 sets per jumbo (empty sets filtered out)")
 
 class HybridPaperSpec(BaseModel):
     """Paper specification group with jumbo rolls"""

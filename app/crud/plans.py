@@ -1934,13 +1934,42 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
 
         logger.info(f"   - Width: {planning_width}\", Cuts: {total_cuts}, Orphans: {len(orphaned_rolls)}")
 
+        # Calculate expected waste percentage efficiently
+        # Get all selected sets across all specs and jumbos
+        selected_sets = [
+            roll_set
+            for spec in paper_specs
+            for jumbo in spec['jumbos']
+            for roll_set in jumbo['sets']
+            if roll_set.get('is_selected', True)
+        ]
+
+        # Calculate total width used across all selected sets
+        total_width_used = sum(
+            cut['width_inches'] * cut.get('quantity', 1)
+            for roll_set in selected_sets
+            for cut in roll_set.get('cuts', [])
+        )
+
+        # Total available width = planning_width * number of selected sets
+        total_available_width = len(selected_sets) * planning_width
+
+        # Calculate waste percentage: (total waste / total available width) * 100
+        # Ensure it's non-negative (0 if over-capacity)
+        expected_waste_percentage = (
+            max(0, ((total_available_width - total_width_used) / total_available_width) * 100)
+            if total_available_width > 0 else 0
+        )
+
+        logger.info(f"📊 WASTE CALCULATION: Used {total_width_used}\" / {total_available_width}\" = {expected_waste_percentage:.2f}% waste")
+
         # Create plan
         plan_name = f"Hybrid Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
         plan = models.PlanMaster(
             name=plan_name,
             cut_pattern=[],
             wastage_allocations=hybrid_data.get('wastage_allocations', []),
-            expected_waste_percentage=0,
+            expected_waste_percentage=expected_waste_percentage,
             created_by_id=created_by_id,
             status="in_progress"
         )
@@ -2004,13 +2033,21 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                         'gsm': gsm,
                         'bf': bf,
                         'shade': shade,
-                        'paper_id': str(paper.id)
+                        'paper_id': str(paper.id),
+                        'paper_spec': f"{gsm}gsm, {bf}bf, {shade}"
                     },
                     'cut_rolls': []
                 }
 
-                # Create 3 intermediate rolls
-                for set_num in range(1, 4):
+                # Create intermediate rolls only for sets that exist in payload
+                for roll_set in jumbo['sets']:
+                    set_num = roll_set['set_number']
+
+                    # Skip unselected sets
+                    if not roll_set.get('is_selected', True):
+                        continue
+
+                    # Only generate barcode and create 118" roll if set has cuts
                     set_barcode = BarcodeGenerator.generate_118_roll_barcode(db)
                     inter = models.InventoryMaster(
                         width_inches=planning_width,
@@ -2033,11 +2070,6 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                         inventory_id=inter.id,
                         quantity_used=1.0
                     ))
-
-                    # Find set
-                    roll_set = next((s for s in jumbo['sets'] if s['set_number'] == set_num), None)
-                    if not roll_set or not roll_set.get('is_selected', True):
-                        continue
 
                     # Create cut rolls
                     for cut in roll_set['cuts']:
@@ -2139,8 +2171,15 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
 
                                 if items:
                                     order_item = items[0]
-                                    order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + cut['quantity']
-                                    order_item.item_status = 'in_warehouse'
+
+                                    # Only increment quantity_fulfilled for wastage/stock allocated rolls
+                                    if is_wastage:
+                                        order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                                        order_item.item_status = 'in_warehouse'
+                                    # For newly generated rolls, just update status to in_process
+                                    else:
+                                        if order_item.item_status == 'created':
+                                            order_item.item_status = 'in_process'
 
                                     # Create plan-order link with order_item_id
                                     existing_link = db.query(models.PlanOrderLink).filter(
@@ -2154,7 +2193,7 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                                             plan_id=plan.id,
                                             order_id=oid,
                                             order_item_id=order_item.id,
-                                            quantity_allocated=cut['quantity']
+                                            quantity_allocated=1  # Always 1 since we split by quantity
                                         ))
 
                                     order = db.query(models.OrderMaster).get(oid)
