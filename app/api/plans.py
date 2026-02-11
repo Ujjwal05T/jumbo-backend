@@ -313,16 +313,22 @@ def start_hybrid_production(
     Start production from hybrid planning (combines auto-generated and manual rolls).
 
     This endpoint:
-    1. Creates a plan with the hybrid structure
-    2. Creates inventory hierarchy (jumbo -> 118" intermediate -> cut rolls)
-    3. Links algorithm rolls to original orders
-    4. Creates manual rolls without order linkage
-    5. Creates pending items from orphaned rolls
-    6. Updates order statuses and fulfillment
+    1. Captures pre-execution state for rollback snapshot
+    2. Creates a plan with the hybrid structure
+    3. Creates inventory hierarchy (jumbo -> 118" intermediate -> cut rolls)
+    4. Links algorithm rolls to original orders
+    5. Creates manual rolls without order linkage
+    6. Creates pending items from orphaned rolls
+    7. Updates order statuses and fulfillment
+    8. Creates a rollback snapshot (10-minute window)
 
-    Returns production hierarchy and summary.
+    Returns production hierarchy, summary, and rollback_info.
     """
     try:
+        from datetime import datetime
+        from uuid import UUID as _UUID
+        from .. import models
+
         logger.info("🎯 HYBRID PLAN API: Received hybrid start production request")
         logger.info(f"   - Planning width: {request_data.planning_width}")
         logger.info(f"   - Wastage: {request_data.wastage}")
@@ -330,6 +336,80 @@ def start_hybrid_production(
         logger.info(f"   - Order IDs: {len(request_data.order_ids)}")
         logger.info(f"   - Orphaned rolls: {len(request_data.orphaned_rolls)}")
 
+        # ── 1. Capture pre-execution state ─────────────────────────────────
+        pre_snapshot_time = datetime.utcnow()
+        order_ids = request_data.order_ids  # list of str UUIDs
+
+        affected_orders = []
+        affected_order_items = []
+
+        for oid_str in order_ids:
+            try:
+                oid = _UUID(oid_str)
+            except ValueError:
+                continue
+            order = db.query(models.OrderMaster).filter(models.OrderMaster.id == oid).first()
+            if not order:
+                continue
+            affected_orders.append({
+                "id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "status": order.status,
+                "created_at": order.created_at.isoformat(),
+                "started_production_at": order.started_production_at.isoformat() if order.started_production_at else None,
+                "moved_to_warehouse_at": order.moved_to_warehouse_at.isoformat() if order.moved_to_warehouse_at else None,
+                "dispatched_at": order.dispatched_at.isoformat() if order.dispatched_at else None,
+            })
+            for item in order.order_items:
+                affected_order_items.append({
+                    "id": str(item.id),
+                    "frontend_id": item.frontend_id,
+                    "order_id": str(item.order_id),
+                    "width_inches": float(item.width_inches),
+                    "quantity_rolls": item.quantity_rolls,
+                    "quantity_fulfilled": item.quantity_fulfilled,
+                    "quantity_in_pending": item.quantity_in_pending,
+                    "item_status": item.item_status,
+                    "created_at": item.created_at.isoformat(),
+                })
+
+        # Capture all current pending orders
+        affected_pending_orders = []
+        all_pending = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem._status == "pending"
+        ).all()
+        for pending in all_pending:
+            affected_pending_orders.append({
+                "id": str(pending.id),
+                "frontend_id": pending.frontend_id,
+                "original_order_id": str(pending.original_order_id),
+                "width_inches": float(pending.width_inches),
+                "quantity_pending": pending.quantity_pending,
+                "quantity_fulfilled": pending.quantity_fulfilled or 0,
+                "status": pending._status,
+                "reason": pending.reason,
+                "created_at": pending.created_at.isoformat(),
+            })
+
+        pre_execution_data = {
+            "snapshot_time": pre_snapshot_time.isoformat(),
+            "affected_orders": affected_orders,
+            "affected_order_items": affected_order_items,
+            "affected_pending_orders": affected_pending_orders,
+            "table_counts": {
+                "orders": db.query(models.OrderMaster).count(),
+                "order_items": db.query(models.OrderItem).count(),
+                "inventory_master": db.query(models.InventoryMaster).count(),
+                "pending_order_items": db.query(models.PendingOrderItem).count(),
+                "wastage_inventory": db.query(models.WastageInventory).count(),
+            },
+            # plan_id and plan_details are filled in after execution
+        }
+
+        logger.info(f"📸 HYBRID PLAN API: Pre-execution state captured at {pre_snapshot_time}")
+        logger.info(f"   - Orders: {len(affected_orders)}, Items: {len(affected_order_items)}, Pending: {len(affected_pending_orders)}")
+
+        # ── 2. Execute hybrid production ────────────────────────────────────
         result = crud_operations.create_hybrid_production(
             db=db,
             hybrid_data=request_data.model_dump()
@@ -339,6 +419,52 @@ def start_hybrid_production(
         logger.info(f"   - Plan ID: {result.get('plan_frontend_id')}")
         logger.info(f"   - Jumbos created: {result.get('summary', {}).get('jumbos_created', 0)}")
         logger.info(f"   - Cut rolls created: {result.get('summary', {}).get('cut_rolls_created', 0)}")
+
+        # ── 3. Create rollback snapshot using pre-execution data ────────────
+        plan_snapshot = None
+        try:
+            plan_id_str = result.get("plan_id")
+            if plan_id_str:
+                plan_uuid = _UUID(plan_id_str)
+
+                # Fill in plan details now that we have the plan_id
+                pre_execution_data["plan_id"] = str(plan_uuid)
+                pre_execution_data["plan_details"] = {
+                    "id": str(plan_uuid),
+                    "name": result.get("plan_frontend_id", ""),
+                    "status": "in_progress",
+                    "created_at": pre_snapshot_time.isoformat(),
+                }
+
+                plan_snapshot = crud_operations.create_snapshot_for_hybrid_plan(
+                    db=db,
+                    plan_id=plan_uuid,
+                    user_id=_UUID(request_data.created_by_id),
+                    pre_execution_data=pre_execution_data,
+                )
+                logger.info(f"📸 HYBRID PLAN API: Rollback snapshot created, expires {plan_snapshot.expires_at}")
+            else:
+                logger.warning("⚠️ HYBRID PLAN API: No plan_id in result, cannot create snapshot")
+        except Exception as snap_err:
+            logger.error(f"❌ HYBRID PLAN API: Failed to create rollback snapshot: {snap_err}")
+            # Non-fatal — production succeeded, rollback just won't be available
+
+        # ── 4. Attach rollback_info to response ─────────────────────────────
+        if plan_snapshot:
+            minutes_remaining = int(
+                (plan_snapshot.expires_at - datetime.utcnow()).total_seconds() / 60
+            )
+            result["rollback_info"] = {
+                "rollback_available": True,
+                "expires_at": plan_snapshot.expires_at.isoformat(),
+                "minutes_remaining": minutes_remaining,
+                "plan_id": result.get("plan_id"),
+            }
+        else:
+            result["rollback_info"] = {
+                "rollback_available": False,
+                "reason": "Snapshot creation failed",
+            }
 
         return result
 

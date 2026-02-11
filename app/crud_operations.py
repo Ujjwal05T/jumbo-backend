@@ -347,4 +347,13 @@ def cleanup_expired_snapshots(db: Session):
     """Clean up expired snapshots"""
     return snapshot.cleanup_expired_snapshots(db=db)
 
+def create_snapshot_for_hybrid_plan(db: Session, plan_id: UUID, user_id: UUID, pre_execution_data: dict):
+    """Create a snapshot for a hybrid plan using pre-captured execution state"""
+    return snapshot.create_snapshot_from_predata(
+        db=db,
+        plan_id=plan_id,
+        user_id=user_id,
+        pre_execution_data=pre_execution_data
+    )
+
 

@@ -903,6 +903,36 @@ class CRUDPlanSnapshot:
 
             raise
 
+    def create_snapshot_from_predata(self, db: Session, *, plan_id: UUID, user_id: UUID, pre_execution_data: Dict[str, Any]) -> models.PlanSnapshot:
+        """Create a snapshot using pre-captured state data.
+
+        Used for hybrid plans where the plan_id is not known before execution.
+        The caller captures order/pending-order states BEFORE calling create_hybrid_production,
+        then passes that data here after getting the plan_id from the result.
+        """
+        try:
+            logger.info(f"📸 Creating hybrid snapshot for plan {plan_id} from pre-execution data")
+
+            expires_at = datetime.utcnow() + timedelta(minutes=10)
+            snapshot = models.PlanSnapshot(
+                plan_id=plan_id,
+                snapshot_data=pre_execution_data,
+                expires_at=expires_at,
+                created_by_id=user_id
+            )
+
+            db.add(snapshot)
+            db.commit()
+            db.refresh(snapshot)
+
+            logger.info(f"✅ Created hybrid snapshot {snapshot.id} for plan {plan_id}, expires {snapshot.expires_at}")
+            return snapshot
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ Failed to create hybrid snapshot for plan {plan_id}: {e}")
+            raise
+
     def cleanup_expired_snapshots(self, db: Session) -> int:
         """Clean up expired snapshots (call this periodically)"""
 
