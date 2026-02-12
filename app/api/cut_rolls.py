@@ -317,6 +317,7 @@ def get_cut_roll_production_summary(plan_id: UUID, db: Session = Depends(get_db)
             client_name = "Unknown Client"
             order_date = None
             order_frontend_id = None
+            reel_no = None
             if w.allocated_order:
                 order_frontend_id = w.allocated_order.frontend_id
                 if w.allocated_order.client:

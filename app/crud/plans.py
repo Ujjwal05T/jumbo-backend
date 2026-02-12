@@ -1922,6 +1922,7 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
         order_ids = [uuid.UUID(oid) for oid in hybrid_data.get('order_ids', [])]
         paper_specs = hybrid_data.get('paper_specs', [])
         orphaned_rolls = hybrid_data.get('orphaned_rolls', [])
+        pending_orders_data = hybrid_data.get('pending_orders', [])
 
         # Count selected cuts
         total_cuts = sum(
@@ -1982,6 +1983,7 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
         orders_updated = set()
         production_hierarchy = []
         roll_counter = 0
+        created_cut_rolls = []  # Track cut roll inventory items for pending resolution
 
         # Process paper specs
         for spec in paper_specs:
@@ -2136,6 +2138,8 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                         db.add(cut_roll)
                         db.flush()
 
+                        created_cut_rolls.append(cut_roll)
+
                         # Link cut roll to plan
                         db.add(models.PlanInventoryLink(
                             plan_id=plan.id,
@@ -2203,7 +2207,115 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                                 logger.warning(f"Failed to link order {cut.get('order_id')}: {e}")
                                 pass
 
+                    # NEW WASTAGE INVENTORY: Calculate trim off-cut for this set
+                    # Exclude is_wastage cuts (stock rolls) from width sum — they are pre-existing material
+                    set_width_used = sum(
+                        float(cut['width_inches']) * int(cut.get('quantity', 1))
+                        for cut in roll_set['cuts']
+                        if not cut.get('is_wastage', False)
+                    )
+                    trim = float(planning_width) - set_width_used
+                    if 9 <= trim <= 21:
+                        try:
+                            wastage_barcode = BarcodeGenerator.generate_wastage_barcode(db)
+                            db.add(models.WastageInventory(
+                                width_inches=trim,
+                                paper_id=paper.id,
+                                weight_kg=0.0,
+                                source_plan_id=plan.id,
+                                source_jumbo_roll_id=jumbo_roll.id,
+                                status=models.WastageStatus.AVAILABLE.value,
+                                location="WASTE_STORAGE",
+                                barcode_id=wastage_barcode,
+                                created_by_id=created_by_id
+                            ))
+                            logger.info(f"🗑️ HYBRID WASTAGE NEW: {trim}\" trim from set {set_num} → WastageInventory")
+                        except Exception as e:
+                            logger.warning(f"❌ HYBRID WASTAGE NEW: Failed creating trim wastage for set {set_num}: {e}")
+
                 production_hierarchy.append(jumbo_details)
+
+        # PHASE 1: Resolve consumed pending order items
+        # For each cut roll that came from an existing PendingOrderItem (source_pending_id set),
+        # decrement its quantity_pending / increment quantity_fulfilled, update status and
+        # decrement the originating OrderItem.quantity_in_pending.
+        try:
+            from collections import defaultdict
+            from sqlalchemy import and_
+
+            pending_order_cut_roll_counts = defaultdict(int)
+
+            logger.info("📊 HYBRID PHASE 1: Counting cut rolls per pending order")
+
+            for cut_roll_item in created_cut_rolls:
+                if cut_roll_item.source_type == 'pending_order' and cut_roll_item.source_pending_id:
+                    pending_order_cut_roll_counts[str(cut_roll_item.source_pending_id)] += 1
+
+            logger.info(f"📊 HYBRID PHASE 1: Found {len(pending_order_cut_roll_counts)} unique pending orders consumed")
+
+            for pending_id_str, cut_rolls_count in pending_order_cut_roll_counts.items():
+                try:
+                    pending_uuid = uuid.UUID(pending_id_str)
+
+                    pending_order = db.query(models.PendingOrderItem).filter(
+                        models.PendingOrderItem.id == pending_uuid,
+                        models.PendingOrderItem._status == "pending"
+                    ).first()
+
+                    if not pending_order:
+                        logger.warning(f"❌ HYBRID PHASE 1: Pending order {pending_id_str[:8]}... not found or not 'pending'")
+                        continue
+
+                    old_fulfilled = getattr(pending_order, 'quantity_fulfilled', 0) or 0
+                    old_pending = pending_order.quantity_pending
+
+                    cut_rolls_to_resolve = min(cut_rolls_count, old_pending)
+                    new_fulfilled = old_fulfilled + cut_rolls_to_resolve
+                    new_pending = max(0, old_pending - cut_rolls_to_resolve)
+
+                    pending_order.quantity_fulfilled = new_fulfilled
+                    pending_order.quantity_pending = new_pending
+
+                    logger.info(f"📊 HYBRID PHASE 1: {pending_order.frontend_id} → fulfilled {old_fulfilled}→{new_fulfilled}, pending {old_pending}→{new_pending}")
+
+                    if new_pending == 0:
+                        status_ok = pending_order.mark_as_included_in_plan(db, resolved_by_production=True)
+                        if status_ok:
+                            logger.info(f"✅ HYBRID PHASE 1: {pending_order.frontend_id} marked as 'included_in_plan'")
+                        else:
+                            logger.warning(f"❌ HYBRID PHASE 1: Could not mark {pending_order.frontend_id} as included_in_plan")
+                    else:
+                        logger.info(f"⚠️ HYBRID PHASE 1: {pending_order.frontend_id} partially resolved, {new_pending} still pending")
+
+                    # Decrement quantity_in_pending on the originating OrderItem
+                    original_order_item = db.query(models.OrderItem).filter(
+                        models.OrderItem.order_id == pending_order.original_order_id,
+                        models.OrderItem.width_inches == pending_order.width_inches,
+                        models.OrderItem.paper.has(
+                            and_(
+                                models.PaperMaster.gsm == pending_order.gsm,
+                                models.PaperMaster.bf == pending_order.bf,
+                                models.PaperMaster.shade == pending_order.shade
+                            )
+                        )
+                    ).first()
+
+                    if original_order_item:
+                        original_order_item.quantity_in_pending = max(
+                            0,
+                            (original_order_item.quantity_in_pending or 0) - cut_rolls_to_resolve
+                        )
+                        logger.info(f"🔄 HYBRID PHASE 1: OrderItem {original_order_item.frontend_id} quantity_in_pending → {original_order_item.quantity_in_pending}")
+                    else:
+                        logger.error(f"❌ HYBRID PHASE 1: Could not find original OrderItem for pending {pending_order.frontend_id}")
+
+                    db.flush()
+
+                except Exception as e:
+                    logger.error(f"❌ HYBRID PHASE 1: Error processing pending order {pending_id_str[:8]}...: {e}")
+
+        except Exception as e:
+            logger.warning(f"HYBRID PHASE 1: Pending order resolution failed (non-fatal): {e}")
 
         # Create pending from orphans (only for those with order_id)
         pending_created = 0
@@ -2226,6 +2338,146 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
             else:
                 # Orphaned manual rolls (no order_id) are just discarded
                 logger.info(f"Discarding orphaned manual roll: {orphan['width_inches']}\" (no order_id)")
+
+        # BLOCK 2: Create pending order items for deferred/unfulfilled rolls
+        try:
+            from ..services.id_generator import FrontendIDGenerator
+
+            # Case (a): Deselected sets — algorithm cuts whose sets the user did not select
+            for spec in paper_specs:
+                gsm, bf, shade = spec['gsm'], spec['bf'], spec['shade']
+                for jumbo in spec['jumbos']:
+                    for roll_set in jumbo['sets']:
+                        if roll_set.get('is_selected', True):
+                            continue  # Only process deselected sets
+                        for cut in roll_set.get('cuts', []):
+                            if cut.get('source') != 'algorithm':
+                                continue
+                            if not cut.get('order_id'):
+                                continue
+                            if cut.get('source_type') == 'pending_order':
+                                # Already an existing pending item — don't duplicate
+                                continue
+                            try:
+                                oid = uuid.UUID(cut['order_id'])
+                                frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
+                                db.add(models.PendingOrderItem(
+                                    frontend_id=frontend_id,
+                                    original_order_id=oid,
+                                    width_inches=float(cut['width_inches']),
+                                    quantity_pending=int(cut.get('quantity', 1)),
+                                    gsm=gsm,
+                                    bf=float(bf),
+                                    shade=shade,
+                                    status='pending',
+                                    reason='user_deferred_production',
+                                    created_by_id=created_by_id
+                                ))
+                                pending_created += 1
+                                logger.info(f"📋 HYBRID BLOCK2a: Deselected set → pending {cut['width_inches']}\" order {str(oid)[:8]}...")
+                            except Exception as e:
+                                logger.warning(f"❌ HYBRID BLOCK2a: Failed for deselected cut: {e}")
+
+            # Case (b): Algorithm-unfulfilled rolls — orders the algorithm could not fit at all
+            for pending_item in pending_orders_data:
+                source_order_id = pending_item.get('source_order_id')
+                if not source_order_id:
+                    logger.warning(f"⚠️ HYBRID BLOCK2b: No source_order_id in pending item, skipping")
+                    continue
+                try:
+                    oid = uuid.UUID(str(source_order_id))
+                    frontend_id = FrontendIDGenerator.generate_frontend_id("pending_order_item", db)
+                    db.add(models.PendingOrderItem(
+                        frontend_id=frontend_id,
+                        original_order_id=oid,
+                        width_inches=float(pending_item.get('width', 0)),
+                        quantity_pending=int(pending_item.get('quantity', 1)),
+                        gsm=pending_item.get('gsm'),
+                        bf=float(pending_item.get('bf', 0)),
+                        shade=pending_item.get('shade', ''),
+                        status='pending',
+                        reason='insufficient_cutting_efficiency',
+                        created_by_id=created_by_id
+                    ))
+                    pending_created += 1
+                    logger.info(f"📋 HYBRID BLOCK2b: Algo-unfulfilled → pending {pending_item.get('width')}\" order {str(oid)[:8]}...")
+                except Exception as e:
+                    logger.warning(f"❌ HYBRID BLOCK2b: Failed for algo pending item: {e}")
+
+        except Exception as e:
+            logger.warning(f"HYBRID BLOCK2: Pending creation failed (non-fatal): {e}")
+
+        # WASTAGE ALLOCATIONS: Mark existing WastageInventory rolls as USED and update OrderItem
+        try:
+            for allocation in hybrid_data.get('wastage_allocations', []):
+                wastage_id_raw = allocation.get('wastage_id')
+                if not wastage_id_raw:
+                    continue
+                try:
+                    wastage_uuid = uuid.UUID(str(wastage_id_raw))
+                    wastage_roll = db.query(models.WastageInventory).filter(
+                        models.WastageInventory.id == wastage_uuid,
+                        models.WastageInventory.status == models.WastageStatus.AVAILABLE.value
+                    ).first()
+                    if not wastage_roll:
+                        logger.warning(f"⚠️ HYBRID WASTAGE ALLOC: Roll {wastage_uuid} not found or already used")
+                        continue
+
+                    wastage_roll.status = models.WastageStatus.USED.value
+                    logger.info(f"✅ HYBRID WASTAGE ALLOC: Marked {wastage_roll.frontend_id} as USED")
+
+                    # Resolve order_id and order_item_id
+                    order_id_raw = allocation.get('order_id')
+                    order_item_id_raw = allocation.get('order_item_id')
+                    alloc_order_id = uuid.UUID(str(order_id_raw)) if order_id_raw else None
+                    alloc_order_item_id = uuid.UUID(str(order_item_id_raw)) if order_item_id_raw else None
+
+                    # Create InventoryMaster cut roll linked to the order
+                    scr_barcode = BarcodeGenerator.generate_scrap_cut_roll_barcode(db)
+                    wastage_cut_roll = models.InventoryMaster(
+                        paper_id=wastage_roll.paper_id,
+                        width_inches=wastage_roll.width_inches,
+                        weight_kg=wastage_roll.weight_kg,
+                        roll_type="cut",
+                        status="available",
+                        allocated_to_order_id=alloc_order_id,
+                        is_wastage_roll=True,
+                        wastage_source_order_id=alloc_order_id,
+                        wastage_source_plan_id=plan.id,
+                        barcode_id=scr_barcode,
+                        qr_code=scr_barcode,
+                        location="PRODUCTION",
+                        created_by_id=created_by_id
+                    )
+                    db.add(wastage_cut_roll)
+                    db.flush()
+
+                    # Link cut roll to plan
+                    db.add(models.PlanInventoryLink(
+                        plan_id=plan.id,
+                        inventory_id=wastage_cut_roll.id,
+                        quantity_used=1.0
+                    ))
+
+                    # Increment OrderItem.quantity_fulfilled
+                    if alloc_order_item_id:
+                        order_item = db.query(models.OrderItem).filter(
+                            models.OrderItem.id == alloc_order_item_id
+                        ).first()
+                        if order_item:
+                            order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                            order_item.item_status = 'in_warehouse'
+                            logger.info(f"🔄 HYBRID WASTAGE ALLOC: OrderItem {order_item.frontend_id} quantity_fulfilled → {order_item.quantity_fulfilled}")
+                        else:
+                            logger.warning(f"⚠️ HYBRID WASTAGE ALLOC: OrderItem {alloc_order_item_id} not found")
+                    else:
+                        logger.warning(f"⚠️ HYBRID WASTAGE ALLOC: No order_item_id in allocation for {wastage_roll.frontend_id}")
+
+                    db.flush()
+                except Exception as e:
+                    logger.warning(f"❌ HYBRID WASTAGE ALLOC: Failed for wastage_id {wastage_id_raw}: {e}")
+        except Exception as e:
+            logger.warning(f"HYBRID WASTAGE ALLOC: Failed (non-fatal): {e}")
 
         db.commit()
 
