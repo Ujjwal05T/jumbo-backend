@@ -1495,7 +1495,7 @@ def get_order_complete_details(
                     "id": str(d_item.id),
                     "inventory_id": str(d_item.inventory_id),
                     "inventory_frontend_id": d_item.inventory.frontend_id if d_item.inventory else None,
-                    "quantity_dispatched": d_item.quantity_dispatched,
+                    "quantity_dispatched": 1,
                     "weight_kg": float(d_item.weight_kg) if d_item.weight_kg else 0
                 })
 
