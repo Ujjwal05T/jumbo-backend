@@ -819,8 +819,8 @@ class CRUDPlanSnapshot:
             plan.status = "planned"
             plan.executed_at = None
 
-            # 6. DELETE THE PLAN - Since rollback means the plan never existed
-            logger.info(f"🗑️ Deleting rolled back plan {plan_id} ({plan.frontend_id})")
+            # 6. MARK PLAN AS DELETED - Preserve plan record for audit/history
+            logger.info(f"🔄 Marking rolled back plan {plan_id} ({plan.frontend_id}) as deleted")
             plan_frontend_id = plan.frontend_id
 
             # Delete plan order links
@@ -839,7 +839,7 @@ class CRUDPlanSnapshot:
                 db.delete(link)
             rollback_stats["links_deleted"] += len(plan_inventory_links)
 
-            # Log the plan deletion for audit trail BEFORE deleting the plan
+            # Log the plan deletion for audit trail BEFORE marking as deleted
             try:
                 deletion_log = plan_deletion_logs.create_deletion_log(
                     db=db,
@@ -857,26 +857,29 @@ class CRUDPlanSnapshot:
                 logger.error(f"⚠️ Failed to create deletion log: {log_error}")
                 # Don't fail the rollback if logging fails
 
-            # Finally delete the plan itself
-            db.delete(plan)
+            # Mark plan as deleted instead of actually deleting it
+            plan.status = "deleted"
+            logger.info(f"✅ Marked plan {plan_frontend_id} status as 'deleted'")
 
-            # 7. DELETE THE SNAPSHOT - Remove snapshot record to avoid foreign key issues
-            logger.info(f"🗑️ Deleting snapshot {snapshot.id} for plan {plan_frontend_id}")
-            db.delete(snapshot)
+            # 7. MARK SNAPSHOT AS USED - Keep snapshot record for audit trail
+            snapshot.is_used = True
+            logger.info(f"✅ Marked snapshot {snapshot.id} as used for plan {plan_frontend_id}")
 
-            db.commit()  # Commit all deletions together
+            db.commit()  # Commit all changes together
 
-            logger.info(f"Successfully rolled back plan {plan_id} and deleted it. Stats: {rollback_stats}")
-            logger.info(f"🗑️ Plan {plan_frontend_id} and its snapshot have been completely removed from the system")
+            logger.info(f"Successfully rolled back plan {plan_id} and marked as deleted. Stats: {rollback_stats}")
+            logger.info(f"📋 Plan {plan_frontend_id} preserved with status='deleted' for audit history")
 
             return {
                 "success": True,
-                "message": f"Plan {plan_frontend_id} rolled back successfully and deleted",
+                "message": f"Plan {plan_frontend_id} rolled back successfully and marked as deleted",
                 "rollback_stats": rollback_stats,
-                "snapshot_deleted": True,
-                "plan_deleted": True,
-                "plan_deleted_at": datetime.utcnow().isoformat(),
-                "note": "The plan and its snapshot have been completely removed from the system as if it never existed"
+                "snapshot_deleted": False,
+                "snapshot_marked_used": True,
+                "plan_deleted": False,
+                "plan_marked_deleted": True,
+                "plan_status": "deleted",
+                "note": "The plan has been preserved with status='deleted' for audit history. All production data has been cleaned up."
             }
 
         except Exception as e:

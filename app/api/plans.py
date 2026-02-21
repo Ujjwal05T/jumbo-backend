@@ -88,10 +88,13 @@ def get_plans(
         query = db.query(models.PlanMaster).options(
             joinedload(models.PlanMaster.created_by)
         )
-        
+
         # Apply status filter
         if status and status != "all":
             query = query.filter(models.PlanMaster.status == status)
+        else:
+            # By default, exclude deleted plans unless explicitly requested
+            query = query.filter(models.PlanMaster.status != "deleted")
         
         # Apply client filter
         if client_id and client_id != "all":

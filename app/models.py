@@ -43,6 +43,7 @@ class PlanStatus(str, PyEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    DELETED = "deleted"
 
 class PendingOrderStatus(str, PyEnum):
     PENDING = "pending"

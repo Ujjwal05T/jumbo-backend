@@ -42,8 +42,10 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             models.PendingOrderItem.created_at < datetime.utcnow() - timedelta(days=3)
         ).count()
         
-        # Plans Summary
-        total_plans = db.query(models.PlanMaster).count()
+        # Plans Summary (exclude deleted plans)
+        total_plans = db.query(models.PlanMaster).filter(
+            models.PlanMaster.status != "deleted"
+        ).count()
         planned_status = db.query(models.PlanMaster).filter(
             models.PlanMaster.status == schemas.PlanStatus.PLANNED.value
         ).count()
@@ -85,7 +87,8 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             models.OrderMaster.created_at >= week_ago
         ).count()
         recent_plans = db.query(models.PlanMaster).filter(
-            models.PlanMaster.created_at >= week_ago
+            models.PlanMaster.created_at >= week_ago,
+            models.PlanMaster.status != "deleted"
         ).count()
         recent_production = db.query(models.ProductionOrderMaster).filter(
             models.ProductionOrderMaster.created_at >= week_ago
@@ -180,8 +183,10 @@ def get_recent_activity(limit: int = 10, db: Session = Depends(get_db)):
                 logger.warning(f"Error processing order activity {order.id}: {e}")
                 continue
         
-        # Recent Plans
-        recent_plans = db.query(models.PlanMaster).order_by(desc(models.PlanMaster.created_at)).limit(5).all()
+        # Recent Plans (exclude deleted)
+        recent_plans = db.query(models.PlanMaster).filter(
+            models.PlanMaster.status != "deleted"
+        ).order_by(desc(models.PlanMaster.created_at)).limit(5).all()
         
         for plan in recent_plans:
             try:
