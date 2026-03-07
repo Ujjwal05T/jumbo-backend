@@ -126,6 +126,57 @@ def get_plans(
         logger.error(f"Error getting plans: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/plans/summary-list", tags=["Plan Master"])
+def get_plans_summary_list(
+    status: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get all plans with completeness status for the plan dashboard dropdown.
+    A plan is 'complete' when all its cut rolls have status available or used (weight updated).
+    """
+    try:
+        from .. import models
+
+        query = db.query(models.PlanMaster)
+        if status and status != "all":
+            query = query.filter(models.PlanMaster.status == status)
+        else:
+            query = query.filter(models.PlanMaster.status != "deleted")
+
+        plans = query.order_by(models.PlanMaster.created_at.desc()).all()
+
+        result = []
+        for plan in plans:
+            cut_rolls = db.query(models.InventoryMaster).join(
+                models.PlanInventoryLink,
+                models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
+            ).filter(
+                models.PlanInventoryLink.plan_id == plan.id,
+                models.InventoryMaster.roll_type == "cut",
+                models.InventoryMaster.is_wastage_roll == False
+            ).all()
+
+            total = len(cut_rolls)
+            weight_updated = sum(1 for r in cut_rolls if float(r.weight_kg) > 0)
+            is_complete = total > 0 and weight_updated == total
+
+            result.append({
+                "id": str(plan.id),
+                "frontend_id": plan.frontend_id,
+                "name": plan.name,
+                "status": plan.status,
+                "created_at": plan.created_at.isoformat(),
+                "total_rolls": total,
+                "weight_updated_rolls": weight_updated,
+                "is_complete": is_complete,
+            })
+
+        return result
+    except Exception as e:
+        logger.error(f"Error getting plans summary list: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/plans/{plan_id}", response_model=schemas.PlanMaster, tags=["Plan Master"])
 def get_plan(plan_id: UUID, db: Session = Depends(get_db)):
     """Get cutting plan by ID (optimized - only loads creator user)
@@ -139,6 +190,167 @@ def get_plan(plan_id: UUID, db: Session = Depends(get_db)):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
+
+@router.get("/plans/{plan_id}/dashboard", tags=["Plan Master"])
+def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
+    """Get plan dashboard: per-roll stats grouped by jumbo, with completeness flags.
+    Status mapping:
+      available  -> Stock (weight updated)
+      cutting    -> Planned (not yet weight updated)
+      used       -> Billed (weight updated)
+      allocated  -> Allocated
+      damaged    -> Damaged
+    """
+    try:
+        from .. import models
+        from sqlalchemy.orm import joinedload
+
+        plan = db.query(models.PlanMaster).filter(models.PlanMaster.id == plan_id).first()
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+
+        # Load all non-wastage cut rolls for this plan with relationships
+        cut_rolls = db.query(models.InventoryMaster).join(
+            models.PlanInventoryLink,
+            models.InventoryMaster.id == models.PlanInventoryLink.inventory_id
+        ).options(
+            joinedload(models.InventoryMaster.paper),
+            joinedload(models.InventoryMaster.allocated_order)
+                .joinedload(models.OrderMaster.client),
+            joinedload(models.InventoryMaster.manual_client),
+            joinedload(models.InventoryMaster.parent_118_roll)
+                .joinedload(models.InventoryMaster.parent_jumbo)
+        ).filter(
+            models.PlanInventoryLink.plan_id == plan_id,
+            models.InventoryMaster.roll_type == "cut",
+            models.InventoryMaster.is_wastage_roll == False
+        ).all()
+
+        # Status counts
+        total = len(cut_rolls)
+        planned_count    = sum(1 for r in cut_rolls if r.status == "cutting")
+        stock_count      = sum(1 for r in cut_rolls if r.status == "available")
+        dispatched_count = sum(1 for r in cut_rolls if r.status == "used")
+        billed_count     = sum(1 for r in cut_rolls if r.status == "billed")
+        allocated_count  = sum(1 for r in cut_rolls if r.status == "allocated")
+        damaged_count    = sum(1 for r in cut_rolls if r.status == "damaged")
+        weight_updated_count = stock_count + dispatched_count + billed_count
+        is_complete = total > 0 and weight_updated_count == total
+
+        # Weight totals
+        total_weight      = sum(float(r.weight_kg) for r in cut_rolls)
+        stock_kg          = sum(float(r.weight_kg) for r in cut_rolls if r.status == "available")
+        dispatched_kg     = sum(float(r.weight_kg) for r in cut_rolls if r.status == "used")
+        billed_kg         = sum(float(r.weight_kg) for r in cut_rolls if r.status == "billed")
+        planned_kg        = sum(float(r.weight_kg) for r in cut_rolls if r.status == "cutting")
+        weight_updated_kg = stock_kg + dispatched_kg + billed_kg
+
+        # Group by jumbo roll
+        jumbo_groups: Dict[str, Any] = {}
+        ungrouped = []
+
+        for roll in cut_rolls:
+            jumbo_id = None
+            jumbo_barcode = None
+            if roll.parent_118_roll and roll.parent_118_roll.parent_jumbo:
+                j = roll.parent_118_roll.parent_jumbo
+                jumbo_id = str(j.id)
+                jumbo_barcode = j.barcode_id or f"JR_{str(j.id)[:5].upper()}"
+
+            client_name = None
+            order_frontend_id = None
+            if roll.allocated_order:
+                order_frontend_id = roll.allocated_order.frontend_id
+                if roll.allocated_order.client:
+                    client_name = roll.allocated_order.client.company_name
+            if not client_name and roll.manual_client:
+                client_name = roll.manual_client.company_name
+
+            roll_data = {
+                "id": str(roll.id),
+                "barcode_id": roll.barcode_id or f"CR_{str(roll.id)[:5].upper()}",
+                "width_inches": float(roll.width_inches),
+                "weight_kg": float(roll.weight_kg),
+                "status": roll.status,
+                "client_name": client_name or "Unknown",
+                "order_frontend_id": order_frontend_id,
+                "paper_specs": {
+                    "gsm": roll.paper.gsm if roll.paper else 0,
+                    "bf": float(roll.paper.bf) if roll.paper else 0,
+                    "shade": roll.paper.shade if roll.paper else "",
+                } if roll.paper else None,
+                "is_weight_updated": float(roll.weight_kg) > 0,
+                "set_barcode": roll.parent_118_roll.barcode_id if roll.parent_118_roll else None,
+            }
+
+            if jumbo_id:
+                if jumbo_id not in jumbo_groups:
+                    jumbo_groups[jumbo_id] = {"jumbo_barcode": jumbo_barcode, "rolls": []}
+                jumbo_groups[jumbo_id]["rolls"].append(roll_data)
+            else:
+                ungrouped.append(roll_data)
+
+        # Build final list with per-group summaries
+        final_groups = []
+        for jid, group in jumbo_groups.items():
+            rolls = group["rolls"]
+            g_wu = sum(1 for r in rolls if r["is_weight_updated"])
+            final_groups.append({
+                "jumbo_id": jid,
+                "jumbo_barcode": group["jumbo_barcode"],
+                "rolls": rolls,
+                "summary": {
+                    "total": len(rolls),
+                    "weight_updated": g_wu,
+                    "is_complete": len(rolls) > 0 and g_wu == len(rolls),
+                },
+            })
+
+        if ungrouped:
+            g_wu = sum(1 for r in ungrouped if r["is_weight_updated"])
+            final_groups.append({
+                "jumbo_id": "ungrouped",
+                "jumbo_barcode": "Ungrouped",
+                "rolls": ungrouped,
+                "summary": {
+                    "total": len(ungrouped),
+                    "weight_updated": g_wu,
+                    "is_complete": len(ungrouped) > 0 and g_wu == len(ungrouped),
+                },
+            })
+
+        return {
+            "plan_id": str(plan.id),
+            "plan_frontend_id": plan.frontend_id,
+            "plan_name": plan.name,
+            "plan_status": plan.status,
+            "created_at": plan.created_at.isoformat(),
+            "executed_at": plan.executed_at.isoformat() if plan.executed_at else None,
+            "is_complete": is_complete,
+            "summary": {
+                "total_rolls": total,
+                "planned": planned_count,
+                "stock": stock_count,
+                "weight_updated": weight_updated_count,
+                "dispatched": dispatched_count,
+                "billed": billed_count,
+                "allocated": allocated_count,
+                "damaged": damaged_count,
+                "total_weight_kg": round(total_weight, 2),
+                "weight_updated_kg": round(weight_updated_kg, 2),
+                "dispatched_kg": round(dispatched_kg, 2),
+                "billed_kg": round(billed_kg, 2),
+                "stock_kg": round(stock_kg, 2),
+                "planned_kg": round(planned_kg, 2),
+            },
+            "jumbo_groups": final_groups,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting plan dashboard for {plan_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.put("/plans/{plan_id}", response_model=schemas.PlanMaster, tags=["Plan Master"])
 def update_plan(
