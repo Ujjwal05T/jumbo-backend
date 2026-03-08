@@ -2094,6 +2094,13 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                                 ).first()
                                 if client:
                                     manual_client_id = client.id
+                        elif cut['source'] == 'manual_order':
+                            # Manual rolls added directly from an order: allocate to order
+                            if cut.get('order_id'):
+                                try:
+                                    allocated_order_id = uuid.UUID(cut['order_id'])
+                                except:
+                                    pass
                         else:
                             # Algorithm rolls: allocate to order
                             if cut.get('order_id'):
@@ -2121,7 +2128,7 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                         cut_roll = models.InventoryMaster(
                             width_inches=cut['width_inches'],
                             paper_id=paper.id,
-                            weight_kg=0,
+                            weight_kg=1 if cut['source'] == 'manual_order' else 0,
                             roll_type="cut",
                             status=cut_status,
                             barcode_id=cut_barcode,
@@ -2131,7 +2138,7 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                             created_by_id=created_by_id,
                             allocated_to_order_id=allocated_order_id,
                             manual_client_id=manual_client_id,
-                            source_type=cut.get('source_type') or ('manual' if cut['source'] == 'manual' else 'regular_order'),
+                            source_type=cut.get('source_type') or ('regular_order' if cut['source'] == 'manual_order' else 'manual' if cut['source'] == 'manual' else 'regular_order'),
                             source_pending_id=source_pending_id_val,
                             is_wastage_roll=is_wastage
                         )
@@ -2162,8 +2169,64 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
                             'source_type': cut_roll.source_type
                         })
 
+                        # Link to order if from manual_order
+                        if cut['source'] == 'manual_order' and cut.get('order_id'):
+                            try:
+                                oid = uuid.UUID(cut['order_id'])
+                                orders_updated.add(str(oid))
+
+                                order_item_id_raw = cut.get('order_item_id')
+                                order_item = None
+                                if order_item_id_raw:
+                                    order_item = db.query(models.OrderItem).filter(
+                                        models.OrderItem.id == uuid.UUID(order_item_id_raw)
+                                    ).first()
+
+                                if not order_item:
+                                    # Fallback: match by order + width
+                                    items = db.query(models.OrderItem).filter(
+                                        models.OrderItem.order_id == oid,
+                                        models.OrderItem.width_inches == cut['width_inches']
+                                    ).all()
+                                    if items:
+                                        order_item = items[0]
+
+                                if order_item:
+                                    order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                                    order_item.item_status = 'in_process'
+
+                                    existing_link = db.query(models.PlanOrderLink).filter(
+                                        models.PlanOrderLink.plan_id == plan.id,
+                                        models.PlanOrderLink.order_id == oid,
+                                        models.PlanOrderLink.order_item_id == order_item.id
+                                    ).first()
+
+                                    if not existing_link:
+                                        db.add(models.PlanOrderLink(
+                                            plan_id=plan.id,
+                                            order_id=oid,
+                                            order_item_id=order_item.id,
+                                            quantity_allocated=1
+                                        ))
+
+                                order = db.query(models.OrderMaster).get(oid)
+                                if order:
+                                    all_items = db.query(models.OrderItem).filter(
+                                        models.OrderItem.order_id == oid
+                                    ).all()
+                                    if all_items and all(
+                                        (item.quantity_fulfilled or 0) >= item.quantity_rolls
+                                        for item in all_items
+                                    ):
+                                        order.status = 'completed'
+                                        logger.info(f"✅ MANUAL_ORDER: Order {str(oid)[:8]}... fully fulfilled → status=completed")
+
+                                logger.info(f"🛒 MANUAL_ORDER: Cut roll {cut_barcode} linked to order {str(oid)[:8]}..., qty_fulfilled incremented")
+                            except Exception as e:
+                                logger.warning(f"Failed to link manual_order roll to order {cut.get('order_id')}: {e}")
+
                         # Link to order if from algorithm
-                        if cut['source'] == 'algorithm' and cut.get('order_id'):
+                        elif cut['source'] == 'algorithm' and cut.get('order_id'):
                             try:
                                 oid = uuid.UUID(cut['order_id'])
                                 orders_updated.add(str(oid))

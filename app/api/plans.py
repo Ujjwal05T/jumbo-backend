@@ -157,7 +157,7 @@ def get_plans_summary_list(
             ).all()
 
             total = len(cut_rolls)
-            weight_updated = sum(1 for r in cut_rolls if float(r.weight_kg) > 0)
+            weight_updated = sum(1 for r in cut_rolls if float(r.weight_kg) > 1)
             is_complete = total > 0 and weight_updated == total
 
             result.append({
@@ -279,7 +279,7 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
                     "bf": float(roll.paper.bf) if roll.paper else 0,
                     "shade": roll.paper.shade if roll.paper else "",
                 } if roll.paper else None,
-                "is_weight_updated": float(roll.weight_kg) > 0,
+                "is_weight_updated": float(roll.weight_kg) > 2,
                 "set_barcode": roll.parent_118_roll.barcode_id if roll.parent_118_roll else None,
             }
 
