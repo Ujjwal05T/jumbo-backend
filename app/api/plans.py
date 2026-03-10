@@ -234,7 +234,8 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
         billed_count     = sum(1 for r in cut_rolls if r.status == "billed")
         allocated_count  = sum(1 for r in cut_rolls if r.status == "allocated")
         damaged_count    = sum(1 for r in cut_rolls if r.status == "damaged")
-        weight_updated_count = stock_count + dispatched_count + billed_count
+        removed_count    = sum(1 for r in cut_rolls if r.status == "REMOVED_BY_ABHISHEK_SIR")
+        weight_updated_count = stock_count + dispatched_count + billed_count + removed_count
         is_complete = total > 0 and weight_updated_count == total
 
         # Weight totals
@@ -279,7 +280,7 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
                     "bf": float(roll.paper.bf) if roll.paper else 0,
                     "shade": roll.paper.shade if roll.paper else "",
                 } if roll.paper else None,
-                "is_weight_updated": float(roll.weight_kg) > 2,
+                "is_weight_updated": float(roll.weight_kg) > 2 or roll.status == "REMOVED_BY_ABHISHEK_SIR",
                 "set_barcode": roll.parent_118_roll.barcode_id if roll.parent_118_roll else None,
             }
 
@@ -336,6 +337,7 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
                 "billed": billed_count,
                 "allocated": allocated_count,
                 "damaged": damaged_count,
+                "removed": removed_count,
                 "total_weight_kg": round(total_weight, 2),
                 "weight_updated_kg": round(weight_updated_kg, 2),
                 "dispatched_kg": round(dispatched_kg, 2),

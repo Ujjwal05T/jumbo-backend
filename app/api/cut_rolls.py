@@ -4,9 +4,10 @@ from sqlalchemy import func
 from typing import List, Dict, Any
 from uuid import UUID
 import logging
+from datetime import datetime
 
 from .base import get_db
-from .. import crud_operations, schemas
+from .. import crud_operations, schemas, models
 from ..services.barcode_generator import BarcodeGenerator
 
 router = APIRouter()
@@ -739,4 +740,45 @@ def create_sample_cut_roll_data(plan_id: UUID, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating sample cut roll data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cut-rolls/bulk-mark-removed", response_model=Dict[str, Any], tags=["Cut Roll Production"])
+def bulk_mark_removed(
+    request: schemas.BulkMarkRemovedRequest,
+    db: Session = Depends(get_db)
+):
+    """Mark multiple cut rolls as removed by Abhishek Sir and set their weight to 2kg"""
+    try:
+        barcode_ids = request.barcode_ids
+
+        items = db.query(models.InventoryMaster).filter(
+            models.InventoryMaster.barcode_id.in_(barcode_ids)
+        ).all()
+
+        found_barcodes = {item.barcode_id for item in items}
+        not_found = [b for b in barcode_ids if b not in found_barcodes]
+
+        updated = []
+        for item in items:
+            item.status = "REMOVED_BY_ABHISHEK_SIR"
+            item.weight_kg = 2.0
+            item.updated_at = datetime.utcnow()
+            updated.append(item.barcode_id)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "updated_count": len(updated),
+            "updated_barcodes": updated,
+            "not_found_barcodes": not_found,
+            "message": f"{len(updated)} roll(s) marked as removed"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error bulk marking rolls as removed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

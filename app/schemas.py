@@ -84,6 +84,7 @@ class UserRole(str, Enum):
     SYSTEM = "system"
     SALES_PERSON = "sales_person"
     QC = "qc"
+    GM = "gm"
 
 class PaperType(str, Enum):
     STANDARD = "standard"
@@ -136,7 +137,7 @@ class ClientMaster(ClientMasterBase):
 class UserMasterBase(BaseModel):
     name: str = Field(..., max_length=255)
     username: str = Field(..., max_length=50)
-    role: UserRole = Field(..., description="User role: admin, order_puncher, security, co_admin, weight_update, poduction, accountant, accountant2, mou, dispatch, system, sales_person, qc")
+    role: UserRole = Field(..., description="User role: admin, order_puncher, security, co_admin, weight_update, poduction, accountant, accountant2, mou, dispatch, system, sales_person, qc, gm")
     contact: Optional[str] = Field(None, max_length=255)
     department: Optional[str] = Field(None, max_length=100)
     status: UserStatus = Field(default=UserStatus.ACTIVE)
@@ -828,6 +829,10 @@ class InventoryStatusUpdate(BaseModel):
     """Schema for updating inventory status"""
     new_status: str
     location: Optional[str] = None
+
+class BulkMarkRemovedRequest(BaseModel):
+    """Schema for bulk-marking cut rolls as removed by Abhishek Sir"""
+    barcode_ids: List[str] = Field(..., min_length=1, description="List of barcode IDs to mark as removed")
 
 # ============================================================================
 # DISPATCH SCHEMAS
