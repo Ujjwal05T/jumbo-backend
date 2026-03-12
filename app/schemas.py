@@ -957,6 +957,7 @@ class SelectedCutRoll(BaseModel):
     individual_roll_number: Optional[int] = Field(None, description="Roll number within jumbo")
     trim_left: Optional[float] = Field(None, ge=0, description="Trim left in inches")
     order_id: Optional[str] = Field(None, description="Source order ID")
+    order_item_id: Optional[str] = Field(None, description="Order item ID for manual_order cuts linking to existing order items")
     # CRITICAL: Add source tracking fields for pending order resolution
     source_type: Optional[str] = Field(None, description="Source type: 'regular_order', 'pending_order', or 'manual_cut'")
     source_pending_id: Optional[str] = Field(None, description="ID of source pending order if applicable")

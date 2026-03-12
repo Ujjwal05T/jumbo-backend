@@ -1093,7 +1093,8 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # Group cut rolls by paper specification
     jumbo_roll_width = request_data.jumbo_roll_width or 118
     paper_spec_groups = {}
-    all_cut_rolls_for_plan = regular_cut_rolls + manual_cut_rolls
+    manual_order_cut_rolls = [cut_roll for cut_roll in selected_cut_rolls_dict if cut_roll.get("source_type") == "regular_order"]
+    all_cut_rolls_for_plan = regular_cut_rolls + manual_cut_rolls + manual_order_cut_rolls
     
     for i, cut_roll in enumerate(all_cut_rolls_for_plan):
         individual_roll_number = cut_roll.get("individual_roll_number")
@@ -1294,14 +1295,65 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
                 location="Cutting Station",
                 parent_118_roll_id=suitable_118_roll.id if suitable_118_roll else None,
                 individual_roll_number=cut_roll.get("individual_roll_number", 1),
-                source_type="pending_order",
+                source_type=cut_roll.get("source_type", "pending_order"),
                 allocated_to_order_id=order_uuid  # ✅ LINK TO ORIGINAL ORDER FOR CLIENT INFO
             )
             
             db.add(inventory_item)
             db.flush()
             created_inventory.append(inventory_item)
-            
+
+            # ── MANUAL_ORDER: link to existing order and increment quantity_fulfilled ──
+            if (
+                cut_roll.get("source_type") == "regular_order"
+                and cut_roll.get("order_id")
+                and cut_roll.get("order_item_id")
+                and not cut_roll.get("is_manual_cut")
+                and not cut_roll.get("source_pending_id")
+            ):
+                try:
+                    oid = UUID(cut_roll["order_id"])
+
+                    order_item = db.query(models.OrderItem).filter(
+                        models.OrderItem.id == UUID(cut_roll["order_item_id"])
+                    ).first()
+
+                    if not order_item:
+                        raise ValueError(f"OrderItem {cut_roll['order_item_id']} not found")
+
+                    if order_item:
+                        order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                        order_item.item_status = "in_process"
+                        inventory_item.weight_kg = 1
+
+                        # Create PlanOrderLink if not already exists
+                        existing_link = db.query(models.PlanOrderLink).filter(
+                            models.PlanOrderLink.plan_id == db_plan.id,
+                            models.PlanOrderLink.order_id == oid,
+                            models.PlanOrderLink.order_item_id == order_item.id
+                        ).first()
+                        if not existing_link:
+                            db.add(models.PlanOrderLink(
+                                id=uuid4(),
+                                frontend_id=FrontendIDGenerator.generate_frontend_id("plan_order_link", db),
+                                plan_id=db_plan.id,
+                                order_id=oid,
+                                order_item_id=order_item.id,
+                                quantity_allocated=1
+                            ))
+
+                    # Mark order completed if all items fulfilled
+                    order = db.query(models.OrderMaster).filter(models.OrderMaster.id == oid).first()
+                    if order:
+                        all_items = db.query(models.OrderItem).filter(models.OrderItem.order_id == oid).all()
+                        if all_items and all((it.quantity_fulfilled or 0) >= it.quantity_rolls for it in all_items):
+                            order.status = "completed"
+                            logger.info(f"✅ MANUAL_ORDER (pending flow): Order {str(oid)[:8]}... fully fulfilled → completed")
+
+                    logger.info(f"🛒 MANUAL_ORDER (pending flow): Cut {barcode_id} linked to order {str(oid)[:8]}..., qty_fulfilled incremented")
+                except Exception as link_err:
+                    logger.warning(f"⚠️ MANUAL_ORDER link failed for cut {barcode_id}: {link_err}")
+
         except Exception as e:
             logger.error(f"❌ Error creating cut roll inventory {i+1}: {e}")
             logger.error(f"❌ Cut roll data: {cut_roll}")

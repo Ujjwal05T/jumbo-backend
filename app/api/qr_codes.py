@@ -310,15 +310,24 @@ def update_weight_via_qr(
             paper = matching_item.paper
             logger.info(f"🔍 Looking for order items with paper_id={paper.id}, width={matching_item.width_inches}")
             
-            # Find order items with matching paper and width that are still "in_process"
-            order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
-                models.OrderItem.paper_id == paper.id,
-                models.OrderItem.width_inches == float(matching_item.width_inches),
-                models.OrderMaster.status == "in_process",
-                models.OrderItem.item_status == "in_process"
-            ).all()
-            
-            logger.info(f"🔍 Found {len(order_items)} matching order items in 'in_process' status")
+            # If this roll is linked to a specific order, use it directly
+            if matching_item.allocated_to_order_id:
+                order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
+                    models.OrderItem.order_id == matching_item.allocated_to_order_id,
+                    models.OrderItem.paper_id == paper.id,
+                    models.OrderItem.width_inches == float(matching_item.width_inches),
+                    models.OrderItem.item_status == "in_process"
+                ).all()
+                logger.info(f"🔍 Found {len(order_items)} order items via allocated_to_order_id={matching_item.allocated_to_order_id}")
+            else:
+                # Fallback: blind match by paper + width across all in_process orders
+                order_items = db.query(models.OrderItem).join(models.OrderMaster).filter(
+                    models.OrderItem.paper_id == paper.id,
+                    models.OrderItem.width_inches == float(matching_item.width_inches),
+                    models.OrderMaster.status == "in_process",
+                    models.OrderItem.item_status == "in_process"
+                ).all()
+                logger.info(f"🔍 Found {len(order_items)} matching order items (blind match, no allocated_to_order_id)")
             
             # Update the first matching order item with quantity fulfillment logic
             if order_items:
