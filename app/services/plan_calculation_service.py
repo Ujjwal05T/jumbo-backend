@@ -155,7 +155,81 @@ class PlanCalculationService:
         except Exception as e:
             logger.error(f"Error in plan calculation: {str(e)}")
             raise
-    
+
+    def calculate_plan_for_orders_gsm_wise(
+        self,
+        order_ids: List[uuid.UUID],
+        paper_ids: List[uuid.UUID],
+        include_pending_orders: bool = True,
+        include_available_inventory: bool = True,
+        include_wastage_allocation: bool = True
+    ) -> Dict[str, Any]:
+        """
+        GSM-WISE: Same as calculate_plan_for_orders but filters order items
+        to only those matching the selected paper_ids.
+        """
+        try:
+            order_requirements = crud_operations.get_orders_with_paper_specs_gsm_wise(
+                self.db, order_ids, paper_ids
+            )
+
+            if not order_requirements:
+                return self._empty_result()
+
+            paper_specs = self._extract_paper_specs(order_requirements)
+
+            pending_requirements = []
+            if include_pending_orders:
+                pending_orders = crud_operations.get_pending_orders_by_specs(self.db, paper_specs)
+                pending_requirements = self._format_pending_requirements(pending_orders)
+
+            available_inventory = []
+
+            wastage_allocations = []
+            if include_wastage_allocation:
+                wastage_allocations, reduced_order_requirements = self._check_and_reduce_orders_with_wastage(order_requirements)
+            else:
+                reduced_order_requirements = order_requirements
+
+            logger.info(f"GSM-WISE CALCULATION: {len(order_requirements)} items, {len(pending_requirements)} pending")
+
+            optimization_result = self.optimizer.optimize_with_new_algorithm(
+                order_requirements=reduced_order_requirements,
+                pending_orders=pending_requirements,
+                available_inventory=available_inventory,
+                interactive=False
+            )
+
+            # Same pending order client enrichment as base method
+            pending_orders_out = optimization_result.get('pending_orders', [])
+            if pending_orders_out:
+                source_order_ids = [p.get('source_order_id') for p in pending_orders_out if p.get('source_order_id') and p.get('source_type') == 'regular_order']
+                if source_order_ids:
+                    from .. import models as _models
+                    import uuid as _uuid
+                    orders_map = {str(o.id): o for o in self.db.query(_models.OrderMaster).filter(_models.OrderMaster.id.in_([_uuid.UUID(oid) for oid in source_order_ids])).all()}
+                    client_ids = [o.client_id for o in orders_map.values() if o.client_id]
+                    clients_map = {str(c.id): c for c in self.db.query(_models.Client).filter(_models.Client.id.in_(client_ids)).all()} if client_ids else {}
+                    for p in pending_orders_out:
+                        order = orders_map.get(p.get('source_order_id'))
+                        if order and order.client_id:
+                            client = clients_map.get(str(order.client_id))
+                            if client:
+                                p['client_name'] = client.company_name
+                                p['client_id'] = str(client.id)
+
+            cut_rolls = optimization_result.get('cut_rolls_generated', [])
+            enhanced_cut_rolls, jumbo_roll_count = self._enhance_with_jumbo_hierarchy(cut_rolls)
+            optimization_result['cut_rolls_generated'] = enhanced_cut_rolls
+            optimization_result['jumbo_rolls_available'] = jumbo_roll_count
+            optimization_result['wastage_allocations'] = wastage_allocations
+
+            return optimization_result
+
+        except Exception as e:
+            logger.error(f"Error in gsm-wise plan calculation: {str(e)}")
+            raise
+
     def _empty_result(self) -> Dict[str, Any]:
         """Return empty result structure."""
         return {

@@ -71,6 +71,70 @@ def process_multiple_orders(
         logger.error(f"Error processing multiple orders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/workflow/gsm-wise-process", tags=["GSM-Wise Planning"])
+def gsm_wise_process(
+    request_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """GSM-Wise Planning: accepts paper_spec_ids, resolves matching created orders, runs optimizer."""
+    try:
+        import uuid
+        from .. import models
+
+        paper_spec_ids = request_data.get("paper_spec_ids", [])
+        user_id = request_data.get("user_id")
+        jumbo_roll_width = request_data.get("jumbo_roll_width", 118)
+        include_pending_orders = request_data.get("include_pending_orders", True)
+        include_wastage_allocation = request_data.get("include_wastage_allocation", True)
+
+        if not paper_spec_ids:
+            raise HTTPException(status_code=400, detail="At least one paper_spec_id is required")
+
+        # Resolve paper specs → find paper_ids
+        paper_ids = [uuid.UUID(pid) for pid in paper_spec_ids]
+
+        # Find all orders with status 'created' that have at least one item matching the paper specs
+        matching_order_ids = (
+            db.query(models.OrderMaster.id)
+            .join(models.OrderItem, models.OrderItem.order_id == models.OrderMaster.id)
+            .filter(
+                models.OrderMaster.status == "created",
+                models.OrderItem.paper_id.in_(paper_ids),
+                models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls,
+            )
+            .distinct()
+            .all()
+        )
+
+        order_ids = [row[0] for row in matching_order_ids]
+
+        if not order_ids:
+            raise HTTPException(status_code=404, detail="No created orders found with items matching the selected paper specifications")
+
+        logger.info(f"🧾 GSM-WISE: Resolved {len(order_ids)} orders from {len(paper_spec_ids)} paper specs")
+
+        workflow = WorkflowManager(db=db, user_id=user_id, jumbo_roll_width=jumbo_roll_width)
+        result = workflow.process_gsm_wise(
+            order_ids=order_ids,
+            paper_ids=paper_ids,
+            include_pending_orders=include_pending_orders,
+            include_wastage_allocation=include_wastage_allocation
+        )
+
+        # Attach resolved order_ids to result so frontend can use them for production payload
+        result["order_ids"] = [str(oid) for oid in order_ids]
+
+        return result
+
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Invalid ID format: {ve}")
+    except Exception as e:
+        logger.error(f"Error in gsm-wise-process: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/workflow/manual-plan", tags=["Workflow Management"])
 def create_manual_plan(
     request_data: Dict[str, Any],

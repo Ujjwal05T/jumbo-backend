@@ -67,6 +67,40 @@ class WorkflowManager:
             logger.error(f"Error in read-only plan calculation: {str(e)}")
             raise
 
+    def process_gsm_wise(
+        self,
+        order_ids: List[uuid.UUID],
+        paper_ids: List[uuid.UUID],
+        include_pending_orders: bool = True,
+        include_wastage_allocation: bool = True
+    ) -> Dict:
+        """
+        GSM-WISE FLOW: Like process_multiple_orders but only includes order items
+        matching the selected paper_ids. Does not affect hybrid plan logic.
+        """
+        try:
+            logger.info(f"GSM-WISE CALCULATION: Processing {len(order_ids)} orders filtered by {len(paper_ids)} paper specs")
+
+            self.processed_order_requirements = crud_operations.get_orders_with_paper_specs_gsm_wise(
+                self.db, order_ids, paper_ids
+            )
+            logger.info(f"GSM-WISE STORED: {len(self.processed_order_requirements)} filtered order requirements")
+
+            result = self.calculation_service.calculate_plan_for_orders_gsm_wise(
+                order_ids=order_ids,
+                paper_ids=paper_ids,
+                include_pending_orders=include_pending_orders,
+                include_available_inventory=True,
+                include_wastage_allocation=include_wastage_allocation
+            )
+
+            logger.info(f"GSM-WISE CALCULATION COMPLETE: {len(result.get('cut_rolls_generated', []))} cut rolls")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in gsm-wise plan calculation: {str(e)}")
+            raise
+
     def process_manual_plan(
         self,
         order_ids: List[uuid.UUID],

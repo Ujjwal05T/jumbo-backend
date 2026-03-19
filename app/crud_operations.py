@@ -18,7 +18,7 @@ from .crud.users import user as user_crud
 from .crud.papers import paper
 from .crud.orders import order, order_item
 from .crud.inventory import inventory
-from .crud.plans import plan, create_hybrid_production as _create_hybrid_production
+from .crud.plans import plan, create_hybrid_production as _create_hybrid_production, create_gsm_wise_production as _create_gsm_wise_production
 from .crud.pending_orders import pending_order
 from .crud import material_management
 from .crud.snapshots import snapshot
@@ -153,6 +153,9 @@ def create_manual_plan_with_inventory(db, manual_plan_data):
 def create_hybrid_production(db, hybrid_data):
     return _create_hybrid_production(db=db, hybrid_data=hybrid_data)
 
+def create_gsm_wise_production(db, hybrid_data):
+    return _create_gsm_wise_production(db=db, hybrid_data=hybrid_data)
+
 def start_production_from_pending_orders(db, request_data):
     from .crud.pending_orders import start_production_from_pending_orders_impl  # ✅ RENAMED FUNCTION
     return start_production_from_pending_orders_impl(db=db, request_data=request_data)
@@ -281,6 +284,46 @@ def get_orders_with_paper_specs(db: Session, order_ids: List[uuid.UUID]) -> List
                     })
 
     return order_requirements
+
+
+def get_orders_with_paper_specs_gsm_wise(db: Session, order_ids: List[uuid.UUID], paper_ids: List[uuid.UUID]) -> List[Dict]:
+    """
+    GSM-WISE FLOW: Same as get_orders_with_paper_specs but only includes order items
+    whose paper_id is in the selected paper_ids list.
+    """
+    orders = db.query(models.OrderMaster).options(
+        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper),
+        joinedload(models.OrderMaster.client)
+    ).filter(
+        models.OrderMaster.id.in_(order_ids),
+        models.OrderMaster.status.in_(["created", "in_process"])
+    ).all()
+
+    order_requirements = []
+    for order in orders:
+        for item in order.order_items:
+            if item.paper and item.paper.id in paper_ids:
+                remaining_qty = item.remaining_to_plan
+                if remaining_qty > 0:
+                    order_requirements.append({
+                        'order_id': str(order.id),
+                        'order_item_id': str(item.id),
+                        'width': float(item.width_inches),
+                        'quantity': remaining_qty,
+                        'gsm': item.paper.gsm,
+                        'bf': float(item.paper.bf),
+                        'shade': item.paper.shade,
+                        'min_length': 1600,
+                        'client_name': order.client.company_name if order.client else 'Unknown',
+                        'client_id': str(order.client.id) if order.client else None,
+                        'paper_id': str(item.paper.id),
+                        'source_type': 'regular_order',
+                        'source_order_id': str(order.id),
+                        'source_pending_id': None
+                    })
+
+    return order_requirements
+
 
 # ============================================================================
 # PENDING ORDER ALLOCATION MANAGEMENT FUNCTIONS

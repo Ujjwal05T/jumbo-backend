@@ -691,6 +691,138 @@ def start_hybrid_production(
         logger.error(f"   - Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/plans/gsm-wise/start-production", tags=["GSM-Wise Planning"])
+def start_gsm_wise_production(
+    request_data: schemas.HybridStartProductionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Start production from GSM-wise planning (paper spec driven, same structure as hybrid).
+    """
+    try:
+        from datetime import datetime
+        from uuid import UUID as _UUID
+        from .. import models
+
+        logger.info("🎯 GSM-WISE PLAN API: Received start production request")
+
+        pre_snapshot_time = datetime.utcnow()
+        order_ids = request_data.order_ids
+
+        affected_orders = []
+        affected_order_items = []
+
+        for oid_str in order_ids:
+            try:
+                oid = _UUID(oid_str)
+            except ValueError:
+                continue
+            order = db.query(models.OrderMaster).filter(models.OrderMaster.id == oid).first()
+            if not order:
+                continue
+            affected_orders.append({
+                "id": str(order.id),
+                "frontend_id": order.frontend_id,
+                "status": order.status,
+                "created_at": order.created_at.isoformat(),
+                "started_production_at": order.started_production_at.isoformat() if order.started_production_at else None,
+                "moved_to_warehouse_at": order.moved_to_warehouse_at.isoformat() if order.moved_to_warehouse_at else None,
+                "dispatched_at": order.dispatched_at.isoformat() if order.dispatched_at else None,
+            })
+            for item in order.order_items:
+                affected_order_items.append({
+                    "id": str(item.id),
+                    "frontend_id": item.frontend_id,
+                    "order_id": str(item.order_id),
+                    "width_inches": float(item.width_inches),
+                    "quantity_rolls": item.quantity_rolls,
+                    "quantity_fulfilled": item.quantity_fulfilled,
+                    "quantity_in_pending": item.quantity_in_pending,
+                    "item_status": item.item_status,
+                    "created_at": item.created_at.isoformat(),
+                })
+
+        affected_pending_orders = []
+        all_pending = db.query(models.PendingOrderItem).filter(
+            models.PendingOrderItem._status == "pending"
+        ).all()
+        for pending in all_pending:
+            affected_pending_orders.append({
+                "id": str(pending.id),
+                "frontend_id": pending.frontend_id,
+                "original_order_id": str(pending.original_order_id),
+                "width_inches": float(pending.width_inches),
+                "quantity_pending": pending.quantity_pending,
+                "quantity_fulfilled": pending.quantity_fulfilled or 0,
+                "status": pending._status,
+                "reason": pending.reason,
+                "created_at": pending.created_at.isoformat(),
+            })
+
+        pre_execution_data = {
+            "snapshot_time": pre_snapshot_time.isoformat(),
+            "affected_orders": affected_orders,
+            "affected_order_items": affected_order_items,
+            "affected_pending_orders": affected_pending_orders,
+            "table_counts": {
+                "orders": db.query(models.OrderMaster).count(),
+                "order_items": db.query(models.OrderItem).count(),
+                "inventory_master": db.query(models.InventoryMaster).count(),
+                "pending_order_items": db.query(models.PendingOrderItem).count(),
+                "wastage_inventory": db.query(models.WastageInventory).count(),
+            },
+        }
+
+        result = crud_operations.create_gsm_wise_production(
+            db=db,
+            hybrid_data=request_data.model_dump()
+        )
+
+        logger.info(f"✅ GSM-WISE PLAN API: Successfully created production")
+
+        plan_snapshot = None
+        try:
+            plan_id_str = result.get("plan_id")
+            if plan_id_str:
+                plan_uuid = _UUID(plan_id_str)
+                pre_execution_data["plan_id"] = str(plan_uuid)
+                pre_execution_data["plan_details"] = {
+                    "id": str(plan_uuid),
+                    "name": result.get("plan_frontend_id", ""),
+                    "status": "in_progress",
+                    "created_at": pre_snapshot_time.isoformat(),
+                }
+                plan_snapshot = crud_operations.create_snapshot_for_hybrid_plan(
+                    db=db,
+                    plan_id=plan_uuid,
+                    user_id=_UUID(request_data.created_by_id),
+                    pre_execution_data=pre_execution_data,
+                )
+        except Exception as snap_err:
+            logger.error(f"❌ GSM-WISE PLAN API: Failed to create rollback snapshot: {snap_err}")
+
+        if plan_snapshot:
+            minutes_remaining = int(
+                (plan_snapshot.expires_at - datetime.utcnow()).total_seconds() / 60
+            )
+            result["rollback_info"] = {
+                "rollback_available": True,
+                "expires_at": plan_snapshot.expires_at.isoformat(),
+                "minutes_remaining": minutes_remaining,
+                "plan_id": result.get("plan_id"),
+            }
+        else:
+            result["rollback_info"] = {"rollback_available": False, "reason": "Snapshot creation failed"}
+
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ GSM-WISE PLAN API: Error starting production: {e}")
+        import traceback
+        logger.error(f"   - Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/plans/{plan_id}/start-production", response_model=schemas.StartProductionResponse, tags=["Plan Management"])
 def start_production(
     plan_id: str,
