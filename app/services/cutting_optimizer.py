@@ -1454,6 +1454,8 @@ class CuttingOptimizer:
                 'source_pending_id': req.get('source_pending_id'),
                 'client_name': req.get('client_name', 'Unknown'),
                 'client_id': req.get('client_id'),
+                'order_item_id': req.get('order_item_id'),
+                'paper_id': req.get('paper_id'),
                 'roll_index': req.get('roll_index'),
                 'original_quantity': req.get('original_quantity'),
                 'assigned': False  # Track if this roll has been assigned to a cut roll
@@ -1631,6 +1633,7 @@ class CuttingOptimizer:
                             'order_id': source_info.get('source_order_id'),  # Keep existing field for backward compatibility
                             'client_name': source_info.get('client_name', 'Unknown'),
                             'client_id': source_info.get('client_id'),
+                            'order_item_id': source_info.get('order_item_id'),
                             'roll_index': source_info.get('roll_index')  # Track which roll from original order
                         }
                         cut_rolls_generated.append(cut_roll)

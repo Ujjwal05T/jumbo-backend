@@ -707,16 +707,29 @@ def start_gsm_wise_production(
         logger.info("🎯 GSM-WISE PLAN API: Received start production request")
 
         pre_snapshot_time = datetime.utcnow()
-        order_ids = request_data.order_ids
+
+        # Collect all order IDs: from top-level order_ids AND from cut-level order_id in paper_specs
+        all_order_id_strs = set(request_data.order_ids or [])
+        for spec in (request_data.paper_specs or []):
+            spec_dict = spec if isinstance(spec, dict) else spec.model_dump()
+            for jumbo in (spec_dict.get('jumbos') or []):
+                for roll_set in (jumbo.get('sets') or []):
+                    for cut in (roll_set.get('cuts') or []):
+                        if cut.get('order_id'):
+                            all_order_id_strs.add(cut['order_id'])
 
         affected_orders = []
         affected_order_items = []
+        seen_order_ids = set()
 
-        for oid_str in order_ids:
+        for oid_str in all_order_id_strs:
             try:
                 oid = _UUID(oid_str)
             except ValueError:
                 continue
+            if oid in seen_order_ids:
+                continue
+            seen_order_ids.add(oid)
             order = db.query(models.OrderMaster).filter(models.OrderMaster.id == oid).first()
             if not order:
                 continue
@@ -741,6 +754,7 @@ def start_gsm_wise_production(
                     "item_status": item.item_status,
                     "created_at": item.created_at.isoformat(),
                 })
+                logger.info(f"📸 GSM-WISE SNAPSHOT: {item.frontend_id} width={item.width_inches}\" qty_fulfilled={item.quantity_fulfilled}/{item.quantity_rolls}")
 
         affected_pending_orders = []
         all_pending = db.query(models.PendingOrderItem).filter(

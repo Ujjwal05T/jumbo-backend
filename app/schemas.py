@@ -1428,6 +1428,7 @@ class HybridCutRoll(BaseModel):
     client_id: Optional[str] = Field(None, description="Client ID")
     source: str = Field(..., description="Source: 'algorithm' or 'manual'")
     order_id: Optional[str] = Field(None, description="Linked order ID for algorithm rolls")
+    order_item_id: Optional[str] = Field(None, description="Order item ID for exact matching")
     source_pending_id: Optional[str] = Field(None, description="Pending order ID if from pending")
     source_type: Optional[str] = Field(None, description="'regular_order' or 'pending_order'")
     paper_id: Optional[str] = Field(None, description="Paper specification ID")

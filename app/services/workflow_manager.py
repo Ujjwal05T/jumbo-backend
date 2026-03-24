@@ -624,7 +624,10 @@ class WorkflowManager:
                         "gsm": po.gsm,
                         "bf": float(po.bf),
                         "shade": po.shade,
-                        "reason": po.reason
+                        "reason": po.reason,
+                        "order_id": str(po.original_order_id) if po.original_order_id else None,
+                        "client_id": str(po.client_id) if getattr(po, 'client_id', None) else None,
+                        "client_name": po.client_name if getattr(po, 'client_name', None) else None,
                     } for po in created_pending
                 ],
                 # NEW: Store source tracking metadata for production start

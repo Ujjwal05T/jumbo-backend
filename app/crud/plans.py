@@ -2892,28 +2892,46 @@ def create_gsm_wise_production(db: Session, hybrid_data: dict):
                                 oid = uuid.UUID(cut['order_id'])
                                 orders_updated.add(str(oid))
 
+                                logger.info(f"🔍 GSM-WISE LINK: cut {cut['width_inches']}\" order={str(oid)[:8]} order_item_id={cut.get('order_item_id')} paper_id={cut.get('paper_id')}")
+
                                 order_item = None
                                 if cut.get("order_item_id"):
                                     try:
                                         order_item = db.query(models.OrderItem).filter(
                                             models.OrderItem.id == uuid.UUID(cut["order_item_id"])
                                         ).first()
-                                    except (ValueError, AttributeError):
-                                        pass
+                                        if order_item:
+                                            logger.info(f"✅ GSM-WISE LINK: Found order_item by ID → {order_item.frontend_id} width={order_item.width_inches}")
+                                        else:
+                                            logger.warning(f"⚠️ GSM-WISE LINK: order_item_id {cut['order_item_id']} not found in DB")
+                                    except (ValueError, AttributeError) as e:
+                                        logger.warning(f"⚠️ GSM-WISE LINK: Invalid order_item_id UUID: {e}")
                                 if not order_item:
-                                    items = db.query(models.OrderItem).filter(
+                                    fallback_filter = [
                                         models.OrderItem.order_id == oid,
                                         models.OrderItem.width_inches == cut["width_inches"]
-                                    ).all()
+                                    ]
+                                    if cut.get("paper_id"):
+                                        try:
+                                            fallback_filter.append(models.OrderItem.paper_id == uuid.UUID(cut["paper_id"]))
+                                        except (ValueError, AttributeError):
+                                            pass
+                                    items = db.query(models.OrderItem).filter(*fallback_filter).all()
+                                    logger.warning(f"⚠️ GSM-WISE LINK: Fallback width+paper match → {len(items)} items found for {cut['width_inches']}\" order={str(oid)[:8]}")
                                     if items:
                                         order_item = items[0]
+                                        logger.warning(f"⚠️ GSM-WISE LINK: Using fallback item {order_item.frontend_id}")
+                                if not order_item:
+                                    logger.error(f"❌ GSM-WISE LINK: No order_item found for cut {cut['width_inches']}\" order={str(oid)[:8]} — skipping increment")
                                 if order_item:
+                                    old_qty = order_item.quantity_fulfilled or 0
                                     if is_wastage:
-                                        order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                                        order_item.quantity_fulfilled = old_qty + 1
                                         order_item.item_status = 'in_warehouse'
                                     else:
                                         # GSM-WISE: always increment quantity_fulfilled, never change status to in_process
-                                        order_item.quantity_fulfilled = (order_item.quantity_fulfilled or 0) + 1
+                                        order_item.quantity_fulfilled = old_qty + 1
+                                    logger.info(f"📈 GSM-WISE LINK: {order_item.frontend_id} qty_fulfilled {old_qty} → {order_item.quantity_fulfilled} / {order_item.quantity_rolls}")
 
                                     # Create plan-order link with order_item_id
                                     existing_link = db.query(models.PlanOrderLink).filter(

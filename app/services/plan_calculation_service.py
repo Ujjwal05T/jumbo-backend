@@ -209,7 +209,7 @@ class PlanCalculationService:
                     import uuid as _uuid
                     orders_map = {str(o.id): o for o in self.db.query(_models.OrderMaster).filter(_models.OrderMaster.id.in_([_uuid.UUID(oid) for oid in source_order_ids])).all()}
                     client_ids = [o.client_id for o in orders_map.values() if o.client_id]
-                    clients_map = {str(c.id): c for c in self.db.query(_models.Client).filter(_models.Client.id.in_(client_ids)).all()} if client_ids else {}
+                    clients_map = {str(c.id): c for c in self.db.query(_models.ClientMaster).filter(_models.ClientMaster.id.in_(client_ids)).all()} if client_ids else {}
                     for p in pending_orders_out:
                         order = orders_map.get(p.get('source_order_id'))
                         if order and order.client_id:

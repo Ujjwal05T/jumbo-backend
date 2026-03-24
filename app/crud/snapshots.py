@@ -451,7 +451,7 @@ class CRUDPlanSnapshot:
 
                 # Get current total wastage count for debugging
                 current_wastage_count = db.query(models.WastageInventory).count()
-                logger.info(f"Current wastage count before rollback: {current_wastage_count}")
+                # logger.info(f"Current wastage count before rollback: {current_wastage_count}")
 
                 # Step 1: Find ALL wastage created during execution window (created by plan)
                 created_wastage = db.query(models.WastageInventory).filter(
@@ -460,7 +460,7 @@ class CRUDPlanSnapshot:
                     models.WastageInventory.created_at <= datetime.utcnow()
                 ).all()
 
-                logger.info(f"Found {len(created_wastage)} wastage records created during execution window")
+                # logger.info(f"Found {len(created_wastage)} wastage records created during execution window")
 
                 # Step 2: Find ALL wastage that was modified during execution window (possibly used by plan)
                 # Look for wastage with status changes OR updates during execution window
@@ -472,7 +472,7 @@ class CRUDPlanSnapshot:
                     models.WastageInventory.status != "available"  # Status changed from available
                 ).all()
 
-                logger.info(f"Found {len(modified_wastage)} wastage records modified during execution window (existed before, status changed)")
+                # logger.info(f"Found {len(modified_wastage)} wastage records modified during execution window (existed before, status changed)")
 
                 # Step 2a: Find wastage that was used to create inventory during plan execution
                 # Look for inventory items created during execution that have wastage sources
@@ -482,7 +482,7 @@ class CRUDPlanSnapshot:
                     models.InventoryMaster.wastage_source_order_id.isnot(None)  # Created from wastage order
                 ).all()
 
-                logger.info(f"Found {len(inventory_from_wastage)} inventory items created from wastage orders during execution window")
+                # logger.info(f"Found {len(inventory_from_wastage)} inventory items created from wastage orders during execution window")
 
                 # Step 2b: Find the actual wastage orders that were used as source
                 wastage_orders_used = set()
@@ -490,7 +490,7 @@ class CRUDPlanSnapshot:
                     wastage_order_ids = [inv.wastage_source_order_id for inv in inventory_from_wastage]
                     wastage_orders_used.update(wastage_order_ids)
 
-                logger.info(f"Found {len(wastage_orders_used)} unique wastage orders used as source for inventory")
+                # logger.info(f"Found {len(wastage_orders_used)} unique wastage orders used as source for inventory")
 
                 # Step 2c: Find wastage inventory items that correspond to those wastage orders
                 wastage_from_used_orders = []
@@ -499,7 +499,7 @@ class CRUDPlanSnapshot:
                         models.WastageInventory.id.in_(wastage_orders_used)
                     ).all()
 
-                logger.info(f"Found {len(wastage_from_used_orders)} wastage inventory items that were used to create inventory")
+                # logger.info(f"Found {len(wastage_from_used_orders)} wastage inventory items that were used to create inventory")
 
                 # Step 2d: Find wastage rolls created during execution (inventory items marked as wastage)
                 wastage_rolls_created = db.query(models.InventoryMaster).filter(
@@ -508,14 +508,14 @@ class CRUDPlanSnapshot:
                     models.InventoryMaster.is_wastage_roll == True  # These are wastage inventory items
                 ).all()
 
-                logger.info(f"Found {len(wastage_rolls_created)} wastage rolls (inventory items) created during execution window")
+                # logger.info(f"Found {len(wastage_rolls_created)} wastage rolls (inventory items) created during execution window")
 
                 # Step 3: Look for wastage linked to the plan (additional catch)
                 plan_linked_wastage = db.query(models.WastageInventory).filter(
                     models.WastageInventory.source_plan_id == plan_id
                 ).all()
 
-                logger.info(f"Found {len(plan_linked_wastage)} wastage records with explicit source_plan_id")
+                # logger.info(f"Found {len(plan_linked_wastage)} wastage records with explicit source_plan_id")
 
                 # Step 4: Combine all wastage that needs processing
                 wastage_to_delete = []
@@ -527,21 +527,21 @@ class CRUDPlanSnapshot:
                     if wastage.id not in processed_wastage_ids:
                         wastage_to_delete.append(wastage)
                         processed_wastage_ids.add(wastage.id)
-                        logger.info(f"Will DELETE wastage {wastage.frontend_id} (created during execution)")
+                        # logger.info(f"Will DELETE wastage {wastage.frontend_id} (created during execution)")
 
                 # Process modified wastage (restore status)
                 for wastage in modified_wastage:
                     if wastage.id not in processed_wastage_ids:
                         wastage_to_restore.append(wastage)
                         processed_wastage_ids.add(wastage.id)
-                        logger.info(f"Will RESTORE wastage {wastage.frontend_id} (status changed from available to {wastage.status})")
+                        # logger.info(f"Will RESTORE wastage {wastage.frontend_id} (status changed from available to {wastage.status})")
 
                 # Process wastage that was used to create inventory (restore status)
                 for wastage in wastage_from_used_orders:
                     if wastage.id not in processed_wastage_ids:
                         wastage_to_restore.append(wastage)
                         processed_wastage_ids.add(wastage.id)
-                        logger.info(f"Will RESTORE wastage {wastage.frontend_id} (used as source for inventory creation)")
+                        # logger.info(f"Will RESTORE wastage {wastage.frontend_id} (used as source for inventory creation)")
 
                 # Also process plan-linked wastage that wasn't caught above
                 for wastage in plan_linked_wastage:
@@ -549,21 +549,21 @@ class CRUDPlanSnapshot:
                         if wastage.created_at >= snapshot_time:
                             wastage_to_delete.append(wastage)
                             processed_wastage_ids.add(wastage.id)
-                            logger.info(f"Will DELETE plan-linked wastage {wastage.frontend_id} (created during execution)")
+                            # logger.info(f"Will DELETE plan-linked wastage {wastage.frontend_id} (created during execution)")
                         else:
                             wastage_to_restore.append(wastage)
                             processed_wastage_ids.add(wastage.id)
-                            logger.info(f"Will RESTORE plan-linked wastage {wastage.frontend_id} (linked to plan)")
+                            # logger.info(f"Will RESTORE plan-linked wastage {wastage.frontend_id} (linked to plan)")
 
                 # Also need to handle wastage rolls (inventory items marked as wastage)
                 for wastage_roll in wastage_rolls_created:
-                    logger.info(f"Will DELETE wastage roll {wastage_roll.frontend_id} (inventory item marked as wastage)")
+                    # logger.info(f"Will DELETE wastage roll {wastage_roll.frontend_id} (inventory item marked as wastage)")
                     # These are inventory items, not wastage inventory, so handle separately
                     db.delete(wastage_roll)
                     rollback_stats["wastage_deleted"] += 1
 
-                logger.info(f"🗑️ Deleting {len(wastage_to_delete)} wastage records created by plan")
-                logger.info(f"🔄 Restoring {len(wastage_to_restore)} wastage records used by plan")
+                # logger.info(f"🗑️ Deleting {len(wastage_to_delete)} wastage records created by plan")
+                # logger.info(f"🔄 Restoring {len(wastage_to_restore)} wastage records used by plan")
 
                 # Delete wastage created by plan
                 for wastage in wastage_to_delete:
@@ -575,7 +575,7 @@ class CRUDPlanSnapshot:
                     wastage.status = "available"
                     wastage.source_plan_id = None  # Remove plan association if it exists
                     rollback_stats["wastage_restored"] += 1
-                    logger.info(f"Restored wastage {wastage.frontend_id} status to 'available'")
+                    # logger.info(f"Restored wastage {wastage.frontend_id} status to 'available'")
 
             else:
                 # Fallback: Handle wastage with explicit source_plan_id
@@ -601,7 +601,7 @@ class CRUDPlanSnapshot:
 
                 # Get current total pending order count for debugging
                 current_pending_count = db.query(models.PendingOrderItem).count()
-                logger.info(f"Current pending order count before rollback: {current_pending_count}")
+                # logger.info(f"Current pending order count before rollback: {current_pending_count}")
 
                 # Step 1: Find ALL pending orders created during execution window
                 execution_pending_orders = db.query(models.PendingOrderItem).filter(
@@ -610,7 +610,7 @@ class CRUDPlanSnapshot:
                     models.PendingOrderItem.created_at <= datetime.utcnow()
                 ).all()
 
-                logger.info(f"Found {len(execution_pending_orders)} pending orders created during execution window")
+                # logger.info(f"Found {len(execution_pending_orders)} pending orders created during execution window")
 
                 # Step 2: Find ALL pending orders modified during execution window (possibly used by plan)
                 # Use available fields to detect changes: resolved_at, quantity_fulfilled, status
@@ -627,7 +627,7 @@ class CRUDPlanSnapshot:
                     )
                 ).all()
 
-                logger.info(f"Found {len(modified_pending_orders)} pending orders that were likely modified during execution window (existed before, have changes)")
+                # logger.info(f"Found {len(modified_pending_orders)} pending orders that were likely modified during execution window (existed before, have changes)")
 
                 # Step 2a: Also find pending orders that were resolved during execution window
                 resolved_pending_orders = db.query(models.PendingOrderItem).filter(
@@ -638,19 +638,15 @@ class CRUDPlanSnapshot:
                     models.PendingOrderItem.created_at < snapshot_time  # Existed before plan
                 ).all()
 
-                logger.info(f"Found {len(resolved_pending_orders)} pending orders resolved during execution window")
+                # logger.info(f"Found {len(resolved_pending_orders)} pending orders resolved during execution window")
 
                 # Step 3: Debug what's in the snapshot data first
-                logger.info(f"🔍 DEBUG: Analyzing snapshot data for pending orders")
-                logger.info(f"   - Total pending orders in snapshot: {len(snapshot_data['affected_pending_orders'])}")
+                # logger.info(f"🔍 DEBUG: Analyzing snapshot data for pending orders")
+                # logger.info(f"   - Total pending orders in snapshot: {len(snapshot_data['affected_pending_orders'])}")
 
                 # Show detailed snapshot data
                 for i, pending_data in enumerate(snapshot_data["affected_pending_orders"]):
-                    logger.info(f"   - Snapshot[{i}]: ID={pending_data['id']}, Frontend={pending_data.get('frontend_id', 'N/A')}")
-                    logger.info(f"     * quantity_pending: {pending_data['quantity_pending']}")
-                    logger.info(f"     * quantity_fulfilled: {pending_data['quantity_fulfilled']}")
-                    logger.info(f"     * status: {pending_data['status']}")
-                    logger.info(f"     * created_at: {pending_data['created_at']}")
+                    pass  # logging removed
 
                 # Step 4: Identify plan creation pending orders vs normal pending orders
                 # Plan creation pending orders were created in the 15 minutes before snapshot
@@ -665,13 +661,13 @@ class CRUDPlanSnapshot:
                     if created_at >= plan_creation_cutoff:
                         # This pending order was created during plan creation - should be DELETED
                         plan_creation_pending_ids.add(pending_id)
-                        logger.info(f"   🗑️ Marked for DELETION (plan creation): {pending_data.get('frontend_id', 'unknown')} (created: {created_at})")
+                        # logger.info(f"   🗑️ Marked for DELETION (plan creation): {pending_data.get('frontend_id', 'unknown')} (created: {created_at})")
                     else:
                         # This pending order existed before plan - should be RESTORED
                         normal_pending_ids.add(pending_id)
-                        logger.info(f"   🔄 Marked for RESTORATION (existed before): {pending_data.get('frontend_id', 'unknown')} (created: {created_at})")
+                        # logger.info(f"   🔄 Marked for RESTORATION (existed before): {pending_data.get('frontend_id', 'unknown')} (created: {created_at})")
 
-                logger.info(f"🔍 CLASSIFICATION: {len(plan_creation_pending_ids)} to delete (plan creation), {len(normal_pending_ids)} to restore (existed before)")
+                # logger.info(f"🔍 CLASSIFICATION: {len(plan_creation_pending_ids)} to delete (plan creation), {len(normal_pending_ids)} to restore (existed before)")
 
                 # Step 5: Restore normal pending orders (existed before plan)
                 restored_pending_ids = set()  # Use set to prevent duplicates
@@ -688,7 +684,7 @@ class CRUDPlanSnapshot:
 
                     # Skip if we've already processed this pending order
                     if pending_id in processed_ids:
-                        logger.info(f"Skipping duplicate pending order {pending_data.get('frontend_id', 'unknown')} in snapshot data")
+                        # logger.info(f"Skipping duplicate pending order {pending_data.get('frontend_id', 'unknown')} in snapshot data")
                         continue
 
                     processed_ids.add(pending_id)
@@ -698,8 +694,8 @@ class CRUDPlanSnapshot:
                     ).first()
                     if pending:
                         found_in_db_count += 1
-                        logger.info(f"Restoring pending order {pending.frontend_id} from snapshot")
-                        logger.info(f"  Before: quantity_pending={pending.quantity_pending}, quantity_fulfilled={pending.quantity_fulfilled}, status={pending._status}, resolved_at={pending.resolved_at}")
+                        # logger.info(f"Restoring pending order {pending.frontend_id} from snapshot")
+                        # logger.info(f"  Before: quantity_pending={pending.quantity_pending}, quantity_fulfilled={pending.quantity_fulfilled}, status={pending._status}, resolved_at={pending.resolved_at}")
 
                         # Restore original state from snapshot
                         old_quantity_pending = pending.quantity_pending
@@ -714,16 +710,16 @@ class CRUDPlanSnapshot:
                         restored_pending_ids.add(pending.id)
                         rollback_stats["pending_orders_restored"] += 1
 
-                        logger.info(f"  After: quantity_pending={pending.quantity_pending} (was {old_quantity_pending})")
-                        logger.info(f"         quantity_fulfilled={pending.quantity_fulfilled} (was {old_quantity_fulfilled})")
-                        logger.info(f"         status={pending._status} (was {old_status})")
-                        logger.info(f"         resolved_at={pending.resolved_at} (was {old_resolved_at})")
+                        # logger.info(f"  After: quantity_pending={pending.quantity_pending} (was {old_quantity_pending})")
+                        # logger.info(f"         quantity_fulfilled={pending.quantity_fulfilled} (was {old_quantity_fulfilled})")
+                        # logger.info(f"         status={pending._status} (was {old_status})")
+                        # logger.info(f"         resolved_at={pending.resolved_at} (was {old_resolved_at})")
                     else:
                         not_found_in_db_count += 1
-                        logger.error(f"❌ ERROR: Pending order {pending_id} ({pending_data.get('frontend_id', 'unknown')}) found in snapshot but NOT in database!")
-                        logger.error(f"   Snapshot data: {pending_data}")
+                        # logger.error(f"❌ ERROR: Pending order {pending_id} ({pending_data.get('frontend_id', 'unknown')}) found in snapshot but NOT in database!")
+                        # logger.error(f"   Snapshot data: {pending_data}")
 
-                logger.info(f"🔍 SUMMARY: Found {found_in_db_count} pending orders in DB, {not_found_in_db_count} not found")
+                # logger.info(f"🔍 SUMMARY: Found {found_in_db_count} pending orders in DB, {not_found_in_db_count} not found")
 
                 # Convert set to list for the next step
                 restored_pending_ids = list(restored_pending_ids)
@@ -731,18 +727,18 @@ class CRUDPlanSnapshot:
                 # Step 4: Delete execution window pending orders (excluding restored ones)
                 deleted_pending_count = 0
 
-                logger.info(f"🔍 DEBUG: Analyzing execution window pending orders for deletion")
-                logger.info(f"   - Total execution window pending orders: {len(execution_pending_orders)}")
-                logger.info(f"   - Pending orders to skip (restored): {len(restored_pending_ids)}")
+                # logger.info(f"🔍 DEBUG: Analyzing execution window pending orders for deletion")
+                # logger.info(f"   - Total execution window pending orders: {len(execution_pending_orders)}")
+                # logger.info(f"   - Pending orders to skip (restored): {len(restored_pending_ids)}")
 
                 # Show details of execution window pending orders
                 for i, pending in enumerate(execution_pending_orders):
                     skip_deletion = pending.id in restored_pending_ids
-                    logger.info(f"   - Execution[{i}]: {pending.frontend_id}, ID={pending.id}")
-                    logger.info(f"     * Created: {pending.created_at}")
-                    logger.info(f"     * quantity_pending: {pending.quantity_pending}, quantity_fulfilled: {pending.quantity_fulfilled}")
-                    logger.info(f"     * Status: {pending._status}, Resolved: {pending.resolved_at}")
-                    logger.info(f"     * Will delete: {not skip_deletion}")
+                    # logger.info(f"   - Execution[{i}]: {pending.frontend_id}, ID={pending.id}")
+                    # logger.info(f"     * Created: {pending.created_at}")
+                    # logger.info(f"     * quantity_pending: {pending.quantity_pending}, quantity_fulfilled: {pending.quantity_fulfilled}")
+                    # logger.info(f"     * Status: {pending._status}, Resolved: {pending.resolved_at}")
+                    # logger.info(f"     * Will delete: {not skip_deletion}")
 
                 # First, delete plan creation pending orders (created during plan setup)
                 plan_creation_deleted = 0
@@ -751,33 +747,34 @@ class CRUDPlanSnapshot:
                         models.PendingOrderItem.id == pending_id
                     ).first()
                     if pending:
-                        logger.info(f"🗑️ Deleting plan creation pending order {pending.frontend_id} (ID: {pending.id})")
+                        # logger.info(f"🗑️ Deleting plan creation pending order {pending.frontend_id} (ID: {pending.id})")
                         db.delete(pending)
                         plan_creation_deleted += 1
                     else:
-                        logger.warning(f"Plan creation pending order {pending_id} not found in database")
+                        pass
+                        # logger.warning(f"Plan creation pending order {pending_id} not found in database")
 
                 deleted_pending_count += plan_creation_deleted
 
                 # Then, delete execution window pending orders (excluding restored ones)
                 for pending in execution_pending_orders:
                     if pending.id not in restored_pending_ids and pending.id not in plan_creation_pending_ids:
-                        logger.info(f"🗑️ Deleting execution window pending order {pending.frontend_id} (ID: {pending.id})")
+                        # logger.info(f"🗑️ Deleting execution window pending order {pending.frontend_id} (ID: {pending.id})")
                         db.delete(pending)
                         deleted_pending_count += 1
                     else:
                         skip_reason = "restored" if pending.id in restored_pending_ids else "plan creation"
-                        logger.info(f"✅ Skipping deletion of pending order {pending.frontend_id} ({skip_reason})")
+                        # logger.info(f"✅ Skipping deletion of pending order {pending.frontend_id} ({skip_reason})")
 
                 rollback_stats["pending_orders_deleted"] = deleted_pending_count
 
-                logger.info(f"🗑️ TOTAL PENDING ORDERS DELETED: {deleted_pending_count} (plan creation: {plan_creation_deleted}, execution: {deleted_pending_count - plan_creation_deleted})")
+                # logger.info(f"🗑️ TOTAL PENDING ORDERS DELETED: {deleted_pending_count} (plan creation: {plan_creation_deleted}, execution: {deleted_pending_count - plan_creation_deleted})")
 
-                logger.info(f"🔄 Restored {len(restored_pending_ids)} pending orders from snapshot")
-                logger.info(f"🗑️ Deleted {deleted_pending_count} pending orders created during execution")
-                logger.info(f"📊 Total pending orders found in execution window: {len(execution_pending_orders)}")
-                logger.info(f"📊 Total pending orders in snapshot: {len(snapshot_data['affected_pending_orders'])}")
-                logger.info(f"📊 Total pending orders modified during execution: {len(modified_pending_orders)}")
+                # logger.info(f"🔄 Restored {len(restored_pending_ids)} pending orders from snapshot")
+                # logger.info(f"🗑️ Deleted {deleted_pending_count} pending orders created during execution")
+                # logger.info(f"📊 Total pending orders found in execution window: {len(execution_pending_orders)}")
+                # logger.info(f"📊 Total pending orders in snapshot: {len(snapshot_data['affected_pending_orders'])}")
+                # logger.info(f"📊 Total pending orders modified during execution: {len(modified_pending_orders)}")
 
             # 4. Restore original states from snapshot
             # Restore orders
@@ -802,15 +799,20 @@ class CRUDPlanSnapshot:
                     rollback_stats["orders_restored"] += 1
 
             # Restore order items
+            logger.info(f"🔄 ROLLBACK: Restoring {len(snapshot_data.get('affected_order_items', []))} order items")
             for item_data in snapshot_data["affected_order_items"]:
                 item = db.query(models.OrderItem).filter(
                     models.OrderItem.id == UUID(item_data["id"])
                 ).first()
                 if item:
+                    old_qty = item.quantity_fulfilled
                     item.quantity_fulfilled = item_data["quantity_fulfilled"]
                     item.quantity_in_pending = item_data["quantity_in_pending"]
                     item.item_status = item_data["item_status"]
                     rollback_stats["order_items_restored"] += 1
+                    logger.info(f"🔄 ROLLBACK ORDER ITEM: {item_data['frontend_id']} quantity_fulfilled {old_qty} → {item.quantity_fulfilled} (snapshot={item_data['quantity_fulfilled']})")
+                else:
+                    logger.warning(f"⚠️ ROLLBACK: Order item {item_data['id']} not found in DB")
 
             # Skip pending order restoration - using time-based deletion approach instead
             # All pending orders created during execution window are already deleted above
@@ -820,7 +822,7 @@ class CRUDPlanSnapshot:
             plan.executed_at = None
 
             # 6. MARK PLAN AS DELETED - Preserve plan record for audit/history
-            logger.info(f"🔄 Marking rolled back plan {plan_id} ({plan.frontend_id}) as deleted")
+            # logger.info(f"🔄 Marking rolled back plan {plan_id} ({plan.frontend_id}) as deleted")
             plan_frontend_id = plan.frontend_id
 
             # Delete plan order links
@@ -852,23 +854,24 @@ class CRUDPlanSnapshot:
                     rollback_duration_seconds=(datetime.utcnow() - snapshot.created_at).total_seconds(),
                     success_status="success"
                 )
-                logger.info(f"📝 Created deletion log entry {deletion_log.id} for plan {plan_frontend_id}")
+                # logger.info(f"📝 Created deletion log entry {deletion_log.id} for plan {plan_frontend_id}")
             except Exception as log_error:
-                logger.error(f"⚠️ Failed to create deletion log: {log_error}")
+                pass
+                # logger.error(f"⚠️ Failed to create deletion log: {log_error}")
                 # Don't fail the rollback if logging fails
 
             # Mark plan as deleted instead of actually deleting it
             plan.status = "deleted"
-            logger.info(f"✅ Marked plan {plan_frontend_id} status as 'deleted'")
+            # logger.info(f"✅ Marked plan {plan_frontend_id} status as 'deleted'")
 
             # 7. MARK SNAPSHOT AS USED - Keep snapshot record for audit trail
             snapshot.is_used = True
-            logger.info(f"✅ Marked snapshot {snapshot.id} as used for plan {plan_frontend_id}")
+            # logger.info(f"✅ Marked snapshot {snapshot.id} as used for plan {plan_frontend_id}")
 
             db.commit()  # Commit all changes together
 
-            logger.info(f"Successfully rolled back plan {plan_id} and marked as deleted. Stats: {rollback_stats}")
-            logger.info(f"📋 Plan {plan_frontend_id} preserved with status='deleted' for audit history")
+            # logger.info(f"Successfully rolled back plan {plan_id} and marked as deleted. Stats: {rollback_stats}")
+            # logger.info(f"📋 Plan {plan_frontend_id} preserved with status='deleted' for audit history")
 
             return {
                 "success": True,
@@ -884,7 +887,7 @@ class CRUDPlanSnapshot:
 
         except Exception as e:
             db.rollback()
-            logger.error(f"Rollback failed for plan {plan_id}: {e}")
+            # logger.error(f"Rollback failed for plan {plan_id}: {e}")
 
             # Log failed rollback attempt for audit trail
             try:
@@ -900,9 +903,10 @@ class CRUDPlanSnapshot:
                         success_status="failed",
                         error_message=str(e)
                     )
-                    logger.info(f"📝 Created failure deletion log entry {deletion_log.id} for plan {plan.frontend_id}")
+                    # logger.info(f"📝 Created failure deletion log entry {deletion_log.id} for plan {plan.frontend_id}")
             except Exception as log_error:
-                logger.error(f"⚠️ Failed to create failure deletion log: {log_error}")
+                pass
+                # logger.error(f"⚠️ Failed to create failure deletion log: {log_error}")
 
             raise
 
