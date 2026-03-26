@@ -378,6 +378,36 @@ async def update_order_with_items(
         logger.error(f"Error updating order with items: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.patch("/orders/{order_id}/status", tags=["Order Master"])
+def update_order_status(
+    order_id: UUID,
+    body: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Update order status"""
+    try:
+        new_status = body.get("status")
+        if not new_status:
+            raise HTTPException(status_code=400, detail="status is required")
+
+        valid_statuses = ["created", "in_process", "completed", "cancelled"]
+        if new_status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+
+        order = crud_operations.get_order(db=db, order_id=order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        order.status = new_status
+        db.commit()
+        db.refresh(order)
+        return {"id": str(order.id), "status": order.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating order status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.delete("/orders/{order_id}", tags=["Order Master"])
 def delete_order(order_id: UUID, db: Session = Depends(get_db)):
     """Delete order (only if status is 'created')"""

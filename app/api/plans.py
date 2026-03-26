@@ -1129,3 +1129,84 @@ def create_manual_plan(
         import traceback
         logger.error(f"   - Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/plans/manual/{plan_id}", tags=["Manual Planning"])
+def delete_manual_plan(plan_id: str, db: Session = Depends(get_db)):
+    """
+    Delete a manual plan by removing its inventory hierarchy and marking the plan as deleted.
+    Handles self-referential FK constraints on InventoryMaster by nullifying parents before deletion.
+    """
+    try:
+        import uuid
+        from .. import models
+
+        plan_uuid = uuid.UUID(plan_id)
+
+        plan = db.query(models.PlanMaster).filter(models.PlanMaster.id == plan_uuid).first()
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+
+        # Get cut rolls linked via PlanInventoryLink
+        links = db.query(models.PlanInventoryLink).filter(
+            models.PlanInventoryLink.plan_id == plan_uuid
+        ).all()
+        cut_roll_ids = {link.inventory_id for link in links}
+
+        # Walk up to find parent 118" and jumbo rolls
+        roll_118_ids = set()
+        jumbo_ids = set()
+        if cut_roll_ids:
+            cut_rolls = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.id.in_(cut_roll_ids)
+            ).all()
+            for cr in cut_rolls:
+                if cr.parent_118_roll_id:
+                    roll_118_ids.add(cr.parent_118_roll_id)
+                if cr.parent_jumbo_id:
+                    jumbo_ids.add(cr.parent_jumbo_id)
+
+        # Also find 118" rolls' parent jumbos (in case cut rolls only have parent_118_roll_id)
+        if roll_118_ids:
+            rolls_118 = db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.id.in_(roll_118_ids)
+            ).all()
+            for r in rolls_118:
+                if r.parent_jumbo_id:
+                    jumbo_ids.add(r.parent_jumbo_id)
+
+        all_inventory_ids = cut_roll_ids | roll_118_ids | jumbo_ids
+
+        # Delete plan inventory links FIRST (before inventory, to avoid FK constraint)
+        db.query(models.PlanInventoryLink).filter(
+            models.PlanInventoryLink.plan_id == plan_uuid
+        ).delete(synchronize_session=False)
+
+        if all_inventory_ids:
+            # Nullify self-referential FKs to avoid constraint errors between inventory records
+            db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.id.in_(all_inventory_ids)
+            ).update(
+                {"parent_jumbo_id": None, "parent_118_roll_id": None},
+                synchronize_session=False
+            )
+            # Delete all inventory records
+            db.query(models.InventoryMaster).filter(
+                models.InventoryMaster.id.in_(all_inventory_ids)
+            ).delete(synchronize_session=False)
+
+        # Step 4: Soft-delete the plan
+        plan.is_deleted = True
+        plan.status = "deleted"
+
+        db.commit()
+
+        logger.info(f"🗑️ MANUAL PLAN DELETE: Plan {plan.frontend_id} deleted — {len(all_inventory_ids)} inventory records removed ({len(jumbo_ids)} jumbos, {len(roll_118_ids)} 118\" rolls, {len(cut_roll_ids)} cut rolls)")
+        return {"success": True, "plan_id": plan_id, "inventory_deleted": len(all_inventory_ids)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ MANUAL PLAN DELETE: Error deleting plan {plan_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

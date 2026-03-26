@@ -73,7 +73,6 @@ def get_papers_from_created_orders(db: Session = Depends(get_db)):
             .filter(
                 models.OrderMaster.status == "created",
                 models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls,
-                models.OrderMaster.created_at >= datetime.now() - timedelta(days=50),
             )
             .group_by(models.OrderItem.paper_id)
             .subquery()

@@ -814,6 +814,19 @@ class CRUDPlanSnapshot:
                 else:
                     logger.warning(f"⚠️ ROLLBACK: Order item {item_data['id']} not found in DB")
 
+            # Delete manually created orders from pending plan (with manual cuts)
+            for order_id_str in snapshot_data.get("manual_created_order_ids", []):
+                try:
+                    oid = UUID(order_id_str)
+                    db.query(models.PlanOrderLink).filter(models.PlanOrderLink.order_id == oid).delete(synchronize_session=False)
+                    db.query(models.OrderItem).filter(models.OrderItem.order_id == oid).delete(synchronize_session=False)
+                    order = db.query(models.OrderMaster).filter(models.OrderMaster.id == oid).first()
+                    if order:
+                        db.delete(order)
+                        logger.info(f"🗑️ ROLLBACK: Deleted manually created order {order_id_str[:8]}")
+                except Exception as e:
+                    logger.warning(f"⚠️ ROLLBACK: Failed to delete manual order {order_id_str}: {e}")
+
             # Skip pending order restoration - using time-based deletion approach instead
             # All pending orders created during execution window are already deleted above
 
@@ -918,7 +931,7 @@ class CRUDPlanSnapshot:
         then passes that data here after getting the plan_id from the result.
         """
         try:
-            logger.info(f"📸 Creating hybrid snapshot for plan {plan_id} from pre-execution data")
+            logger.info(f" Creating hybrid snapshot for plan {plan_id} from pre-execution data")
 
             expires_at = datetime.utcnow() + timedelta(minutes=10)
             snapshot = models.PlanSnapshot(

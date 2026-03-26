@@ -1583,11 +1583,8 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
     # All selected suggestions are converted to inventory, so no Phase 2 pending orders needed
     logger.info("✅ PHASE 2 COMPLETE: No unused suggestions to convert to pending orders")
     
-    # Update plan status to completed since all processing is done
-    logger.info(f"📊 PLAN STATUS UPDATE: Updating plan {db_plan.frontend_id} to completed")
-    db_plan.status = "completed"
-    db_plan.completed_at = datetime.utcnow()
-    logger.info(f"✅ Plan {db_plan.frontend_id} marked as completed")
+    # Keep plan as in_progress to allow rollback within the snapshot window
+    # (same behaviour as hybrid/gsm-wise plans — rollback will set it back to "planned")
     
     # Summary of reductions
     logger.info(f"📊 REDUCTION SUMMARY: {successful_reductions} successful, {skipped_reductions} skipped, {len(regular_cut_rolls)} total cut_rolls")
@@ -1806,7 +1803,8 @@ def start_production_from_pending_orders_impl(db: Session, *, request_data) -> D
             "allocated_wastage": [str(w.id) for w in allocated_wastage],  # List[str] - always empty for pending orders
             "created_gupta_orders": [],  # List[str] - empty for pending flow
             "created_manual_orders": [order["order"].frontend_id for order in created_manual_orders],  # List[str]
-            "created_manual_order_items": [f"{order['order'].frontend_id}: {len(order['items'])} items" for order in created_manual_orders]  # List[str]
+            "created_manual_order_items": [f"{order['order'].frontend_id}: {len(order['items'])} items" for order in created_manual_orders],  # List[str]
+            "manual_created_order_ids": [str(order["order"].id) for order in created_manual_orders]  # UUIDs for rollback deletion
         },
         "created_inventory_details": [  # Keep for backward compatibility
             {

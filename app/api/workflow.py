@@ -93,17 +93,11 @@ def gsm_wise_process(
         # Resolve paper specs → find paper_ids
         paper_ids = [uuid.UUID(pid) for pid in paper_spec_ids]
 
-        # Find all orders with status 'created' that have at least one item matching the paper specs
-        # Limit to orders created within the last 50 days
-        from datetime import datetime, timedelta
-        cutoff_date = datetime.utcnow() - timedelta(days=50)
-
         matching_order_ids = (
             db.query(models.OrderMaster.id)
             .join(models.OrderItem, models.OrderItem.order_id == models.OrderMaster.id)
             .filter(
                 models.OrderMaster.status == "created",
-                models.OrderMaster.created_at >= cutoff_date,
                 models.OrderItem.paper_id.in_(paper_ids),
                 models.OrderItem.quantity_fulfilled < models.OrderItem.quantity_rolls,
             )
