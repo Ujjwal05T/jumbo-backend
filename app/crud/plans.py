@@ -2626,7 +2626,7 @@ def create_gsm_wise_production(db: Session, hybrid_data: dict):
         logger.info(f"📊 WASTE CALCULATION: Used {total_width_used}\" / {total_available_width}\" = {expected_waste_percentage:.2f}% waste")
 
         # Create plan
-        plan_name = f"Hybrid Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        plan_name = f"GSM Wise Plan - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
         plan = models.PlanMaster(
             name=plan_name,
             cut_pattern=[],
@@ -2789,7 +2789,7 @@ def create_gsm_wise_production(db: Session, hybrid_data: dict):
                         cut_roll = models.InventoryMaster(
                             width_inches=cut['width_inches'],
                             paper_id=paper.id,
-                            weight_kg=2 if cut['source'] == 'algorithm' else (1 if cut['source'] == 'manual_order' else 0),
+                            weight_kg=1 if cut['source'] in ('algorithm', 'manual_order') else 0,  # 1 = pre-allocated (skips fulfillment logic on QR scan), 0 = unallocated
                             roll_type="cut",
                             status=cut_status,
                             barcode_id=cut_barcode,

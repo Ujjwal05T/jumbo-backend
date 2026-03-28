@@ -286,7 +286,12 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
 
             if jumbo_id:
                 if jumbo_id not in jumbo_groups:
-                    jumbo_groups[jumbo_id] = {"jumbo_barcode": jumbo_barcode, "rolls": []}
+                    j_roll = roll.parent_118_roll.parent_jumbo
+                    jumbo_groups[jumbo_id] = {
+                        "jumbo_barcode": jumbo_barcode,
+                        "jumbo_weight_kg": float(j_roll.weight_kg) if j_roll.weight_kg else None,
+                        "rolls": [],
+                    }
                 jumbo_groups[jumbo_id]["rolls"].append(roll_data)
             else:
                 ungrouped.append(roll_data)
@@ -296,14 +301,17 @@ def get_plan_dashboard(plan_id: UUID, db: Session = Depends(get_db)):
         for jid, group in jumbo_groups.items():
             rolls = group["rolls"]
             g_wu = sum(1 for r in rolls if r["is_weight_updated"])
+            total_cut_weight = sum(r["weight_kg"] for r in rolls if r["weight_kg"] > 1)
             final_groups.append({
                 "jumbo_id": jid,
                 "jumbo_barcode": group["jumbo_barcode"],
+                "jumbo_weight_kg": group.get("jumbo_weight_kg"),
                 "rolls": rolls,
                 "summary": {
                     "total": len(rolls),
                     "weight_updated": g_wu,
                     "is_complete": len(rolls) > 0 and g_wu == len(rolls),
+                    "total_cut_weight_kg": round(total_cut_weight, 2),
                 },
             })
 
