@@ -2273,6 +2273,7 @@ def get_barcode_details(
 
         # Get dispatch information for this inventory item
         dispatch_info = None
+        bill_info = None
         dispatch_item = db.query(models.DispatchItem).options(
             joinedload(models.DispatchItem.dispatch_record).joinedload(models.DispatchRecord.client)
         ).filter(
@@ -2288,13 +2289,29 @@ def get_barcode_details(
                 "dispatch_frontend_id": dispatch_record.frontend_id
             }
 
+            # Get billing info if a payment slip was generated for this dispatch
+            payment_slip = db.query(models.PaymentSlipMaster).filter(
+                models.PaymentSlipMaster.dispatch_record_id == dispatch_record.id,
+                models.PaymentSlipMaster.is_deleted == False
+            ).first()
+
+            if payment_slip:
+                bill_info = {
+                    "bill_frontend_id": payment_slip.frontend_id,
+                    "payment_type": payment_slip.payment_type,
+                    "bill_no": payment_slip.bill_no,
+                    "slip_date": payment_slip.slip_date.isoformat() if payment_slip.slip_date else None,
+                }
+
         return {
             "status": "success",
             "data": {
                 "barcode_id": barcode_id,
+                "roll_status": inventory.status,
                 "is_wastage": inventory.is_wastage_roll,
                 "wastage_details": wastage_details,
-                "dispatch_info": dispatch_info
+                "dispatch_info": dispatch_info,
+                "bill_info": bill_info
             }
         }
 
