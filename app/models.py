@@ -1056,6 +1056,7 @@ class ProductionData(Base):
     po_party = Column(String(255), nullable=True)  # Number of parties for PO
     wastage_party = Column(String(255), nullable=True)  # Number of parties for Waste
     dispatch_party = Column(String(255), nullable=True)  # Number of parties for Dispatch
+    bounding_chemical = Column(String(255), nullable=True)  # Bounding chemical value
     is_shutdown = Column(String(10), nullable=True)  # Yes/No dropdown
     shutdown_hours = Column(String(255), nullable=True)  # Hours of shutdown
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

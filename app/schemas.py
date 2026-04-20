@@ -1350,6 +1350,7 @@ class ProductionDataCreate(BaseModel):
     po_party: Optional[str] = Field(None, description="Number of parties for PO")
     wastage_party: Optional[str] = Field(None, description="Number of parties for Waste")
     dispatch_party: Optional[str] = Field(None, description="Number of parties for Dispatch")
+    bounding_chemical: Optional[str] = Field(None, description="Bounding chemical value")
     is_shutdown: Optional[str] = Field(None, description="Shutdown status (Yes/No)")
     shutdown_hours: Optional[str] = Field(None, description="Hours of shutdown")
 
@@ -1378,6 +1379,7 @@ class ProductionDataUpdate(BaseModel):
     po_party: Optional[str] = Field(None, description="Number of parties for PO")
     wastage_party: Optional[str] = Field(None, description="Number of parties for Waste")
     dispatch_party: Optional[str] = Field(None, description="Number of parties for Dispatch")
+    bounding_chemical: Optional[str] = Field(None, description="Bounding chemical value")
     is_shutdown: Optional[str] = Field(None, description="Shutdown status (Yes/No)")
     shutdown_hours: Optional[str] = Field(None, description="Hours of shutdown")
 
@@ -1408,6 +1410,7 @@ class ProductionData(BaseModel):
     po_party: Optional[str]
     wastage_party: Optional[str]
     dispatch_party: Optional[str]
+    bounding_chemical: Optional[str]
     is_shutdown: Optional[str]
     shutdown_hours: Optional[str]
     created_at: datetime
