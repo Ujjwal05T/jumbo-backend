@@ -418,10 +418,10 @@ def get_client_suggestions_for_manual_cuts(
         # Debug logging
         logger.info(f"🔍 Client suggestions request: available_waste={available_waste}, paper_specs={paper_specs}")
 
-        # Query latest 100 orders and find client width patterns (any status)
+        # Query latest 200 orders and find client width patterns (any status)
         query = text("""
             WITH latest_orders AS (
-                SELECT TOP 100 o.id
+                SELECT TOP 200 o.id
                 FROM order_master o
                 ORDER BY o.created_at DESC
             )
@@ -506,7 +506,7 @@ def get_client_suggestions_for_manual_cuts(
             "suggestions": suggestions,
             "summary": {
                 "total_clients": len(suggestions),
-                "latest_orders_analyzed": 100,
+                "latest_orders_analyzed": 200,
                 "total_matches": len(rows)
             }
         }
