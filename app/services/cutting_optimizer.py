@@ -1689,22 +1689,32 @@ class CuttingOptimizer:
 
                     logger.info(f"   Found {len(unassigned_rolls)} unassigned rolls for width {width}\"")
 
-                    # Group by source_order_id to create consolidated pending orders
+                    # Group by (source_order_id, source_type) so that rolls from the
+                    # same order that are already in pending (source_type='pending_order')
+                    # stay in a separate bucket from fresh order rolls
+                    # (source_type='regular_order').  Previously grouping by
+                    # source_order_id alone caused both to merge into one bucket whose
+                    # source_type was decided by whichever roll happened to be first,
+                    # producing duplicate pending items when an order and its own
+                    # existing pending items both failed optimisation.
                     pending_by_order = {}
                     for roll in unassigned_rolls[:qty]:  # Take only qty rolls (should match)
                         roll['assigned'] = True  # Mark as assigned to pending
                         order_id = roll.get('source_order_id')
+                        group_key = (order_id, roll['source_type'])
 
-                        if order_id not in pending_by_order:
-                            pending_by_order[order_id] = {
+                        if group_key not in pending_by_order:
+                            pending_by_order[group_key] = {
                                 'rolls': [],
                                 'source_type': roll['source_type'],
+                                'source_order_id': order_id,
                                 'source_pending_id': roll.get('source_pending_id')
                             }
-                        pending_by_order[order_id]['rolls'].append(roll)
+                        pending_by_order[group_key]['rolls'].append(roll)
 
                     # Create pending orders grouped by source order
-                    for order_id, order_data in pending_by_order.items():
+                    for group_key, order_data in pending_by_order.items():
+                        order_id = order_data['source_order_id']
                         # Only create pending for regular orders (not already-pending orders)
                         if order_data['source_type'] == 'regular_order':
                             # NOTE: Client information will be added at the WorkflowManager level

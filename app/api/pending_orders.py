@@ -199,10 +199,73 @@ def start_production_from_pending_orders(
             except (ValueError, AttributeError):
                 pass
 
+        # Capture state of orders and order items that will be modified.
+        # This applies to cut rolls with source_type="regular_order" (the ~10% case
+        # where an existing order's cut roll is included in a pending production run).
+        # The execution path (crud/pending_orders.py ~L1306) increments
+        # order_item.quantity_fulfilled, sets order_item.item_status, and may set
+        # order.status="completed" — all of which must be restored on rollback.
+        affected_orders = []
+        affected_order_items = []
+        seen_order_ids = set()
+        seen_order_item_ids = set()
+        for cut in request_data.get("selected_cut_rolls", []):
+            if not (
+                cut.get("source_type") == "regular_order"
+                and cut.get("order_id")
+                and cut.get("order_item_id")
+                and not cut.get("is_manual_cut")
+                and not cut.get("source_pending_id")
+            ):
+                continue
+
+            oid_str = cut["order_id"]
+            oiid_str = cut["order_item_id"]
+
+            if oid_str not in seen_order_ids:
+                seen_order_ids.add(oid_str)
+                try:
+                    order = db.query(models.OrderMaster).filter(
+                        models.OrderMaster.id == _UUID(oid_str)
+                    ).first()
+                    if order:
+                        affected_orders.append({
+                            "id": str(order.id),
+                            "frontend_id": order.frontend_id,
+                            "status": order.status,
+                            "created_at": order.created_at.isoformat(),
+                            "started_production_at": order.started_production_at.isoformat() if order.started_production_at else None,
+                            "moved_to_warehouse_at": order.moved_to_warehouse_at.isoformat() if order.moved_to_warehouse_at else None,
+                            "dispatched_at": order.dispatched_at.isoformat() if order.dispatched_at else None,
+                        })
+                except (ValueError, AttributeError):
+                    pass
+
+            if oiid_str not in seen_order_item_ids:
+                seen_order_item_ids.add(oiid_str)
+                try:
+                    item = db.query(models.OrderItem).filter(
+                        models.OrderItem.id == _UUID(oiid_str)
+                    ).first()
+                    if item:
+                        affected_order_items.append({
+                            "id": str(item.id),
+                            "frontend_id": item.frontend_id,
+                            "order_id": str(item.order_id),
+                            "width_inches": float(item.width_inches),
+                            "quantity_rolls": item.quantity_rolls,
+                            "quantity_fulfilled": item.quantity_fulfilled,
+                            "quantity_in_pending": item.quantity_in_pending,
+                            "item_status": item.item_status,
+                            "created_at": item.created_at.isoformat(),
+                        })
+                except (ValueError, AttributeError):
+                    pass
+
         pre_execution_data = {
             "snapshot_time": pre_snapshot_time.isoformat(),
-            "affected_orders": [],
-            "affected_order_items": [],
+            "affected_orders": affected_orders,
+            "affected_order_items": affected_order_items,
             "affected_pending_orders": affected_pending_orders,
             "manual_created_order_ids": [],  # will be filled after execution
             "table_counts": {

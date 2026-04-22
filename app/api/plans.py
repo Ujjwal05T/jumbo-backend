@@ -563,12 +563,41 @@ def start_hybrid_production(
 
         # ── 1. Capture pre-execution state ─────────────────────────────────
         pre_snapshot_time = datetime.utcnow()
-        order_ids = request_data.order_ids  # list of str UUIDs
+
+        # Collect every order ID that execution will modify, from three sources:
+        #   a) algorithm orders (request_data.order_ids)
+        #   b) manual_order cuts — each cut references an existing order whose
+        #      quantity_fulfilled / item_status / order.status gets updated
+        #      (crud/plans.py create_hybrid_production ~L2173)
+        #   c) wastage_allocations — each allocation increments quantity_fulfilled
+        #      and sets item_status on the allocated order item
+        #      (crud/plans.py create_hybrid_production ~L2526)
+        seen_order_ids: set = set()
+        all_order_ids_to_capture: list = []
+
+        for oid_str in request_data.order_ids:
+            if oid_str and oid_str not in seen_order_ids:
+                seen_order_ids.add(oid_str)
+                all_order_ids_to_capture.append(oid_str)
+
+        for spec in request_data.paper_specs:
+            for jumbo in spec.jumbos:
+                for roll_set in jumbo.sets:
+                    for cut in roll_set.cuts:
+                        if cut.source == "manual_order" and cut.order_id and cut.order_id not in seen_order_ids:
+                            seen_order_ids.add(cut.order_id)
+                            all_order_ids_to_capture.append(cut.order_id)
+
+        for alloc in request_data.wastage_allocations:
+            oid_str = alloc.get("order_id")
+            if oid_str and oid_str not in seen_order_ids:
+                seen_order_ids.add(oid_str)
+                all_order_ids_to_capture.append(oid_str)
 
         affected_orders = []
         affected_order_items = []
 
-        for oid_str in order_ids:
+        for oid_str in all_order_ids_to_capture:
             try:
                 oid = _UUID(oid_str)
             except ValueError:
