@@ -416,7 +416,7 @@ def get_client_suggestions_for_manual_cuts(
         from datetime import datetime, timedelta
 
         # Debug logging
-        logger.info(f"🔍 Client suggestions request: available_waste={available_waste}, paper_specs={paper_specs}")
+        logger.info(f"🔍 Client suggestions request: available_waste={available_waste}, gsm={paper_specs.get('gsm')}, shade={paper_specs.get('shade')} (bf ignored)")
 
         # Query latest 200 orders and find client width patterns (any status)
         query = text("""
@@ -429,6 +429,7 @@ def get_client_suggestions_for_manual_cuts(
                 c.id as client_id,
                 c.company_name,
                 oi.width_inches,
+                p.bf,
                 COUNT(*) as frequency,
                 MAX(o.created_at) as last_ordered
             FROM order_master o
@@ -439,9 +440,8 @@ def get_client_suggestions_for_manual_cuts(
             WHERE
                 oi.width_inches <= :available_waste
                 AND p.gsm = :gsm
-                AND p.bf = :bf
                 AND p.shade = :shade
-            GROUP BY c.id, c.company_name, oi.width_inches
+            GROUP BY c.id, c.company_name, oi.width_inches, p.bf
             HAVING COUNT(*) >= 1
             ORDER BY frequency DESC, last_ordered DESC
         """)
@@ -449,7 +449,6 @@ def get_client_suggestions_for_manual_cuts(
         result = db.execute(query, {
             'available_waste': available_waste,
             'gsm': paper_specs['gsm'],
-            'bf': paper_specs['bf'],
             'shade': paper_specs['shade']
         })
 
@@ -466,7 +465,7 @@ def get_client_suggestions_for_manual_cuts(
                 "available_waste": available_waste,
                 "paper_specs": paper_specs,
                 "suggestions": [],
-                "message": f"No recent orders found for {paper_specs['gsm']}GSM {paper_specs['bf']}BF {paper_specs['shade']} with width ≤ {available_waste}\""
+                "message": f"No recent orders found for {paper_specs['gsm']}GSM {paper_specs['shade']} with width ≤ {available_waste}\""
             }
 
         # Group suggestions by client
@@ -482,6 +481,7 @@ def get_client_suggestions_for_manual_cuts(
 
             suggestions_by_client[client_id]["suggested_widths"].append({
                 "width": float(row.width_inches),
+                "bf": float(row.bf),
                 "frequency": row.frequency,
                 "last_ordered": row.last_ordered.isoformat() if row.last_ordered else None,
                 "days_ago": (datetime.now() - row.last_ordered).days if row.last_ordered else None
