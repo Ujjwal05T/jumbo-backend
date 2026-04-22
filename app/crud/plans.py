@@ -2470,6 +2470,68 @@ def create_hybrid_production(db: Session, hybrid_data: dict):
         except Exception as e:
             logger.warning(f"HYBRID BLOCK2: Pending creation failed (non-fatal): {e}")
 
+        # ORDER STATUS UPDATE: If all rolls of an order ended up in pending, mark it in_process
+        # so it no longer appears on the planning selection page (frontend hides in_process orders).
+        try:
+            from sqlalchemy import func as sa_func
+
+            # Collect every order_id that had rolls deferred to pending in this plan
+            affected_order_ids: set = set()
+            for orphan in orphaned_rolls:
+                if orphan.get('order_id') and not orphan.get('source_type') == 'pending_order':
+                    affected_order_ids.add(orphan['order_id'])
+            for spec in paper_specs:
+                for jumbo in spec.get('jumbos', []):
+                    for roll_set in jumbo.get('sets', []):
+                        if roll_set.get('is_selected', True):
+                            continue
+                        for cut in roll_set.get('cuts', []):
+                            if cut.get('order_id') and cut.get('source_type') != 'pending_order':
+                                affected_order_ids.add(cut['order_id'])
+            for p in pending_orders_data:
+                if p.get('source_order_id') and p.get('source_type') != 'pending_order':
+                    affected_order_ids.add(p['source_order_id'])
+
+            if affected_order_ids:
+                db.flush()  # Make newly created pending items visible to the subquery
+
+            for order_id_str in affected_order_ids:
+                try:
+                    oid = uuid.UUID(order_id_str)
+                    order = db.query(models.OrderMaster).options(
+                        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+                    ).filter(models.OrderMaster.id == oid).first()
+
+                    if not order or order.status != 'created':
+                        continue
+
+                    all_covered = True
+                    for item in order.order_items:
+                        if not item.paper:
+                            continue
+                        active_pending = db.query(
+                            sa_func.coalesce(sa_func.sum(models.PendingOrderItem.quantity_pending), 0)
+                        ).filter(
+                            models.PendingOrderItem.original_order_id == oid,
+                            models.PendingOrderItem.width_inches == item.width_inches,
+                            models.PendingOrderItem._status == 'pending'
+                        ).scalar()
+
+                        live_remaining = max(0, (item.quantity_rolls or 0) - (item.quantity_fulfilled or 0) - int(active_pending))
+                        if live_remaining > 0:
+                            all_covered = False
+                            break
+
+                    if all_covered:
+                        order.status = 'in_process'
+                        logger.info(f"🔄 ORDER STATUS: Order {str(oid)[:8]}... → in_process (all rolls deferred to pending)")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ ORDER STATUS: Failed for order {order_id_str[:8]}: {e}")
+
+        except Exception as e:
+            logger.warning(f"ORDER STATUS UPDATE: Failed (non-fatal): {e}")
+
         # WASTAGE ALLOCATIONS: Mark existing WastageInventory rolls as USED and update OrderItem
         try:
             for allocation in hybrid_data.get('wastage_allocations', []):
@@ -3163,6 +3225,68 @@ def create_gsm_wise_production(db: Session, hybrid_data: dict):
 
         except Exception as e:
             logger.warning(f"HYBRID BLOCK2: Pending creation failed (non-fatal): {e}")
+
+        # ORDER STATUS UPDATE: If all rolls of an order ended up in pending, mark it in_process
+        # so it no longer appears on the planning selection page (frontend hides in_process orders).
+        try:
+            from sqlalchemy import func as sa_func
+
+            # Collect every order_id that had rolls deferred to pending in this plan
+            affected_order_ids: set = set()
+            for orphan in orphaned_rolls:
+                if orphan.get('order_id') and not orphan.get('source_type') == 'pending_order':
+                    affected_order_ids.add(orphan['order_id'])
+            for spec in paper_specs:
+                for jumbo in spec.get('jumbos', []):
+                    for roll_set in jumbo.get('sets', []):
+                        if roll_set.get('is_selected', True):
+                            continue
+                        for cut in roll_set.get('cuts', []):
+                            if cut.get('order_id') and cut.get('source_type') != 'pending_order':
+                                affected_order_ids.add(cut['order_id'])
+            for p in pending_orders_data:
+                if p.get('source_order_id') and p.get('source_type') != 'pending_order':
+                    affected_order_ids.add(p['source_order_id'])
+
+            if affected_order_ids:
+                db.flush()  # Make newly created pending items visible to the subquery
+
+            for order_id_str in affected_order_ids:
+                try:
+                    oid = uuid.UUID(order_id_str)
+                    order = db.query(models.OrderMaster).options(
+                        joinedload(models.OrderMaster.order_items).joinedload(models.OrderItem.paper)
+                    ).filter(models.OrderMaster.id == oid).first()
+
+                    if not order or order.status != 'created':
+                        continue
+
+                    all_covered = True
+                    for item in order.order_items:
+                        if not item.paper:
+                            continue
+                        active_pending = db.query(
+                            sa_func.coalesce(sa_func.sum(models.PendingOrderItem.quantity_pending), 0)
+                        ).filter(
+                            models.PendingOrderItem.original_order_id == oid,
+                            models.PendingOrderItem.width_inches == item.width_inches,
+                            models.PendingOrderItem._status == 'pending'
+                        ).scalar()
+
+                        live_remaining = max(0, (item.quantity_rolls or 0) - (item.quantity_fulfilled or 0) - int(active_pending))
+                        if live_remaining > 0:
+                            all_covered = False
+                            break
+
+                    if all_covered:
+                        order.status = 'in_process'
+                        logger.info(f"🔄 ORDER STATUS: Order {str(oid)[:8]}... → in_process (all rolls deferred to pending)")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ ORDER STATUS: Failed for order {order_id_str[:8]}: {e}")
+
+        except Exception as e:
+            logger.warning(f"ORDER STATUS UPDATE: Failed (non-fatal): {e}")
 
         # WASTAGE ALLOCATIONS: Mark existing WastageInventory rolls as USED and update OrderItem
         try:
