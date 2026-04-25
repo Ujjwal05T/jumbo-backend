@@ -1819,6 +1819,187 @@ def update_dispatch_record(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# DELETE DISPATCH ENDPOINT
+# ============================================================================
+
+@router.delete("/dispatch/{dispatch_id}", tags=["Dispatch History"])
+def delete_dispatch_record(
+    dispatch_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Fully undo and delete a dispatch record.
+
+    Reverts all status changes made during dispatch creation:
+    - inventory_master: used/billed → available, location → warehouse
+    - wastage_inventory: used → available
+    - manual_cut_roll: used/billed → available, location → warehouse
+    - order_items: completed → in_warehouse, clears dispatched_at
+    - order_master: completed → in_process (if order items are no longer all complete)
+
+    If a payment slip exists for this dispatch it is also soft-deleted
+    and all billing-related status changes are reverted automatically.
+
+    Restrictions:
+    - Cannot delete dispatches with status 'delivered' or 'returned'
+    """
+    try:
+        dispatch_uuid = uuid.UUID(dispatch_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid dispatch ID format")
+
+    try:
+        dispatch = db.query(models.DispatchRecord).options(
+            joinedload(models.DispatchRecord.dispatch_items)
+        ).filter(models.DispatchRecord.id == dispatch_uuid).first()
+
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+        if dispatch.status in ["billed", "delivered", "returned"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete dispatch with status '{dispatch.status}'. Delete the bill first, then delete the dispatch."
+            )
+
+        dispatch_number = dispatch.dispatch_number
+
+        # ===== 1. UNDO BILLING IF A PAYMENT SLIP EXISTS =====
+        payment_slip = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid,
+            models.PaymentSlipMaster.is_deleted != True
+        ).first()
+
+        payment_slip_deleted = False
+        if payment_slip:
+            payment_slip.is_deleted = True
+            payment_slip_deleted = True
+            logger.info(f"Soft deleted payment slip {payment_slip.frontend_id} as part of dispatch delete")
+
+        # ===== 2. REVERT ALL ITEM STATUSES =====
+        inventory_reverted = 0
+        wastage_reverted = 0
+        manual_reverted = 0
+        order_items_reverted = 0
+        orders_reverted = 0
+
+        for dispatch_item in dispatch.dispatch_items:
+            if dispatch_item.inventory_id:
+                # Regular inventory item
+                inventory = db.query(models.InventoryMaster).filter(
+                    models.InventoryMaster.id == dispatch_item.inventory_id
+                ).first()
+
+                if inventory and inventory.status in ("used", "billed"):
+                    inventory.status = "available"
+                    inventory.location = "warehouse"
+                    inventory_reverted += 1
+                    logger.info(f"Reverted inventory {inventory.barcode_id} to available")
+
+                    # Revert matching order item (fuzzy match by paper + width, same as edit endpoint)
+                    if inventory.paper:
+                        matching_order_item = db.query(models.OrderItem).join(models.OrderMaster).filter(
+                            models.OrderItem.paper_id == inventory.paper_id,
+                            models.OrderItem.width_inches == float(inventory.width_inches),
+                            models.OrderItem.item_status == "completed"
+                        ).first()
+
+                        if matching_order_item:
+                            matching_order_item.item_status = "in_warehouse"
+                            matching_order_item.dispatched_at = None
+                            order_items_reverted += 1
+                            logger.info(f"Reverted order item {matching_order_item.frontend_id} to in_warehouse")
+
+                            # Revert order to in_process if it now has incomplete items
+                            order = db.query(models.OrderMaster).filter(
+                                models.OrderMaster.id == matching_order_item.order_id
+                            ).first()
+
+                            if order and order.status == "completed":
+                                has_incomplete = db.query(models.OrderItem).filter(
+                                    models.OrderItem.order_id == order.id,
+                                    models.OrderItem.item_status != "completed"
+                                ).count() > 0
+
+                                if has_incomplete:
+                                    order.status = "in_process"
+                                    orders_reverted += 1
+                                    logger.info(f"Reverted order {order.frontend_id} to in_process")
+
+            elif dispatch_item.barcode_id:
+                if dispatch_item.barcode_id.startswith("CR_"):
+                    # Manual cut roll
+                    manual_roll = db.query(models.ManualCutRoll).filter(
+                        models.ManualCutRoll.barcode_id == dispatch_item.barcode_id
+                    ).first()
+
+                    if manual_roll and manual_roll.status in ("used", "billed"):
+                        manual_roll.status = "available"
+                        manual_roll.location = "warehouse"
+                        manual_reverted += 1
+                        logger.info(f"Reverted manual cut roll {manual_roll.barcode_id} to available")
+
+                else:
+                    # Wastage item (identified by reel_no or barcode_id)
+                    wastage = db.query(models.WastageInventory).filter(
+                        or_(
+                            models.WastageInventory.barcode_id == dispatch_item.barcode_id,
+                            models.WastageInventory.reel_no == dispatch_item.barcode_id
+                        )
+                    ).first()
+
+                    if wastage and wastage.status == "used":
+                        wastage.status = "available"
+                        wastage_reverted += 1
+                        logger.info(f"Reverted wastage {dispatch_item.barcode_id} to available")
+
+        # ===== 3. DELETE DISPATCH ITEMS =====
+        db.query(models.DispatchItem).filter(
+            models.DispatchItem.dispatch_record_id == dispatch_uuid
+        ).delete()
+
+        # ===== 4. REMOVE PAYMENT SLIP ROWS TO CLEAR THE FK =====
+        # dispatch_record_id is NOT NULL so it can't be nulled out.
+        # Any payment slips here must already be soft-deleted (we block deletion
+        # of billed dispatches), so hard-deleting their items then the slip is safe.
+        linked_slips = db.query(models.PaymentSlipMaster).filter(
+            models.PaymentSlipMaster.dispatch_record_id == dispatch_uuid
+        ).all()
+        for slip in linked_slips:
+            db.query(models.PaymentSlipItem).filter(
+                models.PaymentSlipItem.payment_slip_id == slip.id
+            ).delete()
+            db.delete(slip)
+
+        # ===== 5. DELETE DISPATCH RECORD =====
+        db.delete(dispatch)
+
+        db.commit()
+
+        logger.info(f"Dispatch {dispatch_number} fully deleted. Reverted: {inventory_reverted} inventory, {wastage_reverted} wastage, {manual_reverted} manual, {order_items_reverted} order items, {orders_reverted} orders")
+
+        return {
+            "message": f"Dispatch {dispatch_number} deleted successfully",
+            "dispatch_number": dispatch_number,
+            "payment_slip_deleted": payment_slip_deleted,
+            "reverted": {
+                "inventory_items": inventory_reverted,
+                "wastage_items": wastage_reverted,
+                "manual_cut_rolls": manual_reverted,
+                "order_items": order_items_reverted,
+                "orders": orders_reverted
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting dispatch record {dispatch_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # PDF GENERATION ENDPOINTS
 # ============================================================================
 
